@@ -4,7 +4,7 @@
 #   export AWS_REGION=...
 set -Eeuo pipefail
 
-APP_DIR=/home/ubuntu/legends
+APP_DIR=/home/ec2-user/legends
 CONTAINER=legends
 HOST_PORT=8080          # a 80 do host e do Caddy
 PARAM_PATH=/legends/prod
