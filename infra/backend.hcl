@@ -1,8 +1,6 @@
-# <ACCOUNT> e o account id da conta AWS de destino, descoberto na Task 1
-# (ainda nao disponivel neste ambiente). Substitua antes de rodar
-# `terraform init -backend-config=backend.hcl` de verdade.
-bucket       = "legends-tfstate-<ACCOUNT>"
+# Account id e regiao da conta AWS de destino, descobertos na Task 1.
+bucket       = "legends-tfstate-559852958049"
 key          = "prod/terraform.tfstate"
-region       = "us-east-1"
+region       = "us-east-2"
 encrypt      = true
 use_lockfile = true
