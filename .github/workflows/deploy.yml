@@ -23,10 +23,10 @@ env:
 jobs:
   build:
     name: Build e push da imagem
-    # A arquitetura do runner acompanha a da instancia EC2, ainda desconhecida
-    # (depende de acesso a conta AWS de destino). Se a instancia for x86_64,
-    # trocar esta linha por `ubuntu-latest`. Confirmado na Task 1.
-    runs-on: ubuntu-24.04-arm
+    # A arquitetura do runner acompanha a da instancia EC2: x86_64, confirmado
+    # por `describe-instances` na Task 1 (era uma variavel em aberto e deixou
+    # de ser).
+    runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
