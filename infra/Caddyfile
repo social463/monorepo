@@ -14,3 +14,11 @@ belegends.app {
         max_size 11MB
     }
 }
+
+# LiveKit self-hosted, na mesma EC2 (porta 7880). Este e o host que
+# LIVEKIT_URL usa (wss://livekit.belegends.app, ver ssm-parameters.tf). O
+# WebSocket de sinalizacao passa nativamente, igual ao bloco acima: o Caddy
+# faz upgrade de protocolo por padrao, sem configuracao extra.
+livekit.belegends.app {
+    reverse_proxy localhost:7880
+}
