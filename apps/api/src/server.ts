@@ -18,5 +18,10 @@ app
   })
   .catch((err) => {
     app.log.error(err)
+    // Mesmo motivo do console.error em app.ts: com `logger: false`, o
+    // app.log acima é no-op e a causa morre aqui. Falha de boot sem
+    // mensagem nenhuma é indepurável em produção — o container sai com 1,
+    // `docker logs` volta vazio e não há o que investigar.
+    console.error('Falha ao subir a API:', err)
     process.exit(1)
   })
