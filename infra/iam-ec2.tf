@@ -42,10 +42,18 @@ resource "aws_iam_role_policy" "ec2" {
         Resource = aws_ecr_repository.legends.arn
       },
       {
-        Sid      = "ReadAppParameters"
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
-        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/legends/prod/*"
+        Sid    = "ReadAppParameters"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
+        # SAO DOIS ARNs, e nao um. GetParameter/GetParameters autorizam contra
+        # cada parametro (o `/*`), mas GetParametersByPath autoriza contra o
+        # PATH em si — `parameter/legends/prod`, sem barra nem asterisco. Com so
+        # o `/*`, o deploy.sh morre em
+        # "not authorized to perform: ssm:GetParametersByPath".
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/legends/prod",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/legends/prod/*",
+        ]
       },
       {
         # Sem isto o SecureString volta cifrado e o .env sai com lixo.
