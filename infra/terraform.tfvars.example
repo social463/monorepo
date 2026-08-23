@@ -1,0 +1,16 @@
+# Valores de exemplo, CLARAMENTE falsos. Os valores reais sao descobertos na
+# Task 1 (verificacao/discovery na conta AWS de destino) e devem ir para um
+# infra/terraform.tfvars local, NUNCA commitado.
+
+aws_region = "us-east-1"
+
+vpc_id              = "vpc-EXEMPLO"
+private_subnet_ids  = ["subnet-EXEMPLO1", "subnet-EXEMPLO2"]
+ec2_instance_id     = "i-EXEMPLO"
+app_domain          = "app.exemplo.com"
+
+github_repo   = "social463/monorepo"
+deploy_branch = "main"
+
+db_instance_class    = "db.t4g.micro"
+db_allocated_storage = 20
