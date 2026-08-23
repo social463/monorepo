@@ -1,0 +1,22 @@
+applause.mp3
+Fonte: BigSoundBank — "Applause #1" (https://bigsoundbank.com/applause-1-s2363.html)
+Licença: CC0 1.0 Universal (domínio público). Atribuição não exigida; registrada aqui por cortesia e rastreabilidade.
+Uso: som da comemoração coletiva do Escritório virtual (5+ pessoas segurando F).
+
+high-five.mp3
+Fonte: BigSoundBank — "Slaps" (https://bigsoundbank.com/sound-0597-slaps.html), por Joseph SARDIN
+Licença: CC0 1.0 Universal + WTFPL (domínio público). Atribuição não exigida; registrada aqui por cortesia e rastreabilidade.
+Edição: do original de 11s (série de tapas), recortado o primeiro impacto em 0,44s, mono 44.1kHz,
+  fade-out de 100ms no fim e loudnorm I=-16/TP=-1.5. Ferramenta: ffmpeg.
+Uso: som do high-five entre dois personagens no Escritório virtual.
+
+retro-sound.mp3
+Fonte: arquivo fornecido pelo time para a dinâmica de retrospectiva.
+Licença: PENDENTE — origem e licença da faixa ainda não confirmadas com quem forneceu o
+  arquivo. Diferente dos outros sons deste diretório, não há como afirmar que é CC0 ou de
+  uso livre. Confirmar antes de tratar a faixa como liberada para o produto; se a origem
+  não puder ser comprovada, trocar por uma faixa de licença conhecida.
+Edição: mono 64 kbps (era estéreo 128 kbps), duração integral de 935s preservada — corte de
+  14,3 MB para 7,1 MB, já que é som ambiente em volume baixo. Ferramenta: ffmpeg
+  (-ac 1 -b:a 64k -map_metadata -1).
+Uso: música ambiente em loop enquanto o cronômetro da retrospectiva está rodando.

@@ -1,0 +1,107 @@
+.frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 480px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #0e1424;
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
+  isolation: isolate;
+}
+
+.canvasHost {
+  position: absolute;
+  inset: 0;
+  min-width: 320px;
+  min-height: 240px;
+  touch-action: none;
+}
+
+.canvasHost canvas {
+  display: block;
+  outline: none;
+}
+
+.canvasHost canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px #8b7cf6;
+}
+
+.frame[data-tool="hand"] .canvasHost canvas {
+  cursor: grab;
+}
+
+.frame[data-tool="hand"] .canvasHost canvas:active {
+  cursor: grabbing;
+}
+
+.frame[data-tool="free-select"] .canvasHost canvas {
+  cursor: grab;
+}
+
+.frame[data-tool="free-select"] .canvasHost canvas:active {
+  cursor: grabbing;
+}
+
+.frame[data-tool="brush"] .canvasHost canvas,
+.frame[data-tool="eraser"] .canvasHost canvas,
+.frame[data-tool="fill"] .canvasHost canvas,
+.frame[data-tool="eyedropper"] .canvasHost canvas,
+.frame[data-tool="collision"] .canvasHost canvas,
+.frame[data-tool="spawn"] .canvasHost canvas,
+.frame[data-tool="private-zone"] .canvasHost canvas,
+.frame[data-tool="meeting-room"] .canvasHost canvas,
+.frame[data-tool="door"] .canvasHost canvas,
+.frame[data-tool="link"] .canvasHost canvas,
+.frame[data-tool="action-point"] .canvasHost canvas {
+  cursor: crosshair;
+}
+
+.status {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: #cbd5e1;
+  background:
+    radial-gradient(
+      circle at center,
+      rgba(103, 81, 214, 0.18),
+      transparent 45%
+    ),
+    #0e1424;
+  font-size: 0.875rem;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.error {
+  color: #fecaca;
+}
+
+.modeBadge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  padding: 7px 10px;
+  border: 1px solid rgba(196, 181, 253, 0.3);
+  border-radius: 999px;
+  color: #ede9fe;
+  background: rgba(30, 24, 58, 0.88);
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.28);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status {
+    background: #0e1424;
+  }
+}
+

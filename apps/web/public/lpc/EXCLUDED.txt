@@ -1,0 +1,47 @@
+# Definições/variantes upstream fora do vendoring (def<TAB>motivo)
+dress_bodice	licenca-invalida (edited to v3 bases and animation cleanup by bluecarrot16)
+facial_eyepatch_right	variante charcoal sem arquivo em facial/patches/eyepatch/right/adult
+facial_glasses_shades	variante base sem arquivo em facial/glasses/shades/adult
+hat_bicorne_foreaft_commodore_trim	variante base sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante steel sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante iron sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante ceramic sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante brass sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante copper sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante bronze sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante silver sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+hat_bicorne_foreaft_commodore_trim	variante gold sem arquivo em hat/pirate/bicorne/foreaft/commodore/adult
+heads_frankenstein	licenca-invalida (Stephen Challener (Redshrike), bluecarrot16)
+heads_vampire	licenca-invalida (vampire fangs by bluecarrot16)
+legs_skirt_belle	licenca-invalida (edited to v3 bases and animation cleanup by bluecarrot16)
+legs_skirt_overskirt	licenca-invalida (edited to v3 bases and animation cleanup by bluecarrot16)
+neck_bowtie	variante charcoal sem arquivo em neck/tie/bowtie/adult
+neck_necktie	variante charcoal sem arquivo em neck/tie/necktie/male
+shield_heater_paint	licenca-invalida (expanded by JaidynReiman)
+shield_heater_revised_paint	licenca-invalida (adjusted postioning by JaidynReiman)
+shield_two_engrailed_trim	variante two_engrailed_trim sem arquivo em shield/two_engrailed/trim/bg
+shield_two_engrailed_trim	sem-arquivos (nenhuma variante completa)
+tail_dragon	sem-creditos (placeholder upstream sem atribuição — nada é publicado sem crédito)
+tail_feather	sem-creditos (placeholder upstream sem atribuição — nada é publicado sem crédito)
+tail_fin	sem-creditos (placeholder upstream sem atribuição — nada é publicado sem crédito)
+tool_rod	sem-walk (todas as camadas são custom_animation)
+tool_whip	sem-walk (todas as camadas são custom_animation)
+torso_armour_leather	licenca-invalida (Michael Whitlock (bigbeargames), Matthew Krohn (makrohn), Johannes Sjölund (wulax))
+torso_armour_plate	licenca-invalida (color reduced to 7 colors and adapted to v3 bases by bluecarrot16)
+weapon_blunt_club	sem-walk (todas as camadas são custom_animation)
+weapon_polearm_dragonspear	sem-walk (todas as camadas são custom_animation)
+weapon_polearm_longspear	licenca-invalida (Pierre Vigier (pvigier), Johannes Sjölund (wulax), Inboxninja)
+weapon_polearm_spear	licenca-invalida (split into layers and tweaked for v3 character bases by bluecarrot16)
+weapon_polearm_trident	sem-walk (todas as camadas são custom_animation)
+weapon_ranged_boomerang	sem-walk (todas as camadas são custom_animation)
+weapon_ranged_bow_normal	licenca-invalida (split into layers and tweaked for v3 character bases by bluecarrot16. pvigier has agreed to license this sheet as OGA-BY 3.0+.)
+weapon_sword_katana	sem-walk (todas as camadas são custom_animation)
+weapon_sword_longsword_alt	sem-walk (todas as camadas são custom_animation)
+weapon_sword_scimitar	sem-walk (todas as camadas são custom_animation)
+wings_dragonfly	variante lunar sem arquivo em body/wings/dragonfly/solid/fg
+wings_dragonfly_transparent	variante lunar sem arquivo em body/wings/dragonfly/transparent/fg
+wings_monarch	variante lunar sem arquivo em body/wings/monarch/base/fg
+wings_monarch_dots	variante lunar sem arquivo em body/wings/monarch/dots/fg
+wings_monarch_edge	variante lunar sem arquivo em body/wings/monarch/edge/fg
+wings_pixie	variante lunar sem arquivo em body/wings/pixie/solid/fg
+wings_pixie_transparent	variante lunar sem arquivo em body/wings/pixie/transparent/fg

@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hml-legends-legends-svc
+  namespace: legends
+spec:
+  type: ClusterIP
+  selector:
+    app: hml-legends-legends
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: hml-legends-legends-vs
+  namespace: legends
+spec:
+  hosts:
+    - legends.eumedicoresidente.com.br
+  gateways:
+    - hml/gateway-hml-gw
+  http:
+    - route:
+        - destination:
+            host: hml-legends-legends-svc
+            port:
+              number: 80

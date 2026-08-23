@@ -1,0 +1,14 @@
+node_modules
+.pnpm-store
+.git
+.gitignore
+dist
+coverage
+.DS_Store
+*.log
+.env
+.env.*
+docker-compose.yml
+apps/*/node_modules
+apps/*/dist
+packages/*/node_modules

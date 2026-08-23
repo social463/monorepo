@@ -1,0 +1,3713 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  LEGEND
+  LEAD
+  MANAGER
+  HEAD
+  ADMIN
+  SUBADMIN
+  THIRD_PARTY
+  SUPER_ADMIN
+}
+
+enum VotingPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+enum HighlightStatus {
+  NONE
+  DRAFT
+  PUBLISHED
+}
+
+enum BadgeKind {
+  CATEGORY
+  RECURRENCE
+  IMPACT
+  HIGHLIGHT
+  FEEDBACK
+  TENURE
+  STREAK
+  /// Cursos concluídos na área de Aprendizado.
+  COURSE
+  /// Ações de PDI concluídas (aprovadas, quando o líder valida).
+  PDI
+}
+
+/// Ações instrumentadas que podem creditar EMR Coins. Cada valor corresponde a um
+/// ponto de chamada de `awardCoins` numa rota — evento novo exige código novo.
+enum CoinEvent {
+  VOTE_CAST
+  FEEDBACK_PUBLISHED
+  FEEDBACK_REACTION
+  MOOD_ANSWERED
+  CHALLENGE_APPROVED
+}
+
+/// Janela em que o teto de uma regra é contado (dia civil de America/Sao_Paulo).
+enum CoinCapWindow {
+  NONE
+  DAY
+  WEEK
+  MONTH
+}
+
+/// Espelha CoinEvent: os pontos instrumentados são os mesmos. Enum próprio (e
+/// não CoinEvent reaproveitado) para os catálogos poderem divergir sem que
+/// mexer num obrigue a mexer no outro.
+enum XpEvent {
+  VOTE_CAST
+  FEEDBACK_PUBLISHED
+  FEEDBACK_REACTION
+  MOOD_ANSWERED
+  CHALLENGE_APPROVED
+  CORPORATE_POST_REACTION
+  CORPORATE_POST_COMMENT
+  CORPORATE_POST_READ_FULL
+}
+
+enum CorporatePostStatus {
+  PENDING
+  PUBLISHED
+  REJECTED
+}
+
+enum CorporatePostAudience {
+  ALL
+  SECTORS
+}
+
+enum CorporatePostAttachmentKind {
+  IMAGE
+  VIDEO
+  DOCUMENT
+}
+
+enum XpCapWindow {
+  NONE
+  DAY
+  WEEK
+  MONTH
+}
+
+enum CoinTransactionKind {
+  EARN
+  MANUAL_CREDIT
+  MANUAL_DEBIT
+  /// Resgate na loja: amount negativo.
+  SPEND
+  /// Estorno de resgate cancelado: amount positivo.
+  REFUND
+}
+
+/// Ciclo de vida do pedido de resgate. As transições válidas vivem em
+/// STORE_ORDER_TRANSITIONS (@legends/shared) — o banco só guarda o estado.
+enum StoreOrderStatus {
+  PENDING
+  APPROVED
+  DELIVERED
+  CANCELLED
+}
+
+enum BadgeAwardSource {
+  AUTO
+  MANUAL
+}
+
+enum MoodLevel {
+  GREAT
+  GOOD
+  NEUTRAL
+  LOW
+  HARD
+}
+
+// Categoria opcional do mal-estar, escolhida junto com um humor negativo.
+// Registros anteriores a este campo ficam nulos ("Não informado") — sem backfill.
+enum MoodReason {
+  WORKLOAD
+  LEADERSHIP
+  PROCESSES
+  PERSONAL
+  OTHER
+  COMMUNICATION
+  TOOLS
+  /// Legado: saiu da lista oferecida, mas há respostas gravadas e o painel de
+  /// clima agrega por motivo — apagar do enum apagaria a série histórica.
+  RECOGNITION
+  /// Legado, mesmo motivo de RECOGNITION.
+  TEAM
+}
+
+// Área de atuação do colaborador. Usada para o manager ver o humor apenas
+// de quem faz parte da sua área (engenharia ou produto).
+enum Area {
+  ENGINEERING
+  PRODUCT
+}
+
+enum OfficeRoomStatus {
+  OPEN
+  LOCKED
+}
+
+enum OfficeRoomAccessPolicy {
+  OPEN
+  ALLOWLIST
+}
+
+enum CalendarProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+enum CalendarConnectionStatus {
+  ACTIVE
+  NEEDS_REAUTH
+  REVOKED
+}
+
+model User {
+  id                    String                @id @default(cuid())
+  email                 String                @unique
+  passwordHash          String
+  name                  String
+  position              String?
+  squad                 String?
+  photoUrl              String?
+  avatarStyle           String?
+  avatarSeed            String?
+  avatarOptions         Json?
+  officeCharacterName   String?
+  teamsWebhookUrl       String?
+  role                  UserRole              @default(LEGEND)
+  // Acesso administrativo delegado: abre o painel de admin com poder pleno, sem
+  // mexer na `role`. Ortogonal ao papel — a pessoa continua colaboradora no
+  // produto inteiro (vota, entra em squad, participa de retro). Ver
+  // `packages/shared/src/permissions.ts`.
+  adminAccess           Boolean               @default(false)
+  // Líder direto: é o que desenha o organograma. Pode cruzar setor de propósito
+  // (uma coordenadora de Operações pode responder à head de Gente e Gestão).
+  managerId             String?
+  sectorId              String                @default("sector-dev-produto")
+  companyId             String                @default("company-emr")
+  enabledFeatures       Json                  @default("[]")
+  area                  Area?
+  active                Boolean               @default(true)
+  leftAt                DateTime?
+  joinedAt              DateTime              @default(now())
+  // Data civil de nascimento (sem hora/fuso). Alimenta os "Aniversariantes do dia".
+  birthDate             DateTime?             @db.Date
+  // Quem enxerga a vitrine de desenvolvimento (ações de PDI concluídas) desta pessoa.
+  pdiShowcaseVisibility PdiShowcaseVisibility @default(TEAM)
+  // Último sinal de vida na plataforma. Alimenta a bolinha de presença do
+  // ranking; a janela do que conta como "on-line" é do código
+  // (`PRESENCE_ONLINE_WINDOW_MINUTES`), não do banco.
+  //
+  // Coluna crua, e não uma tabela de sessões: o dado é sempre o ÚLTIMO sinal,
+  // nunca o histórico — histórico de navegação já é `AccessLog`.
+  lastSeenAt            DateTime?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  sector                      Sector                     @relation(fields: [sectorId], references: [id])
+  company                     Company                    @relation(fields: [companyId], references: [id])
+  manager                     User?                      @relation("UserManager", fields: [managerId], references: [id], onDelete: SetNull)
+  reports                     User[]                     @relation("UserManager")
+  votesGiven                  Vote[]                     @relation("VotesGiven")
+  votesReceived               Vote[]                     @relation("VotesReceived")
+  badges                      UserBadge[]
+  badgesAwarded               UserBadge[]                @relation("BadgesAwarded")
+  periodsWon                  VotingPeriod[]             @relation("PeriodWinner")
+  refreshTokens               RefreshToken[]
+  monthlyHighlights           MonthlyHighlight[]         @relation("MonthlyHighlightPerson")
+  monthlyHighlightsCreated    MonthlyHighlight[]         @relation("MonthlyHighlightCreator")
+  feedbacksGiven              Feedback[]                 @relation("FeedbacksGiven")
+  feedbacksReceived           Feedback[]                 @relation("FeedbacksReceived")
+  feedbackRecipients          FeedbackRecipient[]
+  feedbackComments            FeedbackComment[]
+  feedbackReactions           FeedbackReaction[]
+  notifications               Notification[]             @relation("UserNotifications")
+  notificationsTriggered      Notification[]             @relation("NotificationActor")
+  officeDeskRemindersSent     OfficeDeskReminder[]       @relation("OfficeDeskReminderSender")
+  officeDeskRemindersReceived OfficeDeskReminder[]       @relation("OfficeDeskReminderRecipient")
+  developmentThursdayEvents   DevelopmentThursdayEvent[] @relation("DevelopmentThursdayPresenter")
+
+  retroRoomsCreated             RetroRoom[]                    @relation("RetroRoomsCreated")
+  retroRoomsArchived            RetroRoom[]                    @relation("RetroRoomsArchived")
+  retroTimerUpdates             RetroRoom[]                    @relation("RetroTimerUpdatedBy")
+  retroParticipations           RetroParticipant[]             @relation("RetroParticipations")
+  retroCards                    RetroCard[]                    @relation("RetroCards")
+  retroVotes                    RetroVote[]                    @relation("RetroVotes")
+  retroReactions                RetroReaction[]                @relation("RetroReactions")
+  auditedActions                RetroCard[]                    @relation("RetroActionsAudited")
+  editedRetroCards              RetroCard[]                    @relation("RetroCardsEdited")
+  retroEditsAuthored            RetroEdit[]                    @relation("RetroEditsAuthored")
+  squadMemberships              SquadMember[]                  @relation("SquadMemberships")
+  ledSquads                     Squad[]                        @relation("SquadLeader")
+  companyResponsibilities       CompanyResponsible[]
+  sectorsResponsibleFor         Sector[]                       @relation("SectorResponsible")
+  moodEntries                   MoodEntry[]
+  calendarConnections           CalendarConnection[]
+  reviews                       Review[]                       @relation("ReviewsAuthored")
+  campaignsCreated              Campaign[]                     @relation("CampaignsCreated")
+  campaignPostsAssigned         CampaignPost[]                 @relation("CampaignPostsResponsible")
+  reviewComments                ReviewComment[]                @relation("ReviewCommentsAuthored")
+  reviewReactions               ReviewReaction[]
+  reviewCommentReactions        ReviewCommentReaction[]
+  reviewShares                  ReviewShare[]
+  reviewMentions                ReviewMention[]
+  reviewCommentMentions         ReviewCommentMention[]
+  reviewPollVotes               ReviewPollVote[]
+  corporatePosts                CorporatePost[]                @relation("CorporatePostsAuthored")
+  corporatePostComments         CorporatePostComment[]         @relation("CorporatePostCommentsAuthored")
+  corporatePostReactions        CorporatePostReaction[]
+  corporatePostCommentReactions CorporatePostCommentReaction[]
+  corporatePostMentions         CorporatePostMention[]
+  corporatePostCommentMentions  CorporatePostCommentMention[]
+  corporatePostsPinned          CorporatePost[]                @relation("CorporatePostsPinned")
+  corporatePostsReviewed        CorporatePost[]                @relation("CorporatePostsReviewed")
+  corporatePostReads            CorporatePostRead[]            @relation("CorporatePostReads")
+  officeMapDraftsEdited         OfficeMapDraft[]               @relation("OfficeMapDraftEditor")
+  officeMapAssetsCreated        OfficeMapAsset[]               @relation("OfficeMapAssetCreator")
+  officeMapLocks                OfficeMapEditLock[]            @relation("OfficeMapLockOwner")
+  officeMapPublications         OfficeMapPublication[]         @relation("OfficeMapPublicationCreator")
+  officeMapDecorRevisions       OfficeMapDecorRevision[]       @relation("OfficeMapDecorRevisionCreator")
+  officeRoomGrants              OfficeRoomAccessGrant[]
+  officeDeskClaim               OfficeDeskClaim?
+  officeMeetingsOrganized       OfficeMeeting[]                @relation("OfficeMeetingOrganizer")
+  officeMeetingSeats            OfficeMeetingParticipant[]     @relation("OfficeMeetingParticipant")
+  characterFavorites            CharacterFavorite[]
+  officeGuestInvitesCreated     OfficeGuestInvite[]            @relation("OfficeGuestInviteCreator")
+  thirdPartyInvitesCreated      ThirdPartyInvite[]             @relation("ThirdPartyInvitesCreated")
+  adminAuditLogs                AdminAuditLog[]                @relation("AdminAuditActor")
+  culturePagesUpdated           CulturePage[]                  @relation("CulturePagesUpdated")
+  culturePersonalAssetsReceived CulturePersonalAsset[]         @relation("CulturePersonalAssetsReceived")
+  culturePersonalAssetsCreated  CulturePersonalAsset[]         @relation("CulturePersonalAssetsCreated")
+  coinTransactions              CoinTransaction[]              @relation("CoinTransactions")
+  coinAdjustmentsMade           CoinTransaction[]              @relation("CoinAdjustmentsMade")
+  xpTransactions                XpTransaction[]                @relation("XpTransactions")
+  vacations                     Vacation[]                     @relation("Vacations")
+  vacationsCreated              Vacation[]                     @relation("VacationsCreated")
+  accessLogs                    AccessLog[]                    @relation("AccessLogs")
+  analyticsEvents               AnalyticsEvent[]               @relation("AnalyticsEvents")
+  hrDashboards                  HrDashboard[]
+  knowledgeEntries              KnowledgeEntry[]               @relation("KnowledgeEntryAuthor")
+  assistantQueries              AssistantQuery[]               @relation("AssistantQueryAuthor")
+  assistantFeedbacks            AssistantFeedback[]            @relation("AssistantFeedbackAuthor")
+
+  courseEnrollments    CourseEnrollment[]  @relation("CourseEnrollments")
+  lessonProgress       LessonProgress[]    @relation("LessonProgress")
+  courseFavorites      CourseFavorite[]    @relation("CourseFavorites")
+  courseRatings        CourseRating[]      @relation("CourseRatings")
+  certificates         Certificate[]       @relation("Certificates")
+  pdiPlans             PdiPlan[]           @relation("PdiPlans")
+  pdiPlansLed          PdiPlan[]           @relation("PdiPlansLed")
+  pdiActionsReviewed   PdiAction[]         @relation("PdiActionsReviewed")
+  pdiEvidencesUploaded PdiActionEvidence[] @relation("PdiEvidencesUploaded")
+  pdiActionEvents      PdiActionHistory[]  @relation("PdiActionEvents")
+
+  quizAttempts                QuizAttempt[]        @relation("QuizAttempts")
+  certificateRequests         CertificateRequest[] @relation("CertificateRequestUser")
+  certificateRequestsReviewed CertificateRequest[] @relation("CertificateRequestReviewedBy")
+
+  benchmarkPracticesCreated    BenchmarkPractice[]   @relation("BenchmarkPracticesCreated")
+  glassReviewsCreated          GlassReview[]         @relation("GlassReviewsCreated")
+  agentConversations           AgentConversation[]   @relation("AgentConversations")
+  challengesCreated            Challenge[]           @relation("ChallengesCreated")
+  challengeSubmissions         ChallengeSubmission[] @relation("ChallengeSubmissions")
+  challengeSubmissionsReviewed ChallengeSubmission[] @relation("ChallengeSubmissionsReviewed")
+
+  storeProductsCreated StoreProduct[]       @relation("StoreProductsCreated")
+  storeOrders          StoreOrder[]         @relation("StoreOrders")
+  storeOrdersHandled   StoreOrder[]         @relation("StoreOrdersHandled")
+  eventAlbumsCreated   EventAlbum[]         @relation("EventAlbumsCreated")
+  eventPhotosUploaded  EventPhoto[]         @relation("EventPhotosUploaded")
+  eventPhotoReactions  EventPhotoReaction[] @relation("EventPhotoReactions")
+  eventPhotoComments   EventPhotoComment[]  @relation("EventPhotoComments")
+
+  calendarEventsCreated CalendarEvent[] @relation("CalendarEventsCreated")
+
+  oneOnOneAsUserA          OneOnOneSeries[]      @relation("OneOnOneUserA")
+  oneOnOneAsUserB          OneOnOneSeries[]      @relation("OneOnOneUserB")
+  oneOnOneCreated          OneOnOneSeries[]      @relation("OneOnOneCreated")
+  oneOnOneTopics           OneOnOneTopic[]       @relation("OneOnOneTopicsCreated")
+  oneOnOneNotes            OneOnOnePrivateNote[] @relation("OneOnOneNotes")
+  oneOnOneActionsOwned     OneOnOneAction[]      @relation("OneOnOneActionsOwned")
+  oneOnOneActionsCompleted OneOnOneAction[]      @relation("OneOnOneActionsCompleted")
+
+  @@index([companyId])
+  @@index([managerId])
+  // Presença: a consulta é sempre "quem desta empresa foi visto depois de X".
+  @@index([companyId, lastSeenAt])
+}
+
+model OfficeGuestInvite {
+  id          String    @id @default(cuid())
+  tokenHash   String    @unique
+  createdById String
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  companyId   String    @default("company-emr")
+
+  createdBy User    @relation("OfficeGuestInviteCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@index([createdById])
+  @@index([expiresAt])
+  @@index([companyId])
+}
+
+model ThirdPartyInvite {
+  id              String    @id @default(cuid())
+  tokenHash       String    @unique
+  createdById     String
+  createdBy       User      @relation("ThirdPartyInvitesCreated", fields: [createdById], references: [id])
+  enabledFeatures Json      @default("[]")
+  sectorId        String    @default("sector-dev-produto")
+  companyId       String    @default("company-emr")
+  expiresAt       DateTime
+  usedAt          DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  sector  Sector  @relation(fields: [sectorId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([sectorId])
+  @@index([companyId])
+}
+
+model CharacterFavorite {
+  id        String   @id @default(cuid())
+  userId    String
+  slot      Int
+  seed      String
+  options   Json
+  signature String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, slot])
+  @@index([userId])
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  familyId   String
+  persistent Boolean   @default(false)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+model AppSetting {
+  key       String
+  companyId String   @default("company-emr")
+  value     String?
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@id([key, companyId])
+}
+
+model DevelopmentThursdayEvent {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  sprintStart DateTime @db.Date
+  sprintEnd   DateTime @db.Date
+  eventDate   DateTime @db.Date
+  startTime   String?
+  endTime     String?
+  presenterId String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  companyId   String   @default("company-emr")
+
+  presenter User       @relation("DevelopmentThursdayPresenter", fields: [presenterId], references: [id])
+  feedbacks Feedback[]
+  company   Company    @relation(fields: [companyId], references: [id])
+
+  @@unique([sprintStart, companyId])
+  @@index([eventDate])
+  @@index([presenterId])
+  @@index([companyId])
+}
+
+model Squad {
+  id        String   @id @default(cuid())
+  /// Nome e slug são únicos **por empresa** — ver o comentário em `Badge.slug`.
+  name      String
+  slug      String
+  active    Boolean  @default(true)
+  leaderId  String?
+  sectorId  String   @default("sector-dev-produto")
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  leader  User?            @relation("SquadLeader", fields: [leaderId], references: [id], onDelete: SetNull)
+  sector  Sector           @relation(fields: [sectorId], references: [id])
+  company Company          @relation(fields: [companyId], references: [id])
+  members SquadMember[]
+  rooms   RetroRoomSquad[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, slug])
+  @@index([leaderId])
+  @@index([sectorId])
+  @@index([companyId])
+}
+
+model SquadMember {
+  id       String   @id @default(cuid())
+  squadId  String
+  userId   String
+  joinedAt DateTime @default(now())
+
+  squad Squad @relation(fields: [squadId], references: [id], onDelete: Cascade)
+  user  User  @relation("SquadMemberships", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([squadId, userId])
+  @@index([userId])
+}
+
+model Sector {
+  id              String   @id @default(cuid())
+  name            String
+  /// Único **por empresa** — ver o comentário em `Badge.slug`. Duas empresas
+  /// cadastrarem "Engenharia" é o caso normal, não colisão.
+  slug            String
+  active          Boolean  @default(true)
+  enabledFeatures Json     @default("[]")
+  companyId       String   @default("company-emr")
+  responsibleId   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company                Company                 @relation(fields: [companyId], references: [id])
+  responsible            User?                   @relation("SectorResponsible", fields: [responsibleId], references: [id], onDelete: SetNull)
+  users                  User[]
+  roles                  SectorRole[]
+  votingPeriods          VotingPeriod[]
+  squads                 Squad[]
+  badgeSectors           BadgeSector[]
+  thirdPartyInvites      ThirdPartyInvite[]
+  reviews                Review[]
+  reviewComments         ReviewComment[]
+  reviewReactions        ReviewReaction[]
+  monthlyHighlights      MonthlyHighlight[]
+  reviewCommentReactions ReviewCommentReaction[]
+  reviewShares           ReviewShare[]
+  reviewMentions         ReviewMention[]
+  corporatePostSectors   CorporatePostSector[]
+  reviewCommentMentions  ReviewCommentMention[]
+  reviewPolls            ReviewPoll[]
+  reviewPollOptions      ReviewPollOption[]
+  reviewPollVotes        ReviewPollVote[]
+  hrDashboards           HrDashboard[]
+  coursesScoped          Course[]                @relation("CourseSector")
+  knowledgeEntries       KnowledgeEntry[]
+  challenges             Challenge[]
+  calendarEvents         CalendarEventSector[]
+
+  @@unique([companyId, slug])
+  @@index([companyId])
+  @@index([responsibleId])
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sectors                       Sector[]
+  users                         User[]
+  responsibles                  CompanyResponsible[]
+  votingPeriods                 VotingPeriod[]
+  votes                         Vote[]
+  squads                        Squad[]
+  thirdPartyInvites             ThirdPartyInvite[]
+  badges                        Badge[]
+  feedbacks                     Feedback[]
+  feedbackReactions             FeedbackReaction[]
+  feedbackRecipients            FeedbackRecipient[]
+  feedbackComments              FeedbackComment[]
+  feedbackRecognitionCategories FeedbackRecognitionCategory[]
+  recognitionCategories         RecognitionCategory[]
+  monthlyHighlights             MonthlyHighlight[]
+  moodEntries                   MoodEntry[]
+  coinRules                     CoinRule[]
+  coinTransactions              CoinTransaction[]
+  xpRules                       XpRule[]
+  xpTransactions                XpTransaction[]
+  notifications                 Notification[]
+  calendarConnections           CalendarConnection[]
+  reviews                       Review[]
+  reviewComments                ReviewComment[]
+  reviewReactions               ReviewReaction[]
+  reviewCommentReactions        ReviewCommentReaction[]
+  reviewShares                  ReviewShare[]
+  reviewMentions                ReviewMention[]
+  reviewCommentMentions         ReviewCommentMention[]
+  reviewPolls                   ReviewPoll[]
+  reviewPollOptions             ReviewPollOption[]
+  reviewPollVotes               ReviewPollVote[]
+  corporatePosts                CorporatePost[]
+  corporatePostComments         CorporatePostComment[]
+  corporatePostReactions        CorporatePostReaction[]
+  corporatePostCommentReactions CorporatePostCommentReaction[]
+  corporatePostMentions         CorporatePostMention[]
+  corporatePostCommentMentions  CorporatePostCommentMention[]
+  corporatePostReads            CorporatePostRead[]
+  corporatePostSectors          CorporatePostSector[]
+  corporatePostAttachments      CorporatePostAttachment[]
+  userBadges                    UserBadge[]
+  retroRooms                    RetroRoom[]
+  retroRoomSquads               RetroRoomSquad[]
+  retroParticipants             RetroParticipant[]
+  retroCards                    RetroCard[]
+  retroVotes                    RetroVote[]
+  retroReactions                RetroReaction[]
+  retroEdits                    RetroEdit[]
+
+  officeSetting              OfficeSetting?
+  officeMaps                 OfficeMap[]
+  officeMapDrafts            OfficeMapDraft[]
+  officeMapAssets            OfficeMapAsset[]
+  officeMapEditLocks         OfficeMapEditLock[]
+  officeMapPublications      OfficeMapPublication[]
+  officeMapPublicationAssets OfficeMapPublicationAsset[]
+  officeMapDecorRevisions    OfficeMapDecorRevision[]
+  officeRooms                OfficeRoom[]
+  officeRoomAccessGrants     OfficeRoomAccessGrant[]
+  officeDesks                OfficeDesk[]
+  officeDeskClaims           OfficeDeskClaim[]
+  officeDeskReminders        OfficeDeskReminder[]
+  officeGuestInvites         OfficeGuestInvite[]
+  officeMeetings             OfficeMeeting[]
+  adminAuditLogs             AdminAuditLog[]
+  developmentThursdayEvents  DevelopmentThursdayEvent[]
+  appSettings                AppSetting[]
+
+  culturePages          CulturePage[]
+  cultureManuals        CultureManual[]
+  cultureBenefits       CultureBenefit[]
+  cultureVisualAssets   CultureVisualAsset[]
+  culturePersonalAssets CulturePersonalAsset[]
+  vacations             Vacation[]
+  accessLogs            AccessLog[]
+  analyticsEvents       AnalyticsEvent[]
+  hrDashboards          HrDashboard[]
+  knowledgeEntries      KnowledgeEntry[]
+  assistantQueries      AssistantQuery[]
+  assistantFeedbacks    AssistantFeedback[]
+
+  courses              Course[]
+  courseModules        CourseModule[]
+  courseLessons        CourseLesson[]
+  courseEnrollments    CourseEnrollment[]
+  lessonProgress       LessonProgress[]
+  courseFavorites      CourseFavorite[]
+  courseRatings        CourseRating[]
+  learningTracks       LearningTrack[]
+  learningTrackCourses LearningTrackCourse[]
+  certificates         Certificate[]
+  pdiPlans             PdiPlan[]
+  pdiActions           PdiAction[]
+  pdiActionEvidences   PdiActionEvidence[]
+  pdiActionHistory     PdiActionHistory[]
+
+  courseQuizzes        CourseQuiz[]
+  courseQuestions      CourseQuestion[]
+  quizAttempts         QuizAttempt[]
+  certificateTemplates CertificateTemplate[]
+  certificateRequests  CertificateRequest[]
+
+  benchmarkPractices   BenchmarkPractice[]
+  glassReviews         GlassReview[]
+  agentConversations   AgentConversation[]
+  agentMessages        AgentMessage[]
+  challenges           Challenge[]
+  challengeSubmissions ChallengeSubmission[]
+
+  storeProducts       StoreProduct[]
+  storeOrders         StoreOrder[]
+  campaigns           Campaign[]
+  campaignPosts       CampaignPost[]
+  eventAlbums         EventAlbum[]
+  eventPhotos         EventPhoto[]
+  eventPhotoReactions EventPhotoReaction[]
+  eventPhotoComments  EventPhotoComment[]
+
+  calendarEventTypes CalendarEventType[]
+  calendarEvents     CalendarEvent[]
+
+  oneOnOneSeries         OneOnOneSeries[]
+  oneOnOneMeetings       OneOnOneMeeting[]
+  oneOnOneTopics         OneOnOneTopic[]
+  oneOnOneNotes          OneOnOnePrivateNote[]
+  oneOnOneActions        OneOnOneAction[]
+  oneOnOneTopicTemplates OneOnOneTopicTemplate[]
+}
+
+model CompanyResponsible {
+  companyId String
+  userId    String
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, userId])
+  @@index([userId])
+}
+
+enum AdminAuditAction {
+  CREATE
+  UPDATE
+  DELETE
+}
+
+model AdminAuditLog {
+  id         String           @id @default(cuid())
+  actorId    String
+  entityType String
+  entityId   String
+  action     AdminAuditAction
+  before     Json?
+  after      Json?
+  createdAt  DateTime         @default(now())
+  companyId  String           @default("company-emr")
+
+  actor   User    @relation("AdminAuditActor", fields: [actorId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@index([companyId])
+}
+
+model SectorRole {
+  sectorId String
+  role     UserRole
+
+  sector Sector @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@id([sectorId, role])
+}
+
+model VotingPeriod {
+  id        String             @id @default(cuid())
+  monthRef  String // formato "2026-06"; único POR SETOR (ver @@unique abaixo)
+  sectorId  String             @default("sector-dev-produto")
+  companyId String             @default("company-emr")
+  startsAt  DateTime
+  endsAt    DateTime
+  status    VotingPeriodStatus @default(OPEN)
+  createdAt DateTime           @default(now())
+
+  winnerId           String?
+  winnerVotes        Int?
+  highlightMonthRef  String?
+  highlightText      String?
+  highlightImagePath String?
+  highlightStatus    HighlightStatus @default(NONE)
+
+  votes   Vote[]
+  winner  User?   @relation("PeriodWinner", fields: [winnerId], references: [id])
+  sector  Sector  @relation(fields: [sectorId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([sectorId, monthRef], name: "one_period_per_sector_month", map: "one_period_per_sector_month")
+  @@index([companyId])
+}
+
+/// Destaque do mês CURADO pela G&G — uma linha por (mês, pessoa).
+///
+/// Não é o Destaque do Mês da votação, que vive em `VotingPeriod` (winnerId,
+/// highlightText, card de IA) e continua existindo: lá o vencedor sai dos votos
+/// e é um por setor; aqui a escolha é editorial e o mês tem quantas pessoas a
+/// G&G quiser. Pendurar isto no período amarraria o reconhecimento ao ciclo da
+/// votação — janela, status e a unique de um vencedor por setor.
+model MonthlyHighlight {
+  id          String   @id @default(cuid())
+  /// "AAAA-MM", o mesmo formato do `monthRef` da votação.
+  monthRef    String
+  userId      String
+  /// SNAPSHOT do setor no cadastro: quem muda de setor em março não reescreve
+  /// o quadro de janeiro. Mesmo princípio do `sectorId` de `AnalyticsEvent`.
+  sectorId    String
+  /// Justificativa — o texto que hoje a G&G manda por fora. Opcional porque o
+  /// quadro costuma sair antes de a justificativa individual ficar pronta.
+  message     String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  companyId   String   @default("company-emr")
+
+  user      User    @relation("MonthlyHighlightPerson", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("MonthlyHighlightCreator", fields: [createdById], references: [id])
+  sector    Sector  @relation(fields: [sectorId], references: [id])
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, monthRef, userId])
+  @@index([companyId, monthRef])
+  @@index([userId])
+}
+
+model Vote {
+  id            String   @id @default(cuid())
+  voterId       String
+  votedId       String
+  periodId      String
+  companyId     String   @default("company-emr")
+  justification String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  voter      User           @relation("VotesGiven", fields: [voterId], references: [id])
+  voted      User           @relation("VotesReceived", fields: [votedId], references: [id])
+  period     VotingPeriod   @relation(fields: [periodId], references: [id])
+  company    Company        @relation(fields: [companyId], references: [id])
+  categories VoteCategory[]
+  feedback   Feedback?
+
+  @@unique([voterId, periodId], name: "one_vote_per_voter_period")
+  @@index([periodId])
+  @@index([votedId])
+  @@index([companyId])
+}
+
+model VoteCategory {
+  voteId     String
+  categoryId String
+
+  vote     Vote                @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  category RecognitionCategory @relation(fields: [categoryId], references: [id])
+
+  @@id([voteId, categoryId])
+  @@index([categoryId])
+}
+
+model Badge {
+  id           String    @id @default(cuid())
+  /// Único **por empresa**, não no banco inteiro: num produto white label o
+  /// selo "Inovador" da empresa A não pode impedir a empresa B de ter o dela —
+  /// e o `destaque-do-mes`, que o `publishHighlight` procura por slug, precisa
+  /// existir uma vez em cada empresa.
+  slug         String
+  name         String
+  description  String
+  kind         BadgeKind
+  iconKey      String
+  threshold    Int       @default(0)
+  categorySlug String?
+  global       Boolean   @default(true)
+  companyId    String    @default("company-emr")
+
+  company Company       @relation(fields: [companyId], references: [id])
+  awarded UserBadge[]
+  sectors BadgeSector[]
+
+  @@unique([companyId, slug])
+  @@index([companyId])
+}
+
+model BadgeSector {
+  badgeId  String
+  sectorId String
+
+  badge  Badge  @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  sector Sector @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@id([badgeId, sectorId])
+}
+
+model UserBadge {
+  id          String           @id @default(cuid())
+  userId      String
+  badgeId     String
+  periodId    String?
+  source      BadgeAwardSource @default(AUTO)
+  awardedById String?
+  awardedAt   DateTime         @default(now())
+  featured    Boolean          @default(false)
+  companyId   String           @default("company-emr")
+
+  user      User    @relation(fields: [userId], references: [id])
+  badge     Badge   @relation(fields: [badgeId], references: [id])
+  awardedBy User?   @relation("BadgesAwarded", fields: [awardedById], references: [id])
+  company   Company @relation(fields: [companyId], references: [id])
+
+  /// Índice é NULLS NOT DISTINCT (ver migration 20260612180000) — bloqueia concessão manual duplicada com periodId null.
+  @@unique([userId, badgeId, periodId])
+  @@index([userId])
+  @@index([companyId])
+}
+
+enum FeedbackCategory {
+  POSITIVO
+  ORIENTACAO
+  ELOGIO
+  MELHORIA
+}
+
+enum NotificationType {
+  FEEDBACK_RECEIVED
+  FEEDBACK_REACTION
+  BADGE_EARNED
+  HIGHLIGHT_PUBLISHED
+  DEVELOPMENT_THURSDAY_EVENT
+  PERIOD_OPENED
+  PERIOD_CLOSED
+  RETRO_INVITED
+  STREAK_AT_RISK
+  VOTE_REMINDER_MIDWAY
+  VOTE_REMINDER_CLOSING
+  REVIEW_COMMENT
+  REVIEW_COMMENT_REPLY
+  REVIEW_REACTION
+  REVIEW_SHARED
+  REVIEW_MENTION
+  REVIEW_POLL_PUBLISHED
+  MEETING_INVITED
+  MEETING_UPDATED
+  MEETING_CANCELED
+  MEETING_REMINDER
+  CORPORATE_POST_COMMENT
+  CORPORATE_POST_COMMENT_REPLY
+  CORPORATE_POST_REACTION
+  CORPORATE_POST_MENTION
+  CORPORATE_POST_PUBLISHED
+  CORPORATE_POST_AWAITING_REVIEW
+  CORPORATE_POST_APPROVED
+  CORPORATE_POST_REJECTED
+  OFFICE_DESK_REMINDER_RECEIVED
+  OFFICE_DESK_REMINDER_READ
+  PDI_ACTION_AWAITING_REVIEW
+  PDI_ACTION_APPROVED
+  PDI_ACTION_CHANGES_REQUESTED
+  MANDATORY_COURSE_ASSIGNED
+  CERTIFICATE_APPROVED
+  CHALLENGE_SUBMISSION_APPROVED
+  CHALLENGE_SUBMISSION_REJECTED
+  STORE_ORDER_APPROVED
+  STORE_ORDER_DELIVERED
+  STORE_ORDER_CANCELLED
+  CALENDAR_EVENT_REMINDER
+  ONE_ON_ONE_INVITED
+  ONE_ON_ONE_ACTION_ASSIGNED
+  ONE_ON_ONE_REMINDER
+  ONE_ON_ONE_RESPONDED
+  ONE_ON_ONE_PROPOSAL_ACCEPTED
+  ONE_ON_ONE_PROPOSAL_DECLINED
+}
+
+enum RetroRoomStatus {
+  OPEN
+  CONCLUDED
+}
+
+enum RetroTimerMode {
+  ELAPSED
+  COUNTDOWN
+}
+
+enum RetroTimerStatus {
+  IDLE
+  RUNNING
+  PAUSED
+}
+
+model Feedback {
+  id                         String           @id @default(cuid())
+  authorId                   String
+  targetId                   String
+  /// Voto que originou este feedback, quando ele nasceu da votação. Único: a
+  /// materialização roda a cada publicação de destaque e não pode duplicar.
+  voteId                     String?          @unique
+  message                    String
+  category                   FeedbackCategory
+  /// Competência escrita à mão, quando o catálogo da G&G não cobre o caso.
+  /// Vive fora do catálogo de propósito: é exceção, não item administrável.
+  customCategory             String?
+  developmentThursdayEventId String?
+  sharedAt                   DateTime?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
+  companyId                  String           @default("company-emr")
+
+  author                   User                          @relation("FeedbacksGiven", fields: [authorId], references: [id])
+  target                   User                          @relation("FeedbacksReceived", fields: [targetId], references: [id])
+  vote                     Vote?                         @relation(fields: [voteId], references: [id], onDelete: SetNull)
+  developmentThursdayEvent DevelopmentThursdayEvent?     @relation(fields: [developmentThursdayEventId], references: [id], onDelete: SetNull)
+  reactions                FeedbackReaction[]
+  recipients               FeedbackRecipient[]
+  recognitionCategories    FeedbackRecognitionCategory[]
+  comments                 FeedbackComment[]
+  company                  Company                       @relation(fields: [companyId], references: [id])
+
+  @@index([targetId])
+  @@index([authorId])
+  @@index([developmentThursdayEventId])
+  @@index([targetId, category])
+  @@index([sharedAt])
+  @@index([companyId])
+}
+
+/// Destinatários de um feedback. O reconhecimento grupal é UM feedback com N
+/// pessoas (e, portanto, UMA conversa de reações e comentários) — N feedbacks
+/// independentes dariam N conversas paralelas sobre o mesmo texto.
+///
+/// O destinatário principal (`Feedback.targetId`, que continua existindo para o
+/// perfil, a Quinta de Dev e os selos) entra AQUI TAMBÉM, de propósito: assim
+/// toda leitura de "quem recebeu" tem um caminho só.
+model FeedbackRecipient {
+  id         String   @id @default(cuid())
+  feedbackId String
+  userId     String
+  createdAt  DateTime @default(now())
+  companyId  String   @default("company-emr")
+
+  feedback Feedback @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id])
+  company  Company  @relation(fields: [companyId], references: [id])
+
+  @@unique([feedbackId, userId])
+  @@index([userId])
+  @@index([companyId])
+}
+
+/// Catálogo de competências administrado pela G&G (Administração ›
+/// Reconhecimento). As 13 do documento entram por seed, não cravadas no código:
+/// cada empresa ajusta a lista dela.
+/// Catálogo único de categorias da empresa: vale para o feedback e para o voto.
+/// Antes eram dois (este e `Category`, do voto) — ver
+/// `specs/2026-08-20-unificar-reconhecimento-em-feedback-design.md`.
+model RecognitionCategory {
+  id          String   @id @default(cuid())
+  name        String
+  /// Identificador estável: o nome a G&G renomeia, o slug não. É por ele que
+  /// `Badge.categorySlug` aponta e que o front escolhe o ícone.
+  slug        String
+  /// Texto de apoio no seletor de voto; herdado do catálogo aposentado.
+  description String?
+  /// Ordem de exibição no seletor; empate cai no nome.
+  order       Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  companyId   String   @default("company-emr")
+
+  company        Company                       @relation(fields: [companyId], references: [id])
+  feedbacks      FeedbackRecognitionCategory[]
+  voteCategories VoteCategory[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, slug])
+  @@index([companyId])
+}
+
+/// Competências de um feedback (N por feedback, escolhidas no envio).
+model FeedbackRecognitionCategory {
+  id         String @id @default(cuid())
+  feedbackId String
+  categoryId String
+  companyId  String @default("company-emr")
+
+  feedback Feedback            @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+  category RecognitionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  company  Company             @relation(fields: [companyId], references: [id])
+
+  @@unique([feedbackId, categoryId])
+  @@index([categoryId])
+  @@index([companyId])
+}
+
+/// Resposta pública a um feedback. Quem enxerga o feedback enxerga o
+/// comentário — a checagem é a mesma `canViewFeedback`, sem caminho paralelo de
+/// visibilidade para manter em dia.
+model FeedbackComment {
+  id         String   @id @default(cuid())
+  feedbackId String
+  authorId   String
+  message    String
+  createdAt  DateTime @default(now())
+  companyId  String   @default("company-emr")
+
+  feedback Feedback @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+  author   User     @relation(fields: [authorId], references: [id])
+  company  Company  @relation(fields: [companyId], references: [id])
+
+  @@index([feedbackId])
+  @@index([companyId])
+}
+
+model FeedbackReaction {
+  id         String   @id @default(cuid())
+  feedbackId String
+  userId     String
+  emoji      String
+  createdAt  DateTime @default(now())
+  companyId  String   @default("company-emr")
+
+  feedback Feedback @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id])
+  company  Company  @relation(fields: [companyId], references: [id])
+
+  @@unique([feedbackId, userId, emoji])
+  @@index([feedbackId])
+  @@index([companyId])
+}
+
+/// Um período de férias de um colaborador, lançado pelo gestor ou pelo admin.
+/// `@db.Date` porque férias são datas civis: sem hora, sem fuso — mesmo motivo
+/// de `User.birthDate`.
+model Vacation {
+  id          String   @id @default(cuid())
+  userId      String
+  startDate   DateTime @db.Date
+  endDate     DateTime @db.Date
+  note        String?
+  createdById String
+  companyId   String   @default("company-emr")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user      User    @relation("Vacations", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("VacationsCreated", fields: [createdById], references: [id])
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, startDate])
+  @@index([userId])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  actorId   String?
+  title     String
+  link      String?
+  metadata  Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+  companyId String           @default("company-emr")
+
+  user    User    @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+  actor   User?   @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+  @@index([companyId])
+}
+
+model RetroRoom {
+  id                      String           @id @default(cuid())
+  sprint                  Int
+  createdById             String
+  anonymous               Boolean          @default(false)
+  votesPerParticipant     Int
+  status                  RetroRoomStatus  @default(OPEN)
+  timerMode               RetroTimerMode   @default(ELAPSED)
+  timerStatus             RetroTimerStatus @default(IDLE)
+  timerDurationSeconds    Int?
+  timerStartedAt          DateTime?
+  timerAccumulatedSeconds Int              @default(0)
+  timerUpdatedAt          DateTime         @default(now())
+  timerUpdatedById        String?
+  createdAt               DateTime         @default(now())
+  concludedAt             DateTime?
+  archivedAt              DateTime?
+  archivedById            String?
+  companyId               String           @default("company-emr")
+
+  creator        User               @relation("RetroRoomsCreated", fields: [createdById], references: [id])
+  archivedBy     User?              @relation("RetroRoomsArchived", fields: [archivedById], references: [id], onDelete: SetNull)
+  timerUpdatedBy User?              @relation("RetroTimerUpdatedBy", fields: [timerUpdatedById], references: [id], onDelete: SetNull)
+  squads         RetroRoomSquad[]
+  participants   RetroParticipant[]
+  cards          RetroCard[]
+  edits          RetroEdit[]
+  company        Company            @relation(fields: [companyId], references: [id])
+
+  @@index([createdById])
+  @@index([timerUpdatedById])
+  @@index([companyId])
+}
+
+model RetroRoomSquad {
+  id        String @id @default(cuid())
+  roomId    String
+  squadId   String
+  companyId String @default("company-emr")
+
+  room    RetroRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  squad   Squad     @relation(fields: [squadId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@unique([roomId, squadId])
+  @@index([squadId])
+  @@index([companyId])
+}
+
+model RetroParticipant {
+  id        String   @id @default(cuid())
+  roomId    String
+  userId    String
+  invitedAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  room    RetroRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User      @relation("RetroParticipations", fields: [userId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@unique([roomId, userId])
+  @@index([userId])
+  @@index([companyId])
+}
+
+model RetroCard {
+  id                String    @id @default(cuid())
+  roomId            String
+  authorId          String
+  text              String
+  x                 Float
+  y                 Float
+  color             String
+  kind              String    @default("note")
+  shape             String?
+  shapeStyle        String?
+  width             Float?
+  height            Float?
+  actionPlan        String?
+  actionResponsible String?
+  actionDueDate     String?
+  actionCardId      String?
+  actionDone        Boolean   @default(false)
+  actionDoneAt      DateTime?
+  actionNote        String?
+  /// Ação concluída que o responsável tirou da lista do perfil. Só some da
+  /// vista dele: a auditoria da liderança continua enxergando o card.
+  actionArchivedAt  DateTime?
+  auditStatus       String?
+  auditedById       String?
+  auditedAt         DateTime?
+  editedById        String?
+  editedAt          DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  companyId         String    @default("company-emr")
+
+  room      RetroRoom       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  author    User            @relation("RetroCards", fields: [authorId], references: [id])
+  auditedBy User?           @relation("RetroActionsAudited", fields: [auditedById], references: [id])
+  editedBy  User?           @relation("RetroCardsEdited", fields: [editedById], references: [id])
+  votes     RetroVote[]
+  reactions RetroReaction[]
+  company   Company         @relation(fields: [companyId], references: [id])
+
+  @@index([roomId])
+  @@index([authorId])
+  @@index([actionResponsible])
+  @@index([companyId])
+}
+
+model RetroVote {
+  id        String   @id @default(cuid())
+  cardId    String
+  userId    String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  card    RetroCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  user    User      @relation("RetroVotes", fields: [userId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@index([cardId])
+  @@index([userId])
+  @@index([companyId])
+}
+
+model RetroReaction {
+  id        String @id @default(cuid())
+  cardId    String
+  userId    String
+  emoji     String
+  companyId String @default("company-emr")
+
+  card    RetroCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  user    User      @relation("RetroReactions", fields: [userId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@unique([cardId, userId, emoji])
+  @@index([cardId])
+  @@index([companyId])
+}
+
+model RetroEdit {
+  id        String   @id @default(cuid())
+  roomId    String
+  editorId  String
+  action    String
+  detail    String?
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  room    RetroRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  editor  User      @relation("RetroEditsAuthored", fields: [editorId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@index([roomId])
+  @@index([companyId])
+}
+
+model MoodEntry {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mood      MoodLevel
+  note      String? // nota opcional: "o que te faz sentir assim"
+  reason    MoodReason? // categoria do mal-estar; só preenchida em humor negativo
+  day       DateTime    @db.Date // data civil em America/Sao_Paulo
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  companyId String      @default("company-emr")
+  company   Company     @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, day])
+  @@index([userId, day])
+  @@index([companyId])
+  // Recortes do painel de clima: janela de dias dentro da empresa.
+  @@index([companyId, day])
+}
+
+/// Regra de premiação em EMR Coins por evento. O CATÁLOGO de eventos é do código
+/// (enum CoinEvent, instrumentado nas rotas); a REGRA é dado, com CRUD do admin.
+/// Sem condições: só evento + valor + teto por janela.
+model CoinRule {
+  id        String        @id @default(cuid())
+  event     CoinEvent
+  amount    Int
+  capWindow CoinCapWindow @default(NONE)
+  /// Teto de coins pagos por ESTA regra dentro da janela. null quando capWindow = NONE.
+  capAmount Int?
+  active    Boolean       @default(true)
+  companyId String        @default("company-emr")
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  company      Company           @relation(fields: [companyId], references: [id])
+  transactions CoinTransaction[]
+
+  @@unique([companyId, event])
+  @@index([companyId])
+}
+
+/// Livro-razão de EMR Coins. Append-only: saldo = SUM(amount), sem coluna materializada.
+model CoinTransaction {
+  id        String              @id @default(cuid())
+  userId    String
+  kind      CoinTransactionKind
+  /// Evento que gerou o crédito automático; null em ajuste manual. DENORMALIZADO de
+  /// propósito: o relatório continua correto depois que a regra é apagada.
+  event     CoinEvent?
+  /// Regra vigente no crédito; vira null se a regra for apagada (SetNull) — o
+  /// lançamento nunca some do extrato.
+  ruleId    String?
+  /// Positivo credita, negativo debita (MANUAL_DEBIT é sempre negativo).
+  amount    Int
+  /// Justificativa obrigatória do ajuste manual; null em crédito automático.
+  reason    String?
+  /// Admin autor do ajuste manual; null em crédito automático.
+  actorId   String?
+  /// Idempotência: `${event}:${referência da ação}` no automático, `MANUAL:<uuid>` no
+  /// manual. NUNCA null, e por isso a unique abaixo é a padrão (NULLS DISTINCT).
+  /// Não copiar o NULLS NOT DISTINCT de UserBadge: com dedupeKey nulo nos ajustes,
+  /// o segundo ajuste manual do mesmo usuário quebraria com P2002.
+  dedupeKey String
+  /// Dia civil em America/Sao_Paulo (mesmo formato de MoodEntry.day). Janela de teto e
+  /// filtro do relatório saem daqui, nunca de createdAt — a conta de fuso fica fora da query.
+  day       DateTime            @db.Date
+  createdAt DateTime            @default(now())
+  companyId String              @default("company-emr")
+
+  user    User      @relation("CoinTransactions", fields: [userId], references: [id], onDelete: Cascade)
+  actor   User?     @relation("CoinAdjustmentsMade", fields: [actorId], references: [id], onDelete: SetNull)
+  rule    CoinRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([userId, ruleId, day])
+  @@index([companyId])
+  @@index([ruleId])
+}
+
+/// Pontos (XP) — progressão do colaborador.
+///
+/// Vizinho de CoinRule/CoinTransaction e de propósito um domínio separado: coin
+/// é SALDO (a loja debita), XP é ACUMULADO e nunca é debitado. Nível derivado de
+/// saldo cairia quando a pessoa comprasse algo. Por isso não há `kind` aqui: só
+/// existe ganho, e nenhuma rota escreve valor negativo.
+model XpRule {
+  id        String      @id @default(cuid())
+  event     XpEvent
+  amount    Int
+  capWindow XpCapWindow @default(NONE)
+  /// Teto de XP pago por ESTA regra dentro da janela. null quando capWindow = NONE.
+  capAmount Int?
+  active    Boolean     @default(true)
+  companyId String      @default("company-emr")
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  company      Company         @relation(fields: [companyId], references: [id])
+  transactions XpTransaction[]
+
+  @@unique([companyId, event])
+  @@index([companyId])
+}
+
+model XpTransaction {
+  id        String   @id @default(cuid())
+  userId    String
+  /// Evento que gerou o crédito. DENORMALIZADO de propósito, como em
+  /// CoinTransaction: o extrato continua correto depois que a regra é apagada.
+  event     XpEvent
+  /// Regra vigente no crédito; vira null se a regra for apagada (SetNull).
+  ruleId    String?
+  /// Sempre positivo — ver o comentário do model.
+  amount    Int
+  /// Idempotência: `${event}:${referência da ação}`. NUNCA null, e por isso a
+  /// unique abaixo é a padrão (NULLS DISTINCT).
+  dedupeKey String
+  /// Dia civil em America/Sao_Paulo, como em CoinTransaction.day. A janela do
+  /// teto sai daqui, nunca de createdAt — a conta de fuso fica fora da query.
+  day       DateTime @db.Date
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  user    User    @relation("XpTransactions", fields: [userId], references: [id], onDelete: Cascade)
+  rule    XpRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([userId, ruleId, day])
+  @@index([companyId])
+  @@index([ruleId])
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  authorId    String
+  content     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  gifUrl      String?
+  gifWidth    Int?
+  gifHeight   Int?
+  imageUrl    String?
+  imageWidth  Int?
+  imageHeight Int?
+  companyId   String   @default("company-emr")
+  sectorId    String   @default("sector-dev-produto")
+
+  author    User             @relation("ReviewsAuthored", fields: [authorId], references: [id], onDelete: Cascade)
+  comments  ReviewComment[]
+  reactions ReviewReaction[]
+  shares    ReviewShare[]
+  mentions  ReviewMention[]
+  poll      ReviewPoll?
+  company   Company          @relation(fields: [companyId], references: [id])
+  sector    Sector           @relation(fields: [sectorId], references: [id])
+
+  @@index([createdAt])
+  @@index([authorId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewComment {
+  id          String   @id @default(cuid())
+  reviewId    String
+  authorId    String
+  content     String
+  createdAt   DateTime @default(now())
+  gifUrl      String?
+  gifWidth    Int?
+  gifHeight   Int?
+  imageUrl    String?
+  imageWidth  Int?
+  imageHeight Int?
+  companyId   String   @default("company-emr")
+  sectorId    String   @default("sector-dev-produto")
+
+  review    Review                  @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  author    User                    @relation("ReviewCommentsAuthored", fields: [authorId], references: [id], onDelete: Cascade)
+  reactions ReviewCommentReaction[]
+  mentions  ReviewCommentMention[]
+  company   Company                 @relation(fields: [companyId], references: [id])
+  sector    Sector                  @relation(fields: [sectorId], references: [id])
+
+  @@index([reviewId, createdAt])
+  @@index([authorId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewReaction {
+  id        String   @id @default(cuid())
+  reviewId  String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  review  Review  @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+  sector  Sector  @relation(fields: [sectorId], references: [id])
+
+  @@unique([reviewId, userId, emoji])
+  @@index([reviewId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewCommentReaction {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  comment ReviewComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+  sector  Sector        @relation(fields: [sectorId], references: [id])
+
+  @@unique([commentId, userId, emoji])
+  @@index([commentId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewShare {
+  id        String   @id @default(cuid())
+  reviewId  String
+  userId    String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  review  Review  @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+  sector  Sector  @relation(fields: [sectorId], references: [id])
+
+  @@unique([reviewId, userId])
+  @@index([reviewId])
+  @@index([createdAt])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewMention {
+  id        String   @id @default(cuid())
+  reviewId  String
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  review  Review  @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+  sector  Sector  @relation(fields: [sectorId], references: [id])
+
+  @@unique([reviewId, userId])
+  @@index([reviewId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewCommentMention {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  comment ReviewComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+  sector  Sector        @relation(fields: [sectorId], references: [id])
+
+  @@unique([commentId, userId])
+  @@index([commentId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewPoll {
+  id        String   @id @default(cuid())
+  reviewId  String   @unique
+  question  String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  review  Review             @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  options ReviewPollOption[]
+  votes   ReviewPollVote[]
+  company Company            @relation(fields: [companyId], references: [id])
+  sector  Sector             @relation(fields: [sectorId], references: [id])
+
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewPollOption {
+  id        String @id @default(cuid())
+  pollId    String
+  text      String
+  position  Int
+  companyId String @default("company-emr")
+  sectorId  String @default("sector-dev-produto")
+
+  poll    ReviewPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes   ReviewPollVote[]
+  company Company          @relation(fields: [companyId], references: [id])
+  sector  Sector           @relation(fields: [sectorId], references: [id])
+
+  @@unique([pollId, position])
+  @@index([pollId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+model ReviewPollVote {
+  id        String   @id @default(cuid())
+  pollId    String
+  optionId  String
+  userId    String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+  sectorId  String   @default("sector-dev-produto")
+
+  poll    ReviewPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  option  ReviewPollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company          @relation(fields: [companyId], references: [id])
+  sector  Sector           @relation(fields: [sectorId], references: [id])
+
+  @@unique([pollId, userId])
+  @@index([pollId])
+  @@index([optionId])
+  @@index([userId])
+  @@index([companyId])
+  @@index([sectorId])
+}
+
+// Mural corporativo: mesmo formato da resenha, porém da EMPRESA inteira —
+// sem `sectorId`, de propósito: o isolamento aqui é só de empresa (companyId).
+// Quem publica é filtrado por papel no service (lideranças + administração).
+model CorporatePost {
+  id          String    @id @default(cuid())
+  authorId    String
+  /// Título opcional. A web dá o destaque (negrito, corpo maior) — o autor não
+  /// formata na mão, senão cada comunicado sairia com um destaque diferente.
+  title       String?
+  /// Texto PURO do comunicado. Continua sendo a fonte de compatibilidade:
+  /// post antigo, publicação de campanha, excerto do alcance, prévia da Home e
+  /// notificação leem daqui, sem saber que existe texto rico.
+  content     String
+  /// Documento rico (ver `packages/shared/src/rich-text.ts`). Null nos posts
+  /// que já existiam, que são texto puro. NUNCA guarda HTML — o formato é a
+  /// estrutura fechada validada pelo Zod da rota.
+  contentJson Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  /// Última edição DO TEXTO — é isto que vira a marca "editado" no card.
+  /// Não dá para usar `updatedAt`: ele muda ao fixar, ao aprovar e a qualquer
+  /// UPDATE, e marcaria como editado um post em que ninguém tocou.
+  editedAt    DateTime?
+  gifUrl      String?
+  gifWidth    Int?
+  gifHeight   Int?
+  imageUrl    String?
+  imageWidth  Int?
+  imageHeight Int?
+  companyId   String    @default("company-emr")
+  pinnedAt    DateTime?
+  pinnedById  String?
+
+  /// PUBLISHED por default de propósito: as linhas que já existem foram todas
+  /// escritas por quem publica direto, e a coluna nasce sem backfill.
+  status          CorporatePostStatus   @default(PUBLISHED)
+  reviewedAt      DateTime?
+  reviewedById    String?
+  rejectionReason String?
+  audienceScope   CorporatePostAudience @default(ALL)
+
+  author       User                      @relation("CorporatePostsAuthored", fields: [authorId], references: [id], onDelete: Cascade)
+  comments     CorporatePostComment[]
+  reactions    CorporatePostReaction[]
+  mentions     CorporatePostMention[]
+  company      Company                   @relation(fields: [companyId], references: [id])
+  pinnedBy     User?                     @relation("CorporatePostsPinned", fields: [pinnedById], references: [id], onDelete: SetNull)
+  reviewedBy   User?                     @relation("CorporatePostsReviewed", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reads        CorporatePostRead[]
+  sectors      CorporatePostSector[]
+  attachments  CorporatePostAttachment[]
+  campaignPost CampaignPost?
+
+  @@index([createdAt])
+  @@index([authorId])
+  @@index([companyId])
+  @@index([companyId, pinnedAt])
+  @@index([companyId, status, createdAt])
+}
+
+/// Público-alvo do post quando `audienceScope` é SECTORS. Vazio com escopo ALL.
+model CorporatePostSector {
+  id        String @id @default(cuid())
+  postId    String
+  sectorId  String
+  companyId String @default("company-emr")
+
+  post    CorporatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  sector  Sector        @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@unique([postId, sectorId])
+  @@index([companyId, sectorId])
+}
+
+/// Anexos do post: foto, vídeo e documento. Tabela à parte porque são vários
+/// por post; `gifUrl`/`imageUrl` do post continuam existindo para não exigir
+/// backfill das linhas antigas (o DTO devolve a imagem legada nesta mesma lista).
+model CorporatePostAttachment {
+  id          String                      @id @default(cuid())
+  postId      String
+  kind        CorporatePostAttachmentKind
+  url         String
+  name        String
+  contentType String
+  size        Int
+  width       Int?
+  height      Int?
+  createdAt   DateTime                    @default(now())
+  companyId   String                      @default("company-emr")
+
+  post    CorporatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@index([postId])
+  @@index([companyId])
+}
+
+model CorporatePostRead {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  companyId String   @default("company-emr")
+  readAt    DateTime @default(now())
+
+  post    CorporatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user    User          @relation("CorporatePostReads", fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@unique([postId, userId])
+  @@index([companyId, postId])
+}
+
+model CorporatePostComment {
+  id          String   @id @default(cuid())
+  postId      String
+  authorId    String
+  content     String
+  createdAt   DateTime @default(now())
+  gifUrl      String?
+  gifWidth    Int?
+  gifHeight   Int?
+  imageUrl    String?
+  imageWidth  Int?
+  imageHeight Int?
+  companyId   String   @default("company-emr")
+
+  post      CorporatePost                  @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author    User                           @relation("CorporatePostCommentsAuthored", fields: [authorId], references: [id], onDelete: Cascade)
+  reactions CorporatePostCommentReaction[]
+  mentions  CorporatePostCommentMention[]
+  company   Company                        @relation(fields: [companyId], references: [id])
+
+  @@index([postId, createdAt])
+  @@index([authorId])
+  @@index([companyId])
+}
+
+model CorporatePostReaction {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  post    CorporatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@unique([postId, userId, emoji])
+  @@index([postId])
+  @@index([companyId])
+}
+
+model CorporatePostCommentReaction {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  comment CorporatePostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company              @relation(fields: [companyId], references: [id])
+
+  @@unique([commentId, userId, emoji])
+  @@index([commentId])
+  @@index([companyId])
+}
+
+model CorporatePostMention {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  post    CorporatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([companyId])
+}
+
+model CorporatePostCommentMention {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  name      String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  comment CorporatePostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company              @relation(fields: [companyId], references: [id])
+
+  @@unique([commentId, userId])
+  @@index([commentId])
+  @@index([companyId])
+}
+
+// Configurações globais do escritório virtual (linha única, id = 1).
+// broadcastEnabled é o interruptor de CUSTO do alto-falante: desligado,
+// nenhum cliente abre a conexão LiveKit extra de broadcast.
+model OfficeSetting {
+  companyId              String   @id
+  broadcastEnabled       Boolean  @default(false)
+  activeMapPublicationId String?  @unique
+  updatedAt              DateTime @updatedAt
+
+  company              Company               @relation(fields: [companyId], references: [id])
+  activeMapPublication OfficeMapPublication? @relation("ActiveOfficeMapPublication", fields: [activeMapPublicationId], references: [id], onDelete: SetNull)
+}
+
+model OfficeMap {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  companyId String   @default("company-emr")
+
+  company      Company                @relation(fields: [companyId], references: [id])
+  draft        OfficeMapDraft?
+  assets       OfficeMapAsset[]
+  editLock     OfficeMapEditLock?
+  publications OfficeMapPublication[]
+
+  @@index([companyId])
+}
+
+model OfficeMapDraft {
+  id             String   @id @default(cuid())
+  mapId          String   @unique
+  document       Json
+  revision       Int      @default(0)
+  lastEditedById String?
+  savedAt        DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  companyId      String   @default("company-emr")
+
+  // Âncora do merge 3-vias com o mapa vivo: de qual publicação/`decorRevision`
+  // este rascunho foi semeado. Sem relação declarada de propósito — a
+  // publicação pode ser podada, e aí a âncora simplesmente vira desconhecida
+  // (merge aditivo) em vez de virar erro de FK.
+  basePublicationId String?
+  baseDecorRevision Int?
+
+  map          OfficeMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  lastEditedBy User?     @relation("OfficeMapDraftEditor", fields: [lastEditedById], references: [id], onDelete: SetNull)
+  company      Company   @relation(fields: [companyId], references: [id])
+
+  @@index([lastEditedById])
+  @@index([companyId])
+}
+
+model OfficeMapAsset {
+  id          String   @id @default(cuid())
+  mapId       String
+  fileName    String
+  mimeType    String
+  sizeBytes   Int
+  width       Int
+  height      Int
+  checksum    String
+  storageKey  String   @unique
+  createdById String?
+  createdAt   DateTime @default(now())
+  companyId   String   @default("company-emr")
+
+  map              OfficeMap                   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  createdBy        User?                       @relation("OfficeMapAssetCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  publicationLinks OfficeMapPublicationAsset[]
+  company          Company                     @relation(fields: [companyId], references: [id])
+
+  @@unique([mapId, checksum])
+  @@index([mapId])
+  @@index([createdById])
+  @@index([companyId])
+}
+
+model OfficeMapEditLock {
+  id        String   @id @default(cuid())
+  mapId     String   @unique
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  companyId String   @default("company-emr")
+
+  map     OfficeMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  user    User      @relation("OfficeMapLockOwner", fields: [userId], references: [id], onDelete: Cascade)
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([companyId])
+}
+
+// `version` identifica a publicação e só avança em publish estrutural.
+// `decorRevision` conta os saves de decoração aplicados IN-PLACE sobre esta
+// mesma publicação — é o token de concorrência otimista do editor colaborativo,
+// no lugar que `version` ocupava antes de a decoração parar de publicar.
+model OfficeMapPublication {
+  id            String   @id @default(cuid())
+  mapId         String
+  createdById   String?
+  version       Int
+  decorRevision Int      @default(0)
+  schemaVersion String
+  mapData       Json
+  createdAt     DateTime @default(now())
+  companyId     String   @default("company-emr")
+
+  map            OfficeMap                   @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  createdBy      User?                       @relation("OfficeMapPublicationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  assetLinks     OfficeMapPublicationAsset[]
+  rooms          OfficeRoom[]
+  desks          OfficeDesk[]
+  decorRevisions OfficeMapDecorRevision[]
+  activeSetting  OfficeSetting?              @relation("ActiveOfficeMapPublication")
+  company        Company                     @relation(fields: [companyId], references: [id])
+
+  @@unique([mapId, version])
+  @@index([createdById])
+  @@index([companyId])
+}
+
+// Anel de snapshots do `mapData` de uma publicação. Cada linha guarda o
+// documento que esteve ativo ENQUANTO a publicação tinha aquele
+// `decorRevision`, e é escrita no momento em que um save de decoração o
+// substitui. Serve de base para o merge de 3 vias (o editor abriu o documento
+// da revisão X e pode salvar depois de outra pessoa) e de histórico curto da
+// decoração. Mantido em OFFICE_DECOR_REVISION_RING linhas por publicação.
+model OfficeMapDecorRevision {
+  id            String   @id @default(cuid())
+  publicationId String
+  revision      Int
+  mapData       Json
+  createdById   String?
+  createdAt     DateTime @default(now())
+  companyId     String   @default("company-emr")
+
+  publication OfficeMapPublication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  createdBy   User?                @relation("OfficeMapDecorRevisionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  company     Company              @relation(fields: [companyId], references: [id])
+
+  @@unique([publicationId, revision])
+  @@index([publicationId])
+  @@index([createdById])
+  @@index([companyId])
+}
+
+model OfficeMapPublicationAsset {
+  publicationId String
+  assetId       String
+  createdAt     DateTime @default(now())
+  companyId     String   @default("company-emr")
+
+  publication OfficeMapPublication @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  asset       OfficeMapAsset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  company     Company              @relation(fields: [companyId], references: [id])
+
+  @@id([publicationId, assetId])
+  @@index([assetId])
+  @@index([companyId])
+}
+
+model OfficeRoom {
+  id               String                 @id @default(cuid())
+  mapPublicationId String
+  name             String
+  externalKey      String
+  status           OfficeRoomStatus       @default(OPEN)
+  capacity         Int?
+  voiceEnabled     Boolean                @default(true)
+  accessPolicy     OfficeRoomAccessPolicy @default(OPEN)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  companyId        String                 @default("company-emr")
+
+  mapPublication OfficeMapPublication    @relation(fields: [mapPublicationId], references: [id], onDelete: Cascade)
+  accessGrants   OfficeRoomAccessGrant[]
+  company        Company                 @relation(fields: [companyId], references: [id])
+
+  @@unique([mapPublicationId, externalKey])
+  @@index([mapPublicationId])
+  @@index([companyId])
+}
+
+model OfficeRoomAccessGrant {
+  roomId    String
+  userId    String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  room    OfficeRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@id([roomId, userId])
+  @@index([userId])
+  @@index([companyId])
+}
+
+model OfficeDesk {
+  id               String   @id @default(cuid())
+  mapPublicationId String
+  name             String
+  externalKey      String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  companyId        String   @default("company-emr")
+
+  mapPublication OfficeMapPublication @relation(fields: [mapPublicationId], references: [id], onDelete: Cascade)
+  claim          OfficeDeskClaim?
+  reminders      OfficeDeskReminder[]
+  company        Company              @relation(fields: [companyId], references: [id])
+
+  @@unique([mapPublicationId, externalKey])
+  @@index([mapPublicationId])
+  @@index([companyId])
+}
+
+model OfficeDeskClaim {
+  deskId    String   @id
+  userId    String   @unique
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  desk    OfficeDesk @relation(fields: [deskId], references: [id], onDelete: Cascade)
+  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+}
+
+model CalendarConnection {
+  id                   String                   @id @default(cuid())
+  userId               String
+  companyId            String
+  provider             CalendarProvider
+  providerAccountEmail String
+  /// Cifrado por lib/crypto.ts — nunca sai da API.
+  accessTokenEnc       String
+  accessTokenExpiresAt DateTime
+  /// Cifrado por lib/crypto.ts — nunca sai da API.
+  refreshTokenEnc      String
+  scopes               String
+  status               CalendarConnectionStatus @default(ACTIVE)
+  /// Fase 3: opt-out de publicar eventos do Legends nesta agenda.
+  publishEnabled       Boolean                  @default(true)
+  /// Fase 2: syncToken (Google) / deltaLink (Graph).
+  syncCursor           String?
+  lastSyncAt           DateTime?
+  lastSyncError        String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, provider])
+  @@index([companyId])
+  @@index([status])
+}
+
+model OfficeDeskReminder {
+  id          String    @id @default(cuid())
+  deskId      String
+  senderId    String
+  recipientId String
+  message     String
+  giftX       Float     @default(0.5)
+  giftY       Float     @default(0.35)
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+  companyId   String    @default("company-emr")
+
+  desk      OfficeDesk @relation(fields: [deskId], references: [id], onDelete: Cascade)
+  sender    User       @relation("OfficeDeskReminderSender", fields: [senderId], references: [id])
+  recipient User       @relation("OfficeDeskReminderRecipient", fields: [recipientId], references: [id])
+  company   Company    @relation(fields: [companyId], references: [id])
+
+  @@index([deskId, readAt])
+  @@index([recipientId, readAt])
+  @@index([senderId])
+  @@index([companyId])
+}
+
+model OfficeMeeting {
+  id              String    @id @default(cuid())
+  companyId       String    @default("company-emr")
+  roomExternalKey String
+  roomName        String
+  title           String
+  agenda          String?
+  startsAt        DateTime
+  endsAt          DateTime
+  organizerId     String
+  canceledAt      DateTime?
+  // Outlook/Google só atualizam um evento já importado se o SEQUENCE subir.
+  sequence        Int       @default(0)
+  remindedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  organizer    User                       @relation("OfficeMeetingOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  company      Company                    @relation(fields: [companyId], references: [id])
+  participants OfficeMeetingParticipant[]
+
+  @@index([companyId, roomExternalKey, startsAt])
+  @@index([organizerId])
+  @@index([startsAt])
+}
+
+model OfficeMeetingParticipant {
+  meetingId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  meeting OfficeMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User          @relation("OfficeMeetingParticipant", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([meetingId, userId])
+  @@index([userId])
+}
+
+/// Página de conteúdo institucional da área de Cultura (hoje só o manifesto).
+/// Genérica de propósito: kit visual e galeria entram como novos slugs.
+model CulturePage {
+  id          String   @id @default(cuid())
+  slug        String
+  title       String
+  subtitle    String?
+  /// Corpo em Markdown — renderizado no front sem passar por HTML.
+  body        String   @db.Text
+  published   Boolean  @default(false)
+  updatedById String?
+  companyId   String   @default("company-emr")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  updatedBy User?   @relation("CulturePagesUpdated", fields: [updatedById], references: [id], onDelete: SetNull)
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@unique([slug, companyId])
+  @@index([companyId])
+}
+
+/// Manual interno (código de ética, política de bonificação…). O PDF fica no S3
+/// e é referenciado pela CHAVE do objeto — nunca por URL pública, porque o
+/// download precisa passar pela rota autenticada.
+model CultureManual {
+  id             String   @id @default(cuid())
+  title          String
+  description    String
+  body           String?  @db.Text
+  fileKey        String?
+  fileName       String?
+  fileSize       Int?
+  /// Texto livre exibido no card, ex.: "Atualizado em junho/2024".
+  referenceLabel String?
+  order          Int      @default(0)
+  published      Boolean  @default(true)
+  companyId      String   @default("company-emr")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, order])
+}
+
+/// Benefício ou canal de apoio exibido em card, com detalhe em modal.
+model CultureBenefit {
+  id        String   @id @default(cuid())
+  title     String
+  summary   String
+  /// Nome do Material Symbol exibido no card.
+  icon      String?
+  body      String   @db.Text
+  order     Int      @default(0)
+  published Boolean  @default(true)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, order])
+}
+
+/// Como a imagem preenche o card do kit visual. CONTAIN existe para logo e selo,
+/// que recortados perdem a forma; COVER para arte que sangra (banner, fundo).
+enum CultureVisualAssetFit {
+  COVER
+  CONTAIN
+}
+
+/// Peça do kit de identidade visual (banner de LinkedIn, logotipo, fundo de
+/// reunião). Diferente de CultureManual, a imagem NÃO é um anexo do card: ela é
+/// o próprio produto — o mesmo objeto serve de preview e de download. Por isso
+/// `storageKey` é obrigatório, e o prefixo é público (`visual-assets/`), ao
+/// contrário do PDF de manual, que passa por rota autenticada.
+model CultureVisualAsset {
+  id          String                @id @default(cuid())
+  title       String
+  description String
+  /// Chave do objeto no S3. A URL pública é resolvida no serialize, como em
+  /// EventPhoto — nunca gravada, para a base pública poder mudar sem migration.
+  storageKey  String
+  /// Nome sugerido no download, ex.: `EMR-Banner-LinkedIn.png`.
+  fileName    String
+  fit         CultureVisualAssetFit @default(COVER)
+  order       Int                   @default(0)
+  published   Boolean               @default(true)
+  companyId   String                @default("company-emr")
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, order])
+}
+
+enum CulturePersonalAssetKind {
+  IMAGE
+  DOCUMENT
+}
+
+/// Material do kit entregue a UMA pessoa: foto do ensaio, certificado, carta.
+///
+/// Tabela separada de CultureVisualAsset, e a diferença é de segurança, não de
+/// forma: a peça global mora em prefixo PÚBLICO do S3 e o DTO leva a URL direta;
+/// aqui o prefixo é privado, `storageKey` nunca sai do servidor e o acesso passa
+/// por link assinado de curta duração. Um `recipientId` opcional na mesma tabela
+/// significaria que um valor errado publica a foto de alguém num CDN — e URL
+/// vazada não se revoga.
+model CulturePersonalAsset {
+  id          String                   @id @default(cuid())
+  /// Quem recebe. Um só por material: entrega para outra pessoa é outro envio.
+  recipientId String
+  title       String
+  description String?
+  /// Chave do objeto no S3, em prefixo privado. Nunca serializada.
+  storageKey  String
+  fileName    String
+  fileSize    Int?
+  kind        CulturePersonalAssetKind
+  /// Quem publicou. SetNull para o material sobreviver à saída de quem o enviou.
+  createdById String?
+  companyId   String                   @default("company-emr")
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  recipient User    @relation("CulturePersonalAssetsReceived", fields: [recipientId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("CulturePersonalAssetsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, recipientId, createdAt])
+  @@index([createdById])
+}
+
+/// Registro de navegação autenticada, base do People Analytics (`/admin/pessoas`).
+/// Guarda só o *pathname* já normalizado (`/perfil/:id`) — nunca query string,
+/// nunca PII além do `userId`.
+model AccessLog {
+  id        String   @id @default(cuid())
+  userId    String
+  path      String
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  user    User    @relation("AccessLogs", fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// Evento de uso do produto: quem exercitou qual fluxo, de qual empresa e setor.
+///
+/// Três registros vizinhos, propósitos distintos — não fundir:
+/// - `AccessLog` é navegação (qual tela), base do People Analytics.
+/// - `AdminAuditLog` é ação de admin sobre entidade, com before/after, e existe
+///   para prestar contas.
+/// - este é uso de produto, e sustenta o painel de adoção do super-admin.
+///
+/// `sectorId` é **snapshot denormalizado**, não relação: o setor que vale é o
+/// de quando o evento aconteceu. Derivar por join com `User` faria quem muda de
+/// setor levar todo o histórico junto, e a série por setor mentiria sobre o
+/// passado.
+///
+/// `props` nunca recebe texto escrito por pessoa (justificativa de voto,
+/// feedback) — só identificadores e contadores. Ver `@legends/shared/analytics`.
+model AnalyticsEvent {
+  id         String   @id @default(cuid())
+  name       String
+  userId     String?
+  sectorId   String?
+  companyId  String   @default("company-emr")
+  source     String   @default("api")
+  props      Json?
+  occurredAt DateTime @default(now())
+
+  /// `SetNull`, não `Cascade`: apagar a pessoa apaga o vínculo com ela, mas
+  /// preserva o agregado da empresa. Atende o direito à eliminação da LGPD sem
+  /// abrir buraco retroativo no painel de adoção.
+  user    User?   @relation("AnalyticsEvents", fields: [userId], references: [id], onDelete: SetNull)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, occurredAt])
+  @@index([companyId, name, occurredAt])
+  @@index([companyId, sectorId, occurredAt])
+  @@index([name, occurredAt])
+}
+
+// ============================================================================
+// Desenvolvimento — Aprendizado (LMS) e PDI
+// ============================================================================
+
+enum CourseLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum CourseLessonType {
+  VIDEO
+  TEXT
+}
+
+enum CourseEnrollmentStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum CertificateRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PdiPlanStatus {
+  DRAFT
+  IN_PROGRESS
+  DONE
+  ARCHIVED
+}
+
+enum PdiActionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  AWAITING_REVIEW
+  DONE
+}
+
+enum PdiActionType {
+  COURSE
+  BOOK
+  MENTORING
+  PRACTICE
+  OTHER
+}
+
+enum PdiActionPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum PdiShowcaseVisibility {
+  ALL
+  TEAM
+  LEADER
+  PRIVATE
+}
+
+enum PdiEvidenceKind {
+  COMPLETION
+  APPLICATION
+}
+
+enum PdiActionEventType {
+  CREATED
+  PROGRESS_UPDATED
+  SUBMITTED_FOR_REVIEW
+  APPROVED
+  CHANGES_REQUESTED
+  COMPLETED
+}
+
+/// Curso do catálogo de Aprendizado. Só curso publicado aparece para o colaborador.
+model Course {
+  id                          String      @id @default(cuid())
+  title                       String
+  slug                        String
+  shortDescription            String?
+  description                 String?     @db.Text
+  coverUrl                    String?
+  category                    String
+  level                       CourseLevel @default(BEGINNER)
+  /// Sem `durationMinutes`: a duração do curso é a soma das aulas, derivada na
+  /// leitura. Um total digitado à mão desincroniza na primeira aula editada.
+  /// Competências desenvolvidas (string[]).
+  competencies                Json        @default("[]")
+  /// Objetivos de aprendizagem (string[]).
+  objectives                  Json        @default("[]")
+  prerequisites               String?
+  instructorName              String?
+  instructorBio               String?
+  mandatory                   Boolean     @default(false)
+  certificateEnabled          Boolean     @default(true)
+  published                   Boolean     @default(false)
+  publishedAt                 DateTime?
+  /// Nulo = curso visível para toda a empresa. Preenchido = só quem é do setor
+  /// enxerga (ver "Recorte por setor" no spec). Nasce nulo em todo curso
+  /// existente, então o comportamento atual é preservado por construção.
+  sectorId                    String?
+  /// Curso cuja emissão de certificado passa por fila de aprovação em vez de
+  /// sair automaticamente ao concluir.
+  requiresCertificateApproval Boolean     @default(false)
+  /// Modelo visual usado no certificado emitido deste curso; nulo cai no
+  /// isDefault da empresa e, na ausência dele, no visual atual.
+  certificateTemplateId       String?
+  companyId                   String      @default("company-emr")
+  createdAt                   DateTime    @default(now())
+  updatedAt                   DateTime    @updatedAt
+
+  company             Company               @relation(fields: [companyId], references: [id])
+  sector              Sector?               @relation("CourseSector", fields: [sectorId], references: [id], onDelete: SetNull)
+  certificateTemplate CertificateTemplate?  @relation(fields: [certificateTemplateId], references: [id], onDelete: SetNull)
+  modules             CourseModule[]
+  lessons             CourseLesson[]
+  enrollments         CourseEnrollment[]
+  progress            LessonProgress[]
+  favorites           CourseFavorite[]
+  ratings             CourseRating[]
+  certificates        Certificate[]
+  trackLinks          LearningTrackCourse[]
+  quizzes             CourseQuiz[]
+  certificateRequests CertificateRequest[]
+
+  @@unique([slug, companyId])
+  @@index([companyId, published])
+  @@index([companyId, category])
+  @@index([companyId, sectorId])
+}
+
+model CourseModule {
+  id          String   @id @default(cuid())
+  courseId    String
+  title       String
+  description String?
+  sortOrder   Int      @default(0)
+  companyId   String   @default("company-emr")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  course  Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company        @relation(fields: [companyId], references: [id])
+  lessons CourseLesson[]
+
+  @@index([courseId, sortOrder])
+  @@index([companyId])
+}
+
+model CourseLesson {
+  id              String           @id @default(cuid())
+  courseId        String
+  moduleId        String
+  title           String
+  description     String?
+  type            CourseLessonType @default(VIDEO)
+  videoUrl        String?
+  contentHtml     String?          @db.Text
+  durationMinutes Int              @default(0)
+  sortOrder       Int              @default(0)
+  companyId       String           @default("company-emr")
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  course   Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  module   CourseModule     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  company  Company          @relation(fields: [companyId], references: [id])
+  progress LessonProgress[]
+  quiz     CourseQuiz?
+
+  @@index([moduleId, sortOrder])
+  @@index([courseId])
+  @@index([companyId])
+}
+
+model CourseEnrollment {
+  id             String                 @id @default(cuid())
+  userId         String
+  courseId       String
+  status         CourseEnrollmentStatus @default(IN_PROGRESS)
+  startedAt      DateTime               @default(now())
+  completedAt    DateTime?
+  lastAccessedAt DateTime?
+  lastLessonId   String?
+  companyId      String                 @default("company-emr")
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  user    User    @relation("CourseEnrollments", fields: [userId], references: [id], onDelete: Cascade)
+  course  Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  certificateRequest CertificateRequest?
+
+  @@unique([userId, courseId])
+  @@index([companyId, userId])
+  @@index([courseId])
+}
+
+/// Aula concluída. Idempotente por (userId, lessonId) — o progresso do curso é
+/// sempre derivado daqui, nunca de um contador solto.
+model LessonProgress {
+  id          String   @id @default(cuid())
+  userId      String
+  lessonId    String
+  courseId    String
+  completedAt DateTime @default(now())
+  companyId   String   @default("company-emr")
+
+  user    User         @relation("LessonProgress", fields: [userId], references: [id], onDelete: Cascade)
+  lesson  CourseLesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  course  Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company      @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, lessonId])
+  @@index([companyId, userId, courseId])
+}
+
+model CourseFavorite {
+  userId    String
+  courseId  String
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  user    User    @relation("CourseFavorites", fields: [userId], references: [id], onDelete: Cascade)
+  course  Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@id([userId, courseId])
+  @@index([companyId, userId])
+}
+
+model CourseRating {
+  id        String   @id @default(cuid())
+  userId    String
+  courseId  String
+  rating    Int
+  comment   String?
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation("CourseRatings", fields: [userId], references: [id], onDelete: Cascade)
+  course  Course  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, courseId])
+  @@index([courseId])
+  @@index([companyId])
+}
+
+model LearningTrack {
+  id           String   @id @default(cuid())
+  title        String
+  description  String?
+  coverUrl     String?
+  category     String
+  /// Competências da trilha (string[]).
+  competencies Json     @default("[]")
+  sortOrder    Int      @default(0)
+  published    Boolean  @default(false)
+  companyId    String   @default("company-emr")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  company Company               @relation(fields: [companyId], references: [id])
+  courses LearningTrackCourse[]
+
+  @@index([companyId, published, sortOrder])
+}
+
+model LearningTrackCourse {
+  id        String   @id @default(cuid())
+  trackId   String
+  courseId  String
+  sortOrder Int      @default(0)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  track   LearningTrack @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  course  Course        @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@unique([trackId, courseId])
+  @@index([companyId])
+}
+
+/// Certificado emitido. `code` é público e verificável sem login (/certificado/:code).
+model Certificate {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  userId    String
+  courseId  String?
+  title     String
+  hours     Int
+  imageUrl  String?
+  issuedAt  DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  user    User    @relation("Certificates", fields: [userId], references: [id], onDelete: Cascade)
+  course  Course? @relation(fields: [courseId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([userId, courseId])
+  @@index([companyId, userId])
+}
+
+/// Quiz de uma aula ou o quiz final de um curso.
+model CourseQuiz {
+  id           String   @id @default(cuid())
+  courseId     String
+  /// Nulo = quiz final do curso; preenchido = quiz daquela aula. O `@unique`
+  /// numa coluna nullable aceita vários NULL no Postgres, então garante "uma
+  /// aula, no máximo um quiz" sem impedir que cada curso tenha o seu próprio
+  /// quiz final. "Um quiz final por curso" NÃO é coberto por este índice —
+  /// fica como regra de service, com teste (Task 5).
+  lessonId     String?  @unique
+  title        String
+  passingScore Int      @default(70)
+  /// Nulo = tentativas ilimitadas.
+  maxAttempts  Int?
+  companyId    String   @default("company-emr")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  course    Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lesson    CourseLesson?    @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  company   Company          @relation(fields: [companyId], references: [id])
+  questions CourseQuestion[]
+  attempts  QuizAttempt[]
+
+  @@index([courseId])
+  @@index([companyId])
+}
+
+/// Questão de múltipla escolha de um `CourseQuiz`.
+model CourseQuestion {
+  id          String   @id @default(cuid())
+  quizId      String
+  statement   String
+  /// `[{ id, text, correct }]`, validado por schema Zod exportado de
+  /// `@legends/shared`. O gabarito (`correct`) nunca sai no DTO de quem responde.
+  options     Json
+  explanation String?
+  sortOrder   Int      @default(0)
+  companyId   String   @default("company-emr")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  quiz    CourseQuiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@index([quizId, sortOrder])
+  @@index([companyId])
+}
+
+/// Tentativa de resposta de um quiz por uma pessoa. `attemptNumber` é derivado
+/// das tentativas anteriores no momento da submissão.
+model QuizAttempt {
+  id            String   @id @default(cuid())
+  quizId        String
+  userId        String
+  attemptNumber Int
+  score         Int
+  passed        Boolean
+  /// Respostas dadas nesta tentativa: `[{ questionId, optionId }]`.
+  answers       Json
+  companyId     String   @default("company-emr")
+  createdAt     DateTime @default(now())
+
+  quiz    CourseQuiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  user    User       @relation("QuizAttempts", fields: [userId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@unique([quizId, userId, attemptNumber])
+  @@index([companyId, userId])
+}
+
+/// Modelo visual de certificado (cores, assinatura, logo). Documento da
+/// empresa — CRUD é sempre de ADMIN, nunca de SUBADMIN.
+model CertificateTemplate {
+  id                String   @id @default(cuid())
+  name              String
+  title             String
+  backgroundUrl     String?
+  accentColor       String
+  signatureName     String
+  signatureRole     String
+  signatureImageUrl String?
+  logoUrl           String?
+  isDefault         Boolean  @default(false)
+  companyId         String   @default("company-emr")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company Company  @relation(fields: [companyId], references: [id])
+  courses Course[]
+
+  @@index([companyId])
+  @@index([companyId, isDefault])
+}
+
+/// Solicitação de emissão de certificado para curso com aprovação obrigatória.
+/// Idempotente por `enrollmentId`: uma inscrição gera no máximo uma solicitação
+/// viva por vez; recusar guarda o motivo e permite nova solicitação depois.
+model CertificateRequest {
+  id              String                   @id @default(cuid())
+  enrollmentId    String                   @unique
+  userId          String
+  courseId        String
+  status          CertificateRequestStatus @default(PENDING)
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  companyId       String                   @default("company-emr")
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  enrollment CourseEnrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  user       User             @relation("CertificateRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+  course     Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  reviewedBy User?            @relation("CertificateRequestReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  company    Company          @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, status])
+  @@index([courseId])
+}
+
+/// Plano de desenvolvimento de uma pessoa num ciclo (ex.: 2026-Q1).
+model PdiPlan {
+  id          String        @id @default(cuid())
+  userId      String
+  leaderId    String?
+  title       String
+  status      PdiPlanStatus @default(DRAFT)
+  cyclePeriod String?
+  startsAt    DateTime?
+  endsAt      DateTime?
+  companyId   String        @default("company-emr")
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user    User        @relation("PdiPlans", fields: [userId], references: [id], onDelete: Cascade)
+  leader  User?       @relation("PdiPlansLed", fields: [leaderId], references: [id])
+  company Company     @relation(fields: [companyId], references: [id])
+  actions PdiAction[]
+
+  @@index([companyId, userId])
+  @@index([companyId, leaderId])
+}
+
+model PdiAction {
+  id                   String            @id @default(cuid())
+  planId               String
+  description          String
+  type                 PdiActionType     @default(OTHER)
+  priority             PdiActionPriority @default(MEDIUM)
+  status               PdiActionStatus   @default(NOT_STARTED)
+  dueDate              DateTime?
+  /// Progresso informado pela pessoa (0–100) — não é derivado, diferente do curso.
+  progressPct          Int               @default(0)
+  competency           String?
+  notes                String?           @db.Text
+  /// Itens do checklist ({ id, text, done }[]).
+  checklist            Json              @default("[]")
+  /// Respostas da reflexão guiada; preenchida na conclusão.
+  reflection           Json?
+  practicalApplication String?           @db.Text
+  startedAt            DateTime?
+  completedAt          DateTime?
+  submittedForReviewAt DateTime?
+  reviewedAt           DateTime?
+  reviewedById         String?
+  reviewComment        String?           @db.Text
+  sharedAt             DateTime?
+  companyId            String            @default("company-emr")
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  plan       PdiPlan             @relation(fields: [planId], references: [id], onDelete: Cascade)
+  reviewedBy User?               @relation("PdiActionsReviewed", fields: [reviewedById], references: [id])
+  company    Company             @relation(fields: [companyId], references: [id])
+  evidences  PdiActionEvidence[]
+  history    PdiActionHistory[]
+
+  promotedFromOneOnOne OneOnOneAction? @relation("OneOnOnePromotedAction")
+
+  @@index([planId])
+  @@index([companyId, status])
+}
+
+model PdiActionEvidence {
+  id           String          @id @default(cuid())
+  actionId     String
+  kind         PdiEvidenceKind
+  /// Chave do objeto no storage — nunca a URL (o download passa por rota assinada).
+  storageKey   String?
+  fileName     String?
+  mimeType     String?
+  externalUrl  String?
+  uploadedById String
+  companyId    String          @default("company-emr")
+  createdAt    DateTime        @default(now())
+
+  action     PdiAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  uploadedBy User      @relation("PdiEvidencesUploaded", fields: [uploadedById], references: [id])
+  company    Company   @relation(fields: [companyId], references: [id])
+
+  @@index([actionId])
+  @@index([companyId])
+}
+
+model PdiActionHistory {
+  id        String             @id @default(cuid())
+  actionId  String
+  eventType PdiActionEventType
+  actorId   String?
+  metadata  Json               @default("{}")
+  companyId String             @default("company-emr")
+  createdAt DateTime           @default(now())
+
+  action  PdiAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  actor   User?     @relation("PdiActionEvents", fields: [actorId], references: [id])
+  company Company   @relation(fields: [companyId], references: [id])
+
+  @@index([actionId, createdAt])
+  @@index([companyId])
+}
+
+/// Painel externo de BI embutido na administração. `sectorId` null = painel da
+/// empresa inteira. A FK de setor é Cascade de propósito: com SetNull, apagar um
+/// setor promoveria seus painéis a painéis da empresa e exporia dado de RH do
+/// setor para toda a administração.
+model HrDashboard {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  embedUrl    String
+  height      Int      @default(720)
+  sortOrder   Int      @default(0)
+  sectorId    String?
+  companyId   String   @default("company-emr")
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company   Company @relation(fields: [companyId], references: [id])
+  sector    Sector? @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@index([companyId, sectorId, sortOrder])
+}
+
+/// Agentes de IA disponíveis. O par AgentConversation/AgentMessage é genérico de
+/// propósito — o que muda entre agentes é o system prompt e a fonte de contexto,
+/// não o armazenamento. `GLASS` já existe aqui para o PBI #22282 reaproveitar a
+/// mesma tabela em vez de clonar uma estrutura quase igual.
+enum AgentKind {
+  BENCHMARK
+  GLASS
+  ASSISTANT
+}
+
+enum AgentMessageRole {
+  USER
+  ASSISTANT
+}
+
+enum GlassSentiment {
+  POSITIVO
+  NEUTRO
+  NEGATIVO
+}
+
+/// Avaliação externa (Glassdoor) colada por um administrador. Anônima por
+/// construção: `createdById` é quem COLOU o texto, nunca quem o escreveu — não
+/// existe coluna de autoria, e o prompt de extração é instruído a descartar
+/// qualquer traço identificador que apareça no texto.
+///
+/// `status` e `tenure` seguem `String` (validados contra a lista fechada de
+/// `@legends/shared` na escrita): o Glassdoor pode introduzir uma faixa nova, e
+/// isso não deve exigir migration.
+model GlassReview {
+  id                 String          @id @default(cuid())
+  companyId          String
+  reviewDate         DateTime?
+  /// Nota é 1,0 a 5,0. Decimal, não Float: média de RH em ponto flutuante vira
+  /// 4.199999999999999 na tela.
+  rating             Decimal?        @db.Decimal(2, 1)
+  role               String?
+  level              String?
+  sector             String?
+  tenure             String?
+  status             String?
+  recommends         Boolean?
+  leadershipApproval Boolean?
+  title              String?
+  positives          String?
+  negatives          String?
+  advice             String?
+  sentiment          GlassSentiment?
+  themesPositive     String[]
+  themesNegative     String[]
+  /// Só os alertas POR AVALIAÇÃO. Os agregados (queda consecutiva, setor
+  /// crítico) dependem das vizinhas e mudariam retroativamente a cada nova
+  /// avaliação — são calculados na leitura, em `glass-overview-service`.
+  alerts             String[]
+  aiSummary          String?
+  /// Fica null quando quem colou sai da base — a avaliação sobrevive à pessoa.
+  createdById        String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  company   Company @relation(fields: [companyId], references: [id])
+  createdBy User?   @relation("GlassReviewsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([companyId, reviewDate])
+  @@index([companyId, sector])
+}
+
+/// Inventário de práticas internas de cultura — a base de comparação que o
+/// agente de Benchmarking recebe como contexto. É da empresa inteira, sem
+/// recorte por setor: ação de endomarketing não pertence a um setor.
+model BenchmarkPractice {
+  id          String   @id @default(cuid())
+  companyId   String
+  category    String
+  title       String
+  description String?
+  /// Canal de divulgação: LinkedIn, Teams, Notion…
+  channel     String?
+  tags        String[]
+  /// Fica null quando quem cadastrou sai da base — a prática sobrevive à pessoa.
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company   Company @relation(fields: [companyId], references: [id])
+  createdBy User?   @relation("BenchmarkPracticesCreated", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+}
+
+/// Conversa com um agente. Sempre **da pessoa**: não existe conversa
+/// compartilhada entre dois admins da mesma empresa.
+model AgentConversation {
+  id        String    @id @default(cuid())
+  companyId String
+  userId    String
+  agent     AgentKind
+  title     String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  company  Company        @relation(fields: [companyId], references: [id])
+  user     User           @relation("AgentConversations", fields: [userId], references: [id], onDelete: Cascade)
+  messages AgentMessage[]
+
+  @@index([companyId, userId, agent, updatedAt])
+}
+
+model AgentMessage {
+  id             String           @id @default(cuid())
+  companyId      String
+  conversationId String
+  role           AgentMessageRole
+  content        String
+  createdAt      DateTime         @default(now())
+
+  company      Company           @relation(fields: [companyId], references: [id])
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+enum ChallengeSubmissionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Desafio proposto pela empresa ou por um setor. A recompensa é por desafio —
+/// não passa por CoinRule, que só sabe valor fixo por evento.
+model Challenge {
+  id              String    @id @default(cuid())
+  title           String
+  description     String
+  /// Coins creditados na aprovação. <= 0 não gera lançamento no extrato.
+  rewardCoins     Int
+  /// Chave manual de publicação. Nome com `is` de propósito: booleano chamado
+  /// `active`/`status` não diz no call site *ativo o quê*.
+  isActive        Boolean   @default(true)
+  /// Uma de CHALLENGE_CATEGORIES (@legends/shared). String e não enum do Prisma:
+  /// categoria é catálogo de produto, não invariante do banco — incluir uma não
+  /// deve custar migration. O default existe só para a migration desta coluna;
+  /// a API sempre exige categoria explícita.
+  category        String    @default("Engajamento")
+  /// Corpo longo em Markdown, renderizado por components/Markdown.tsx.
+  /// NUNCA HTML: nada de markup vindo do banco chega ao DOM.
+  detailsMarkdown String?
+  /// Chave do S3 da imagem de capa. Guarda-se a chave, nunca a URL.
+  imageKey        String?
+  /// Ordem na vitrine; menor primeiro.
+  position        Int       @default(0)
+  /// Participação precisa passar pela fila de moderação. Persistido e exposto
+  /// aqui; quem consome é o PBI "Resultados de Desafios".
+  requiresReview  Boolean   @default(true)
+  /// Não listado: some da vitrine, mas o detalhe continua servindo para quem
+  /// está no escopo, de modo que um link compartilhado funciona.
+  isPrivate       Boolean   @default(false)
+  isFeatured      Boolean   @default(false)
+  /// Janela opcional; null dos dois lados = aberto enquanto `isActive`.
+  startsAt        DateTime?
+  endsAt          DateTime?
+  /// null = desafio da empresa inteira (só ADMIN cria e modera).
+  sectorId        String?
+  companyId       String    @default("company-emr")
+  createdById     String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sector      Sector?               @relation(fields: [sectorId], references: [id])
+  company     Company               @relation(fields: [companyId], references: [id])
+  createdBy   User                  @relation("ChallengesCreated", fields: [createdById], references: [id])
+  submissions ChallengeSubmission[]
+
+  @@index([companyId, isActive, position])
+  @@index([companyId, sectorId])
+}
+
+model ChallengeSubmission {
+  id              String                    @id @default(cuid())
+  challengeId     String
+  userId          String
+  status          ChallengeSubmissionStatus @default(PENDING)
+  note            String?
+  /// Chave S3 da evidência opcional; o DTO expõe URL assinada, nunca a chave.
+  evidenceKey     String?
+  submittedAt     DateTime                  @default(now())
+  reviewedAt      DateTime?
+  reviewedById    String?
+  rejectionReason String?
+  companyId       String                    @default("company-emr")
+
+  challenge  Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  user       User      @relation("ChallengeSubmissions", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy User?     @relation("ChallengeSubmissionsReviewed", fields: [reviewedById], references: [id], onDelete: SetNull)
+  company    Company   @relation(fields: [companyId], references: [id])
+
+  /// Uma submissão ativa por (desafio, pessoa) é garantida por um índice único
+  /// PARCIAL que vive só no SQL da migration (WHERE status <> 'REJECTED') — o
+  /// Prisma não sabe representar índice parcial, e declará-lo aqui faria todo
+  /// `migrate dev` futuro propor recriá-lo sem o WHERE. Violação chega como P2002.
+  @@index([companyId, status, submittedAt])
+  @@index([challengeId])
+  @@index([userId])
+}
+
+/// Item do catálogo da loja. Do escopo da EMPRESA, não do setor: quem administra
+/// é o bloco de Gente e Gestão (requireSectorFeature('gente-gestao')), e por isso
+/// não há sectorId aqui.
+model StoreProduct {
+  id           String   @id @default(cuid())
+  title        String
+  description  String?
+  /// Uma de STORE_PRODUCT_CATEGORIES (@legends/shared). String e não enum do Prisma,
+  /// mesmo racional de Challenge.category: categoria é catálogo de produto, não
+  /// invariante do banco — incluir uma não deve custar migration.
+  category     String
+  priceInCoins Int
+  stock        Int      @default(0)
+  /// Chave do S3 da capa. Guarda-se a CHAVE, nunca a URL.
+  imageKey     String?
+  isDigital    Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  companyId    String   @default("company-emr")
+  createdById  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  company   Company      @relation(fields: [companyId], references: [id])
+  createdBy User         @relation("StoreProductsCreated", fields: [createdById], references: [id])
+  orders    StoreOrder[]
+
+  @@index([companyId, isActive, category])
+  @@index([companyId])
+}
+
+/// Pedido de resgate. `productTitle` e `pricePaid` são CONGELADOS no resgate: o
+/// produto muda de nome e de preço depois, e o pedido é histórico.
+model StoreOrder {
+  id           String           @id @default(cuid())
+  userId       String
+  /// SetNull, e por isso opcional: apagar um produto não pode apagar o histórico de
+  /// quem já resgatou. Cancelar pedido de produto apagado estorna os coins e pula a
+  /// devolução de estoque — não há para onde devolver.
+  productId    String?
+  productTitle String
+  pricePaid    Int
+  status       StoreOrderStatus @default(PENDING)
+  /// Nota INTERNA da G&G. Nunca sai no DTO do colaborador.
+  adminNotes   String?
+  handledById  String?
+  handledAt    DateTime?
+  companyId    String           @default("company-emr")
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  user      User          @relation("StoreOrders", fields: [userId], references: [id], onDelete: Cascade)
+  product   StoreProduct? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  handledBy User?         @relation("StoreOrdersHandled", fields: [handledById], references: [id], onDelete: SetNull)
+  company   Company       @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, status, createdAt])
+  @@index([companyId, userId, createdAt])
+  @@index([productId])
+}
+
+/// Base de conhecimento curada por Gente e Gestão. `sectorId` null = vale para a
+/// empresa inteira. A FK de setor é Cascade de propósito: com SetNull, apagar um
+/// setor promoveria suas entradas a entradas da empresa e exporia resposta de RH
+/// do setor para toda a companhia (mesma razão do HrDashboard).
+model KnowledgeEntry {
+  id          String   @id @default(cuid())
+  category    String?
+  question    String
+  answer      String
+  keywords    String[]
+  isActive    Boolean  @default(true)
+  sectorId    String?
+  companyId   String   @default("company-emr")
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company   Company @relation(fields: [companyId], references: [id])
+  sector    Sector? @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("KnowledgeEntryAuthor", fields: [createdById], references: [id])
+
+  @@index([companyId, isActive])
+  @@index([companyId, sectorId])
+}
+
+/// Toda pergunta feita à assistente, com o que foi respondido e quais entradas
+/// casaram. `matchedEntryIds` vazio marca uma lacuna da base.
+model AssistantQuery {
+  id              String   @id @default(cuid())
+  userId          String
+  question        String
+  answer          String?
+  matchedEntryIds String[]
+  companyId       String   @default("company-emr")
+  createdAt       DateTime @default(now())
+
+  company  Company            @relation(fields: [companyId], references: [id])
+  user     User               @relation("AssistantQueryAuthor", fields: [userId], references: [id], onDelete: Cascade)
+  feedback AssistantFeedback?
+
+  @@index([companyId, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// Um feedback por pergunta (reclicar atualiza). `rating` é -1 ou 1, validado no Zod.
+model AssistantFeedback {
+  id        String   @id @default(cuid())
+  queryId   String   @unique
+  userId    String
+  rating    Int
+  comment   String?
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  company Company        @relation(fields: [companyId], references: [id])
+  query   AssistantQuery @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  user    User           @relation("AssistantFeedbackAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, rating])
+}
+
+enum CampaignAudience {
+  ALL
+  LEADERSHIP
+}
+
+enum CampaignChannel {
+  MURAL
+  TEAMS
+  EMAIL
+}
+
+enum CampaignPostStatus {
+  SCHEDULED
+  PUBLISHED
+  CANCELLED
+}
+
+/// Campanha de comunicação: o guarda-chuva editorial (tema + janela) sob o qual
+/// nascem N comunicados agendados.
+model Campaign {
+  id          String           @id @default(cuid())
+  theme       String
+  startsAt    DateTime
+  endsAt      DateTime
+  audience    CampaignAudience
+  notes       String?
+  /// Fica null quando quem criou sai da base — a campanha sobrevive à pessoa
+  /// (mesmo precedente de `BenchmarkPractice.createdById`).
+  createdById String?
+  companyId   String
+  createdAt   DateTime         @default(now())
+
+  createdBy User?          @relation("CampaignsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+  company   Company        @relation(fields: [companyId], references: [id])
+  posts     CampaignPost[]
+
+  @@index([companyId, createdAt])
+}
+
+/// Item do calendário editorial. `campaignId` é opcional de propósito: é o que
+/// permite criar item na mão quando a IA está indisponível.
+model CampaignPost {
+  id              String             @id @default(cuid())
+  campaignId      String?
+  title           String
+  body            String
+  visualHint      String?
+  scheduledFor    DateTime
+  channel         CampaignChannel
+  audience        CampaignAudience
+  status          CampaignPostStatus @default(SCHEDULED)
+  responsibleId   String?
+  publishedPostId String?            @unique
+  publishedAt     DateTime?
+  companyId       String
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  campaign      Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  responsible   User?          @relation("CampaignPostsResponsible", fields: [responsibleId], references: [id], onDelete: SetNull)
+  // SetNull: apagar o post do mural não pode derrubar o histórico editorial.
+  publishedPost CorporatePost? @relation(fields: [publishedPostId], references: [id], onDelete: SetNull)
+  company       Company        @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, scheduledFor])
+  @@index([companyId, status])
+}
+
+/// Álbum de fotos de um evento da empresa (confraternização, hackathon, onboarding).
+model EventAlbum {
+  id              String             @id @default(cuid())
+  title           String
+  description     String?
+  eventDate       DateTime?
+  /// Capa: FK para uma foto do próprio álbum. SetNull para que apagar a foto-capa
+  /// não deixe o álbum apontando para objeto inexistente — a grade cai no fallback.
+  coverPhotoId    String?            @unique
+  /// Capa enviada no formulário, independente das fotos do álbum. Guarda a CHAVE
+  /// do S3, como EventPhoto.storageKey. Tem precedência sobre `coverPhotoId`:
+  /// quem subiu uma capa escolheu essa imagem de propósito.
+  coverStorageKey String?
+  /// Enquadramento da capa, aplicado igual no editor e na grade.
+  coverFit        EventAlbumCoverFit @default(COVER)
+  /// Posição vertical do recorte, 0 (topo) a 100 (base).
+  coverPositionY  Int                @default(50)
+  /// Zoom em porcentagem; 100 é a imagem sem ampliação.
+  coverScale      Int                @default(100)
+  createdById     String
+  companyId       String             @default("company-emr")
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  cover     EventPhoto?  @relation("AlbumCover", fields: [coverPhotoId], references: [id], onDelete: SetNull)
+  photos    EventPhoto[] @relation("AlbumPhotos")
+  createdBy User         @relation("EventAlbumsCreated", fields: [createdById], references: [id])
+  company   Company      @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, eventDate])
+}
+
+/// Como a capa preenche o quadro do card: COVER corta o que sobra, CONTAIN cabe
+/// inteira. Espelha `EVENT_ALBUM_COVER_FITS` no contrato compartilhado.
+enum EventAlbumCoverFit {
+  COVER
+  CONTAIN
+}
+
+/// Foto de um álbum. Guarda a CHAVE do objeto no S3, nunca a URL — URL assinada
+/// expira e URL pública gravada engessa o bucket. O serialize resolve a pública.
+model EventPhoto {
+  id           String   @id @default(cuid())
+  albumId      String
+  storageKey   String
+  width        Int?
+  height       Int?
+  uploadedById String
+  companyId    String   @default("company-emr")
+  createdAt    DateTime @default(now())
+
+  album      EventAlbum           @relation("AlbumPhotos", fields: [albumId], references: [id], onDelete: Cascade)
+  coverOf    EventAlbum?          @relation("AlbumCover")
+  uploadedBy User                 @relation("EventPhotosUploaded", fields: [uploadedById], references: [id])
+  company    Company              @relation(fields: [companyId], references: [id])
+  reactions  EventPhotoReaction[]
+  comments   EventPhotoComment[]
+
+  @@index([albumId, createdAt])
+  @@index([companyId])
+}
+
+model EventPhotoReaction {
+  id        String   @id @default(cuid())
+  photoId   String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  photo   EventPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  user    User       @relation("EventPhotoReactions", fields: [userId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@unique([photoId, userId, emoji])
+  @@index([photoId])
+  @@index([companyId])
+}
+
+model EventPhotoComment {
+  id        String   @id @default(cuid())
+  photoId   String
+  authorId  String
+  body      String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  photo   EventPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  author  User       @relation("EventPhotoComments", fields: [authorId], references: [id], onDelete: Cascade)
+  company Company    @relation(fields: [companyId], references: [id])
+
+  @@index([photoId, createdAt])
+  @@index([companyId])
+}
+
+/// Periodicidade de um evento de calendário cadastrado.
+enum CalendarRecurrence {
+  NONE
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+///
+/// Tipo de evento de calendário — "Provas B2B", "Comunicados", "Treinamentos".
+/// É dado, não enum: cada empresa cadastra os seus, e o calendário desenha um
+/// chip de filtro por tipo. Enum aqui custaria migration a cada tipo novo.
+model CalendarEventType {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String
+  icon      String   @default("event")
+  /// Cor da categoria em hex. É o padrão aplicado sozinho ao evento no cadastro;
+  /// o catálogo é por empresa, então a cor mora aqui e não num mapa fixo no front.
+  color     String   @default("#6366f1")
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company         @relation(fields: [companyId], references: [id])
+  events  CalendarEvent[]
+
+  @@unique([companyId, slug])
+  @@index([companyId])
+}
+
+///
+/// Evento datado cadastrado pela empresa. `date` é a data civil da primeira (ou
+/// única) ocorrência; as demais saem da regra de recorrência, expandidas na
+/// leitura por `expandOccurrences` (@legends/shared) — nunca materializadas.
+model CalendarEvent {
+  id                 String             @id @default(cuid())
+  title              String
+  description        String             @default("")
+  date               DateTime           @db.Date
+  /// Último dia do evento; null quando ele cabe num dia só. A duração em dias
+  /// acompanha cada ocorrência da recorrência, não só a primeira.
+  endDate            DateTime?          @db.Date
+  /// HH:MM local; null é evento de dia inteiro — e é o que joga a marcação para
+  /// a faixa "DIA TODO" no topo da grade, em vez de uma faixa de horário.
+  startTime          String?
+  /// HH:MM local do fim. Sem `startTime` não significa nada.
+  endTime            String?
+  typeId             String
+  /// Cor em hex sobrescrevendo a da categoria. Null é o caso normal.
+  color              String?
+  /// Público-alvo por tag, do mesmo vocabulário da planilha de colaboradores.
+  /// **Vazio (ou contendo "Todos") é a empresa inteira** — e não "ninguém",
+  /// mesma convenção de `CalendarEventSector`. As duas regras se somam.
+  audienceTags       String[]           @default([])
+  /// Ação de Comunicação Interna: registro da G&G que não vai para a empresa.
+  /// Some da API para quem não é admin nem do time de Gente e Gestão.
+  isInternalComm     Boolean            @default(false)
+  recurrence         CalendarRecurrence @default(NONE)
+  recurrenceUntil    DateTime?          @db.Date
+  recurrenceCount    Int?
+  /// Antecedências do lembrete em dias. Vazio = sem lembrete.
+  reminderDaysBefore Int[]              @default([])
+  createdById        String
+  companyId          String             @default("company-emr")
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  type      CalendarEventType           @relation(fields: [typeId], references: [id])
+  createdBy User                        @relation("CalendarEventsCreated", fields: [createdById], references: [id])
+  company   Company                     @relation(fields: [companyId], references: [id])
+  sectors   CalendarEventSector[]
+  reminders CalendarEventReminderSent[]
+
+  @@index([companyId, date])
+  @@index([typeId])
+}
+
+///
+/// Público-alvo do evento. **Nenhuma linha significa empresa inteira** — e não
+/// "ninguém". Marcar todos os setores no cadastro congelaria o público: setor
+/// criado depois ficaria de fora de um evento que era de todo mundo.
+model CalendarEventSector {
+  eventId  String
+  sectorId String
+
+  event  CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sector Sector        @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, sectorId])
+  @@index([sectorId])
+}
+
+///
+/// Reivindicação de um lembrete já disparado. A unique é o que impede lembrete
+/// duplicado: o INSERT é a reivindicação, e violação (P2002) significa que outro
+/// tick — ou outro processo — chegou primeiro.
+///
+/// A granularidade é (evento, ocorrência, antecedência), não o evento: evento
+/// recorrente com duas antecedências tem várias linhas legítimas, e uma flag
+/// única no evento responderia à pergunta errada.
+model CalendarEventReminderSent {
+  id             String   @id @default(cuid())
+  eventId        String
+  occurrenceDate DateTime @db.Date
+  daysBefore     Int
+  sentAt         DateTime @default(now())
+
+  event CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, occurrenceDate, daysBefore])
+  @@index([eventId])
+}
+
+enum OneOnOneRecurrence {
+  NONE
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum OneOnOneMeetingStatus {
+  SCHEDULED
+  DONE
+  CANCELED
+}
+
+/// Resposta do CONVIDADO ao convite de 1:1 — de uma pessoa, não do encontro.
+/// Não entra no `OneOnOneMeetingStatus` de propósito: aquele é o estado do
+/// encontro para os dois, e misturar criaria estados sem sentido
+/// ("recusado e realizado").
+enum OneOnOneInviteResponse {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum OneOnOneActionStatus {
+  OPEN
+  DONE
+  PROMOTED
+}
+
+enum OneOnOneTopicOrigin {
+  TEMPLATE
+  CUSTOM
+}
+
+/// O par e o ritmo do 1:1. `userAId`/`userBId` são guardados ORDENADOS pelo id
+/// (ver `normalizeOneOnOnePair` em @legends/shared): é o que torna "as ações
+/// abertas deste par" uma consulta direta, e não um OR das duas combinações.
+model OneOnOneSeries {
+  id                 String                 @id @default(cuid())
+  userAId            String
+  userBId            String
+  createdById        String
+  recurrence         OneOnOneRecurrence     @default(NONE)
+  recurrenceUntil    DateTime?
+  durationMinutes    Int                    @default(30)
+  endedAt            DateTime?
+  /// A resposta do convidado que vale para a série inteira. A ocorrência só
+  /// sobrescreve quando a pessoa disse algo diferente para aquele encontro
+  /// (`OneOnOneMeeting.inviteeResponse`) — é o que impede uma série semanal de
+  /// virar 52 pendências.
+  inviteeResponse    OneOnOneInviteResponse @default(PENDING)
+  inviteeRespondedAt DateTime?
+  companyId          String
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  userA     User              @relation("OneOnOneUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User              @relation("OneOnOneUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  createdBy User              @relation("OneOnOneCreated", fields: [createdById], references: [id])
+  company   Company           @relation(fields: [companyId], references: [id])
+  meetings  OneOnOneMeeting[]
+  actions   OneOnOneAction[]
+
+  @@index([companyId, userAId, userBId])
+  @@index([companyId, userBId])
+}
+
+/// Uma ocorrência. MATERIALIZADA (diferente de CalendarEvent, cuja recorrência é
+/// expandida em consulta): cada encontro carrega pauta, nota e ações próprias e
+/// precisa de id estável para ser alvo de FK.
+model OneOnOneMeeting {
+  id                 String                  @id @default(cuid())
+  seriesId           String
+  startsAt           DateTime
+  endsAt             DateTime
+  status             OneOnOneMeetingStatus   @default(SCHEDULED)
+  companyId          String
+  /// Quando o lembrete de 10 minutos foi reivindicado. É o que impede lembrete
+  /// duplicado: o UPDATE ... WHERE remindedAt IS NULL é atômico (ver
+  /// `scheduler/one-on-one-reminders.ts`). Remarcar zera o campo — horário novo,
+  /// lembrete novo.
+  remindedAt         DateTime?
+  /// Exceção da série: `null` significa "segue a resposta da série". Só é
+  /// preenchido quando o convidado responde diferente para ESTA ocorrência.
+  inviteeResponse    OneOnOneInviteResponse?
+  inviteeRespondedAt DateTime?
+  /// Contraproposta de horário do convidado, e o motivo da recusa. Sempre da
+  /// ocorrência, mesmo quando a recusa vale para a série: o que se propõe é um
+  /// horário concreto, e horário é de um encontro.
+  proposedStartsAt   DateTime?
+  declineNote        String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+
+  series  OneOnOneSeries        @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  company Company               @relation(fields: [companyId], references: [id])
+  topics  OneOnOneTopic[]
+  notes   OneOnOnePrivateNote[]
+  actions OneOnOneAction[]      @relation("OneOnOneActionCreatedIn")
+
+  @@index([seriesId, startsAt])
+  @@index([companyId, startsAt])
+}
+
+/// Item de pauta. O texto vindo do catálogo é COPIADO, não referenciado por FK:
+/// o catálogo muda, a pauta de um encontro passado é registro histórico.
+model OneOnOneTopic {
+  id          String              @id @default(cuid())
+  meetingId   String
+  text        String
+  origin      OneOnOneTopicOrigin @default(CUSTOM)
+  discussed   Boolean             @default(false)
+  sortOrder   Int                 @default(0)
+  createdById String
+  companyId   String
+  createdAt   DateTime            @default(now())
+
+  meeting   OneOnOneMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  createdBy User            @relation("OneOnOneTopicsCreated", fields: [createdById], references: [id])
+  company   Company         @relation(fields: [companyId], references: [id])
+
+  @@index([meetingId, sortOrder])
+  @@index([companyId])
+}
+
+/// A observação privada. Uma por pessoa por encontro. NUNCA sai da API para o
+/// outro participante — a consulta filtra por authorId, não a tela.
+model OneOnOnePrivateNote {
+  id        String   @id @default(cuid())
+  meetingId String
+  authorId  String
+  body      String   @db.Text
+  companyId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  meeting OneOnOneMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  author  User            @relation("OneOnOneNotes", fields: [authorId], references: [id], onDelete: Cascade)
+  company Company         @relation(fields: [companyId], references: [id])
+
+  @@unique([meetingId, authorId])
+  @@index([companyId])
+}
+
+/// O combinado. Preso à SÉRIE (logo, ao par): aparece em todo encontro do par
+/// até fechar. `promotedPdiActionId` guarda a PdiAction que nasceu dele.
+model OneOnOneAction {
+  id                  String               @id @default(cuid())
+  seriesId            String
+  createdInMeetingId  String
+  description         String
+  ownerId             String
+  dueDate             DateTime?
+  status              OneOnOneActionStatus @default(OPEN)
+  completedById       String?
+  completedAt         DateTime?
+  promotedPdiActionId String?              @unique
+  companyId           String
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  series            OneOnOneSeries  @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  createdInMeeting  OneOnOneMeeting @relation("OneOnOneActionCreatedIn", fields: [createdInMeetingId], references: [id], onDelete: Cascade)
+  owner             User            @relation("OneOnOneActionsOwned", fields: [ownerId], references: [id], onDelete: Cascade)
+  completedBy       User?           @relation("OneOnOneActionsCompleted", fields: [completedById], references: [id])
+  promotedPdiAction PdiAction?      @relation("OneOnOnePromotedAction", fields: [promotedPdiActionId], references: [id], onDelete: SetNull)
+  company           Company         @relation(fields: [companyId], references: [id])
+
+  @@index([seriesId, status])
+  @@index([companyId, ownerId, status])
+}
+
+/// Catálogo de tópicos sugeridos, cadastrado em Administração › Gente e Gestão.
+model OneOnOneTopicTemplate {
+  id        String   @id @default(cuid())
+  theme     String
+  text      String
+  sortOrder Int      @default(0)
+  active    Boolean  @default(true)
+  companyId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, active, sortOrder])
+}

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legends-legends
+  namespace: legends
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: legends-legends
+  template:
+    metadata:
+      annotations:
+        traffic.sidecar.istio.io/excludeOutboundPorts: "6379"
+      labels:
+        app: legends-legends
+        version: v1.0
+    spec:
+      containers:
+        - name: legends
+          image: legends
+          envFrom:
+            - secretRef:
+                name: legends-legends-secrets
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: 256Mi

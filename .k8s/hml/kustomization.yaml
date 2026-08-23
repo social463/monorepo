@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml
+images:
+- name: legends
+  newName: 196044402972.dkr.ecr.us-east-1.amazonaws.com/legends
+  newTag: eff74daa0de7378266b0ac4a5fbc8a6cd4b9925e

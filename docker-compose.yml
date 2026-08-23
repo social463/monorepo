@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: legends-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: legends
+      POSTGRES_PASSWORD: legends
+      POSTGRES_DB: legends
+    ports:
+      # Porta do HOST configurável: com outro Postgres (de outro projeto) já
+      # ocupando 5432, use `LEGENDS_DB_PORT=5442 pnpm db:up` — os testes da API
+      # leem a mesma variável (ver apps/api/vitest.config.ts). Default inalterado.
+      - "${LEGENDS_DB_PORT:-5432}:5432"
+    volumes:
+      - legends-pgdata:/var/lib/postgresql/data
+
+volumes:
+  legends-pgdata:

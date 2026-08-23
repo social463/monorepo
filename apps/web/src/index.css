@@ -1,0 +1,186 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Default do produto. O `BrandProvider` sobrescreve inline conforme o
+     esquema da empresa (estilo inline vence folha), então tenant de tema claro
+     não fica com os controles nativos pintados de escuro. */
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface text-on-surface font-body antialiased;
+}
+
+/* Material Symbols Outlined — icon font baseline */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: inherit;
+  line-height: 1;
+  display: inline-block;
+  white-space: nowrap;
+  direction: ltr;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Emblemas de selo — leve elevação 3D + glow pulsante na cor do selo.
+   Sem `--emblem-color` (selo sem cor própria), o brilho cai na cor da EMPRESA,
+   não no verde do produto: era o último hex de marca cravado no CSS. */
+.badge-emblem {
+  animation: emblem-glow 3.2s ease-in-out infinite;
+}
+@keyframes emblem-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55))
+      drop-shadow(0 0 3px var(--emblem-color, rgb(var(--brand-primary, 82 251 162))));
+  }
+  50% {
+    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55))
+      drop-shadow(0 0 11px var(--emblem-color, rgb(var(--brand-primary, 82 251 162))));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge-emblem {
+    animation: none;
+  }
+}
+
+/* Mural do time — entrada suave de cada slide do holofote */
+.mural-slide-enter {
+  animation: mural-slide-in 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes mural-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mural-slide-enter {
+    animation: none;
+  }
+}
+
+/* Destaque temporário ao chegar via deep-link do mural (feedback/selo) */
+.mural-highlight {
+  animation: mural-highlight-pulse 2.6s ease-out;
+}
+@keyframes mural-highlight-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(82, 251, 162, 0);
+  }
+  12% {
+    box-shadow: 0 0 0 3px rgba(82, 251, 162, 0.75);
+  }
+  100% {
+    box-shadow: 0 0 0 3px rgba(82, 251, 162, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mural-highlight {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(82, 251, 162, 0.6);
+  }
+}
+
+/* Grid de vídeo (MediaTiles) — ondas concêntricas ao redor do avatar de quem
+   está falando. Cada `.speaking-wave` nasce colado no círculo e escalona via
+   `animation-delay` inline (3 instâncias por avatar) — efeito "pedra na
+   água". */
+.speaking-wave {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid rgba(82, 251, 162, 0.7);
+  animation: speaking-wave 1.8s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes speaking-wave {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .speaking-wave {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/* MediaBar — pulso discreto no botão de mic enquanto a própria voz está saindo. */
+.mic-speaking {
+  animation: mic-speaking-pulse 1.2s ease-out infinite;
+}
+@keyframes mic-speaking-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(82, 251, 162, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 7px rgba(82, 251, 162, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mic-speaking {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(82, 251, 162, 0.55);
+  }
+}
+
+/* MediaBar — pulso neon sutil no indicador de presença "online" do avatar. */
+.presence-online-pulse {
+  animation: presence-online-pulse 2.4s ease-in-out infinite;
+}
+@keyframes presence-online-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(82, 251, 162, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 6px 2px rgba(82, 251, 162, 0.85);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .presence-online-pulse {
+    animation: none;
+    box-shadow: 0 0 4px 1px rgba(82, 251, 162, 0.6);
+  }
+}
+
+/* MediaBar — leve glow verde-neon no ícone ao passar o mouse nos botões
+   principais (mic, câmera, compartilhar tela, chat da sala, Mais). Replica o
+   micro-interaction do mockup de referência sem JS adicional. */
+.office-toolbar-btn .material-symbols-outlined {
+  transition: filter 150ms ease;
+}
+.office-toolbar-btn:hover .material-symbols-outlined {
+  filter: drop-shadow(0 0 6px rgba(82, 251, 162, 0.65));
+}
+
+/* Thin, technical scrollbars to match the dashboard aesthetic */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3c4a3f; /* outline-variant */
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #859587; /* outline */
+}

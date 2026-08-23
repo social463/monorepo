@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hml-legends-legends
+  namespace: legends
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hml-legends-legends
+  template:
+    metadata:
+      annotations:
+        traffic.sidecar.istio.io/excludeOutboundPorts: "6379"
+      labels:
+        app: hml-legends-legends
+        version: v1.0
+    spec:
+      containers:
+        - name: hml-legends
+          image: legends
+          envFrom:
+            - secretRef:
+                name: hml-legends-legends-secrets
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: 256Mi

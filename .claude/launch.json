@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "legends-api",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "source ~/.nvm/nvm.sh && nvm use 20 && cd apps/api && DATABASE_URL='postgresql://legends:legends@localhost:5432/legends?schema=public' JWT_SECRET='dev-secret-change-me' PORT=3334 pnpm exec tsx watch src/server.ts"
+      ],
+      "port": 3334
+    },
+    {
+      "name": "legends-web",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "source ~/.nvm/nvm.sh && nvm use 20 && cd apps/web && VITE_API_PROXY_TARGET=http://127.0.0.1:3334 pnpm exec vite --port 5175 --strictPort"
+      ],
+      "port": 5175
+    }
+  ]
+}

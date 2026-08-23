@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f14" />
+
+    <!-- ===== SEO ===================================================== -->
+    <title>Legends — escritório virtual e reconhecimento para times de tecnologia</title>
+    <meta
+      name="description"
+      content="Um escritório virtual onde a conversa acontece por proximidade, com reconhecimento entre pares, retrospectivas ao vivo e check-in de clima. Roda no navegador, sem instalar nada."
+    />
+    <!-- TODO: trocar pelo domínio real antes de publicar -->
+    <link rel="canonical" href="https://legends.example.com/" />
+
+    <!-- ===== Open Graph ============================================== -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Legends" />
+    <meta property="og:locale" content="pt_BR" />
+    <meta property="og:url" content="https://legends.example.com/" />
+    <meta property="og:title" content="Seu time remoto de volta ao mesmo lugar" />
+    <meta
+      property="og:description"
+      content="Escritório virtual com áudio por proximidade, reconhecimento entre pares e retrospectivas que geram ação. Tudo no navegador."
+    />
+    <meta property="og:image" content="https://legends.example.com/img/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Escritório virtual do Legends em pixel-art, com pessoas conversando por proximidade." />
+
+    <!-- ===== Twitter / X ============================================= -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Seu time remoto de volta ao mesmo lugar" />
+    <meta
+      name="twitter:description"
+      content="Escritório virtual com áudio por proximidade, reconhecimento entre pares e retrospectivas que geram ação."
+    />
+    <meta name="twitter:image" content="https://legends.example.com/img/og-image.png" />
+
+    <link rel="icon" href="./img/favicon.svg" type="image/svg+xml" />
+
+    <!-- ===== Fontes ================================================== -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&family=Inter:wght@400;500;600&display=swap"
+    />
+
+    <link rel="stylesheet" href="./styles.css" />
+
+    <!-- Marca que há JS antes da primeira pintura: evita o flash de conteúdo
+         visível antes da animação de entrada assumir. -->
+    <script>
+      document.documentElement.classList.add('js')
+    </script>
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Legends",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Web",
+        "inLanguage": "pt-BR",
+        "description": "Plataforma de cultura para times de tecnologia: escritório virtual com áudio por proximidade, reconhecimento entre pares, retrospectivas ao vivo e check-in de clima."
+      }
+    </script>
+
+    <script defer src="./main.js"></script>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#conteudo">Pular para o conteúdo</a>
+
+    <!-- ================================================================
+         HEADER
+         ================================================================ -->
+    <header class="header" data-header>
+      <div class="container header__inner">
+        <a class="wordmark" href="#topo">
+          <span class="wordmark__mark" aria-hidden="true"></span>
+          Legends
+        </a>
+
+        <nav class="nav" aria-label="Seções da página">
+          <a href="#escritorio">Escritório</a>
+          <a href="#reconhecimento">Reconhecimento</a>
+          <a href="#planos">Planos</a>
+          <a href="#faq">Perguntas</a>
+        </nav>
+
+        <a class="btn btn--primary btn--sm header__cta" href="#planos">Ver o escritório funcionando</a>
+      </div>
+    </header>
+
+    <main id="conteudo">
+      <!-- ================================================================
+           1. HERÓI
+           ================================================================ -->
+      <section class="hero" id="topo">
+        <div class="container hero__inner">
+          <p class="eyebrow reveal">Escritório virtual para times de tecnologia</p>
+
+          <h1 class="reveal" data-delay="1">
+            Seu time remoto de volta ao <em>mesmo lugar</em>
+          </h1>
+
+          <p class="hero__sub reveal" data-delay="2">
+            Um escritório virtual onde a conversa acontece por proximidade: você chega perto, o áudio
+            abre. Sem marcar call, sem link, sem “consegue falar agora?”.
+          </p>
+
+          <div class="hero__actions reveal" data-delay="2">
+            <a class="btn btn--primary" href="#planos">
+              Ver o escritório funcionando
+              <span class="btn__arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="btn btn--ghost" href="#contato">Falar com a gente</a>
+          </div>
+
+          <p class="hero__note reveal" data-delay="2">Roda no navegador. Sem instalar nada.</p>
+        </div>
+
+        <div class="container hero__media reveal">
+          <!--
+            ┌─────────────────────────────────────────────────────────────┐
+            │ MÍDIA PRINCIPAL — o elemento mais importante da página.     │
+            │ Ideal: vídeo mudo em loop de 8 a 12s, dois personagens se   │
+            │ aproximando e o indicador de fala acendendo.                │
+            │ Dimensões: 1600 × 900 px (16:9).                            │
+            │ Formato: .mp4 (H.264) + .webm. Use vídeo, não GIF —         │
+            │ um GIF desse tamanho passa de 10 MB.                        │
+            │                                                             │
+            │ Substitua o bloco <figure> abaixo por:                      │
+            │                                                             │
+            │ <figure class="shot shot--wide">                            │
+            │   <video autoplay loop muted playsinline                    │
+            │          poster="./img/hero-poster.jpg"                     │
+            │          aria-label="Dois personagens se aproximam no       │
+            │            escritório virtual e o áudio abre entre eles.">  │
+            │     <source src="./img/hero.webm" type="video/webm">        │
+            │     <source src="./img/hero.mp4" type="video/mp4">          │
+            │   </video>                                                  │
+            │ </figure>                                                   │
+            └─────────────────────────────────────────────────────────────┘
+          -->
+          <figure class="shot shot--wide" role="img" aria-label="Espaço reservado para o vídeo do escritório virtual em uso.">
+            <p class="shot__tag">Vídeo principal</p>
+            <p class="shot__desc">
+              Dois personagens se aproximando e o áudio abrindo, com o radar de proximidade visível
+            </p>
+            <p class="shot__dims">1600 × 900 px · MP4 + WebM, mudo, em loop</p>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           2. PROVA SOCIAL — faixa de logos
+           ================================================================
+           A faixa está comentada de propósito. Ative só quando houver logo
+           de cliente real. Faixa de logos vazia (ou com marca genérica)
+           destrói mais confiança do que a ausência dela.
+
+      <section class="section" data-surface="raised">
+        <div class="container">
+          <p class="eyebrow" style="text-align:center;display:block">Quem já trabalha assim</p>
+          <ul class="logos">
+            <li><img src="./img/logo-cliente-1.svg" alt="Nome do cliente" height="28"></li>
+            ...
+          </ul>
+        </div>
+      </section>
+      -->
+
+      <!-- ================================================================
+           3. PROBLEMA
+           ================================================================ -->
+      <section class="section" aria-labelledby="problema-titulo">
+        <div class="container">
+          <p class="eyebrow reveal">O problema</p>
+          <h2 class="section__title reveal" id="problema-titulo">O remoto matou o corredor</h2>
+          <p class="section__lead reveal">
+            Ninguém mais esbarra em ninguém. Toda conversa de dois minutos virou um convite de trinta.
+          </p>
+
+          <div class="problem__list">
+            <article class="pain reveal">
+              <p class="pain__index">01</p>
+              <h3>A pergunta rápida custa caro</h3>
+              <p>
+                Você trava numa dúvida boba. Mandar mensagem e esperar quebra seu fluxo e o da outra
+                pessoa. Marcar call por causa disso parece exagero. Então você resolve sozinho, pior
+                e mais devagar.
+              </p>
+            </article>
+
+            <article class="pain reveal" data-delay="1">
+              <p class="pain__index">02</p>
+              <h3>Ninguém lembra quem carregou o time</h3>
+              <p>
+                Chega o ciclo de avaliação e a memória cobre as últimas duas semanas. Quem salvou a
+                sprint em março some. O reconhecimento vira sorte de calendário.
+              </p>
+            </article>
+
+            <article class="pain reveal" data-delay="2">
+              <p class="pain__index">03</p>
+              <h3>Você descobre tarde demais</h3>
+              <p>
+                A pessoa estava mal havia meses e você soube no dia do pedido de demissão. Entre uma
+                pesquisa de clima e outra passam doze meses. O sinal existia — só não tinha onde
+                aparecer.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           4. FUNCIONALIDADES
+           ================================================================ -->
+      <section class="section" data-surface="raised" id="escritorio" aria-labelledby="features-titulo">
+        <div class="container">
+          <p class="eyebrow reveal">O que você leva</p>
+          <h2 class="section__title reveal" id="features-titulo">
+            Dez módulos. Você liga só o que o time usa.
+          </h2>
+
+          <div class="features">
+            <!-- 4.1 Áudio por proximidade -->
+            <article class="feature">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Escritório</p>
+                <h3>Áudio que abre porque você chegou perto</h3>
+                <p>
+                  Cada pessoa tem um personagem e caminha pelo escritório. Chegou perto de alguém, o
+                  áudio abre nos dois lados — e fecha quando você se afasta. É a mesa do vizinho de
+                  volta.
+                </p>
+                <p>
+                  Tem sala de reunião com porta: você bate, a pessoa deixa entrar, e dá pra trancar
+                  quando a conversa é sensível. Dentro da sala, levantar a mão, compartilhar tela com
+                  áudio, rabiscar em cima do que está na tela. E um high-five quando dois acenam ao
+                  mesmo tempo.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: escritório em uso, radar de proximidade e balões de fala.
+                     1600 × 1000 px (16:10). Use dados de seed, não pessoas reais.
+                     Troque por: <img src="./img/escritorio.png" alt="..." width="1600" height="1000" loading="lazy"> -->
+                <figure class="shot" role="img" aria-label="Espaço reservado para a captura do escritório virtual.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Escritório em uso, com radar de proximidade e balões de fala</p>
+                  <p class="shot__dims">1600 × 1000 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.2 PiP -->
+            <article class="feature feature--reverse">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Escritório</p>
+                <h3>Ele continua aberto enquanto você trabalha</h3>
+                <p>
+                  O escritório vira uma janela flutuante sobre o seu editor. Você continua codando e
+                  continua “na sala”. Instala como app no desktop e no celular.
+                </p>
+                <p>
+                  Escolhe qual microfone e qual saída de áudio usar, sem depender do que o sistema
+                  decidiu por você.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: janela PiP do escritório flutuando sobre um editor de código real.
+                     1600 × 1000 px (16:10). Esse print vende sozinho — capriche.
+                     Troque por: <img src="./img/pip.png" alt="..." width="1600" height="1000" loading="lazy"> -->
+                <figure class="shot" role="img" aria-label="Espaço reservado para a captura da janela flutuante sobre o editor.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Janela flutuante do escritório por cima de um editor de código</p>
+                  <p class="shot__dims">1600 × 1000 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.3 Reconhecimento -->
+            <article class="feature" id="reconhecimento">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Reconhecimento</p>
+                <h3>Reconhecimento que sobrevive ao mês seguinte</h3>
+                <p>
+                  Todo mês, cada pessoa vota em colegas por categoria — e precisa escrever o porquê.
+                  Dessas justificativas o sistema deriva selos automáticos: categoria, recorrência,
+                  impacto, tempo de casa, constância.
+                </p>
+                <p>
+                  O perfil de cada um acumula esse histórico. Quando chega o 1:1 ou o ciclo de
+                  avaliação, você não depende da sua memória: está escrito, datado e assinado por quem
+                  trabalhou junto.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: perfil de colaborador com galeria de selos e um feedback aberto.
+                     1400 × 1050 px (4:3). Use nomes e fotos fictícios do seed.
+                     Troque por: <img src="./img/perfil.png" alt="..." width="1400" height="1050" loading="lazy"> -->
+                <figure class="shot shot--tall" role="img" aria-label="Espaço reservado para a captura do perfil com selos.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Perfil com galeria de selos e um feedback aberto</p>
+                  <p class="shot__dims">1400 × 1050 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.4 Destaque do mês -->
+            <article class="feature feature--reverse">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Reconhecimento</p>
+                <h3>O Destaque do Mês vira um card pronto pra circular</h3>
+                <p>
+                  Quem mais recebeu votos no período ganha um card em imagem, com um texto escrito por
+                  IA a partir das justificativas reais dos votos — não de um template.
+                </p>
+                <p>
+                  Você baixa e posta no Teams, mostra no all-hands, manda pro time. O reconhecimento
+                  sai da ferramenta e chega em quem importa.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: o card PNG do Destaque do Mês, gerado de verdade pelo sistema.
+                     1200 × 900 px. Fundo neutro, card levemente inclinado.
+                     Troque por: <img src="./img/card-destaque.png" alt="..." width="1200" height="900" loading="lazy"> -->
+                <figure class="shot shot--tall" role="img" aria-label="Espaço reservado para o card do Destaque do Mês.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Card do Destaque do Mês, gerado pelo próprio sistema</p>
+                  <p class="shot__dims">1200 × 900 px · PNG</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.5 Retro -->
+            <article class="feature">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Ritos</p>
+                <h3>Retrospectiva que gera ação, não post-it</h3>
+                <p>
+                  Board colaborativo ao vivo, com modo anônimo pra quando o assunto é delicado,
+                  votação nos cards e reações que aparecem em tempo real pra todo mundo.
+                </p>
+                <p>
+                  O que muda o jogo: ação não concluída atravessa pra próxima retro — e continua
+                  amarrada ao problema que a originou. A pergunta “o que a gente decidiu no mês
+                  passado?” tem resposta.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: board de retro com cards, votos e uma ação marcada como vinda da
+                     retro anterior. 1600 × 1000 px (16:10). Vale uma anotação apontando o carryover.
+                     Troque por: <img src="./img/retro.png" alt="..." width="1600" height="1000" loading="lazy"> -->
+                <figure class="shot" role="img" aria-label="Espaço reservado para a captura do board de retrospectiva.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Board de retro com votos e uma ação herdada da retro anterior</p>
+                  <p class="shot__dims">1600 × 1000 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.6 Humor -->
+            <article class="feature feature--reverse">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Clima</p>
+                <h3>O clima do time, todo dia, sem expor ninguém</h3>
+                <p>
+                  Um check-in de cinco níveis, com nota opcional. Leva cinco segundos. O líder vê o
+                  clima agregado do squad — a curva, não o registro individual de cada pessoa.
+                </p>
+                <p>
+                  Uma sequência de dias sustenta o hábito. Você para de esperar a pesquisa anual pra
+                  descobrir o que já estava acontecendo.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: painel de humor do líder com a série temporal do squad.
+                     1400 × 1050 px (4:3). Deixe evidente que os dados são agregados.
+                     Troque por: <img src="./img/humor.png" alt="..." width="1400" height="1050" loading="lazy"> -->
+                <figure class="shot shot--tall" role="img" aria-label="Espaço reservado para a captura do painel de clima.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Painel do líder com a curva de clima do squad, sempre agregada</p>
+                  <p class="shot__dims">1400 × 1050 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+
+            <!-- 4.7 Governança -->
+            <article class="feature">
+              <div class="feature__body reveal">
+                <p class="feature__kicker">Administração</p>
+                <h3>Cada setor liga só o que faz sentido</h3>
+                <p>
+                  Dez módulos, ligados ou desligados por setor. Engenharia com retro e escritório;
+                  Comercial só com resenha e destaques.
+                </p>
+                <p>
+                  Terceirizado e consultoria entram por convite com prazo de validade e uma lista
+                  fechada do que podem ver. Toda mudança de admin fica registrada em log de auditoria.
+                  E cada empresa é um ambiente isolado — os dados não se cruzam.
+                </p>
+              </div>
+
+              <div class="feature__media reveal" data-delay="1">
+                <!-- SCREENSHOT: painel de setores com os toggles de módulos.
+                     1600 × 1000 px (16:10). É a tela que responde à objeção de segurança.
+                     Troque por: <img src="./img/setores.png" alt="..." width="1600" height="1000" loading="lazy"> -->
+                <figure class="shot" role="img" aria-label="Espaço reservado para a captura do painel de setores.">
+                  <p class="shot__tag">Screenshot</p>
+                  <p class="shot__desc">Painel de setores com os módulos sendo ligados e desligados</p>
+                  <p class="shot__dims">1600 × 1000 px · PNG ou WebP</p>
+                </figure>
+              </div>
+            </article>
+          </div>
+
+          <div class="hero__actions reveal" style="justify-content: flex-start; margin-top: clamp(3.5rem, 7vw, 5rem)">
+            <a class="btn btn--primary" href="#planos">
+              Ver os planos
+              <span class="btn__arrow" aria-hidden="true">→</span>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           5. PROVA SOCIAL
+           ================================================================ -->
+      <section class="section proof" aria-labelledby="prova-titulo">
+        <div class="container container--narrow">
+          <p class="eyebrow reveal">Prova social</p>
+          <h2 class="section__title reveal" id="prova-titulo">
+            <!-- PLACEHOLDER: título da seção -->
+            Quem já trabalha assim
+          </h2>
+
+          <div class="proof__grid">
+            <figure class="quote reveal">
+              <blockquote>
+                <!-- PLACEHOLDER: depoimento real, 2 a 3 frases. O melhor tipo aqui é o que descreve
+                     uma mudança concreta de comportamento, não elogio genérico à ferramenta. -->
+                “[Depoimento real vai aqui. Duas ou três frases descrevendo o que mudou na rotina do
+                time.]”
+              </blockquote>
+              <figcaption>
+                <!-- PLACEHOLDER --> [Nome], [Cargo] na [Empresa]
+              </figcaption>
+            </figure>
+
+            <div class="placeholder-note reveal" data-delay="1">
+              <strong>Para você preencher</strong>
+              <p>
+                Dois depoimentos secundários — de preferência um de líder e um de pessoa do time,
+                porque as dores são diferentes. Logos de cliente entram na faixa comentada no topo do
+                HTML.
+              </p>
+              <p style="margin-top: 0.75rem">
+                Números só com fonte auditável. Métrica inventada é a coisa mais fácil de desmentir
+                numa call de vendas — se ainda não tem, deixe fora.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           6. PLANOS
+           ================================================================ -->
+      <section class="section" data-surface="paper" id="planos" aria-labelledby="planos-titulo">
+        <div class="container">
+          <p class="eyebrow reveal">Planos</p>
+          <h2 class="section__title reveal" id="planos-titulo">Escolha o que o seu time vai usar</h2>
+          <p class="section__lead reveal">
+            Todos os planos incluem isolamento por empresa, controle de módulos por setor e log de
+            auditoria.
+          </p>
+
+          <div class="plans">
+            <article class="plan reveal">
+              <h3>Essencial</h3>
+              <p class="plan__price">
+                [PREÇO]
+                <span>por pessoa / mês</span>
+              </p>
+              <p class="plan__who">Times que querem começar pelo reconhecimento.</p>
+              <ul class="plan__includes">
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Votação mensal com justificativa
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Selos automáticos e Hall das Lendas
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Destaque do Mês com card por IA
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Notificações internas
+                </li>
+              </ul>
+              <a class="btn btn--primary btn--block" href="#contato">Falar com a gente</a>
+            </article>
+
+            <article class="plan reveal" data-delay="1">
+              <h3>Time</h3>
+              <p class="plan__price">
+                [PREÇO]
+                <span>por pessoa / mês</span>
+              </p>
+              <p class="plan__who">Times que já rodam ritos e querem tudo num lugar só.</p>
+              <ul class="plan__includes">
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Tudo do Essencial
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Retrospectivas ao vivo com carryover
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Humor do dia e painel do líder
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Resenha e Quinta de Dev
+                </li>
+              </ul>
+              <a class="btn btn--primary btn--block" href="#contato">Falar com a gente</a>
+            </article>
+
+            <article class="plan plan--featured reveal" data-delay="2">
+              <p class="plan__badge">Mais completo</p>
+              <h3>Escritório</h3>
+              <p class="plan__price">
+                [PREÇO]
+                <span>por pessoa / mês</span>
+              </p>
+              <p class="plan__who">
+                Times remotos ou híbridos que perderam a convivência do dia a dia.
+              </p>
+              <ul class="plan__includes">
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Tudo do Time
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Escritório virtual com áudio por proximidade
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Salas, compartilhamento de tela e mesas
+                </li>
+                <li>
+                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 7.5 5.5 11 12 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Convidados externos por link temporário
+                </li>
+              </ul>
+              <a class="btn btn--primary btn--block" href="#contato">Começar pelo Escritório</a>
+            </article>
+          </div>
+
+          <div class="table-scroll reveal">
+            <table class="compare">
+              <caption class="visually-hidden">
+                Comparação dos módulos incluídos em cada plano
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Módulo</th>
+                  <th scope="col">Essencial</th>
+                  <th scope="col">Time</th>
+                  <th scope="col">Escritório</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Perfis e time</th>
+                  <td class="yes">Sim<span class="visually-hidden">, incluído</span></td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Votação mensal com justificativa</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Selos automáticos</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Destaque do Mês com card por IA</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Hall das Lendas</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Notificações internas</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Acesso para terceirizados com prazo</th>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Resenha (feed interno com menções, GIFs e imagens)</th>
+                  <td class="no">Não<span class="visually-hidden"> incluído</span></td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Retrospectivas ao vivo com carryover de ações</th>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Quinta de Dev (agenda de apresentações)</th>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Humor do dia e painel do líder</th>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr class="row-hero">
+                  <th scope="row">Escritório virtual com áudio por proximidade</th>
+                  <td class="no">Não</td>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Salas de reunião, compartilhamento de tela e mesas</th>
+                  <td class="no">Não</td>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Editor de mapas com versionamento</th>
+                  <td class="no">Não</td>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Convidados externos com link temporário</th>
+                  <td class="no">Não</td>
+                  <td class="no">Não</td>
+                  <td class="yes">Sim</td>
+                </tr>
+                <tr>
+                  <th scope="row">Suporte</th>
+                  <td>[A definir]</td>
+                  <td>[A definir]</td>
+                  <td>[A definir]</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="plans__footnote reveal">
+            Precisa de instalação no seu próprio ambiente ou de mais de um setor com regras
+            diferentes? <!-- PLACEHOLDER: condições do plano Enterprise/on-premise -->
+            <a href="#contato" style="color: inherit">Fale com a gente</a>.
+          </p>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           7. FAQ
+           ================================================================ -->
+      <section class="section" id="faq" aria-labelledby="faq-titulo">
+        <div class="container container--narrow">
+          <p class="eyebrow reveal">Perguntas</p>
+          <h2 class="section__title reveal" id="faq-titulo">O que costumam perguntar antes de fechar</h2>
+
+          <div class="faq reveal">
+            <details>
+              <summary>Já usamos Teams (ou Slack e Meet). Por que mais uma ferramenta?</summary>
+              <p>
+                Porque essas ferramentas exigem que alguém tome a iniciativa de te chamar. O
+                escritório inverte isso: a conversa começa porque duas pessoas estão perto, do mesmo
+                jeito que começava no escritório físico. Ninguém vai desinstalar o Teams — o Legends
+                cobre o que ele nunca cobriu.
+              </p>
+            </details>
+
+            <details>
+              <summary>Meu time vai achar infantil e não vai adotar.</summary>
+              <p>
+                É um risco real e vale testar antes de comprar. Na prática, o pixel-art é o que faz a
+                coisa não parecer vigilância: seu personagem anda, e não a sua webcam ligada o dia
+                inteiro. Comece por um squad, deixe rodar duas semanas e veja se as pessoas voltam
+                sozinhas.
+              </p>
+            </details>
+
+            <details>
+              <summary>Isso vira monitoramento de quem está online?</summary>
+              <p>
+                Não foi construído pra isso. Você tem status de ausente e “já volto”, e o áudio só
+                abre por proximidade — ou seja, você controla quando está disponível andando. O humor
+                do dia chega pro líder agregado por squad, não pessoa a pessoa.
+              </p>
+            </details>
+
+            <details>
+              <summary>Precisa instalar alguma coisa?</summary>
+              <p>
+                Não. Roda no navegador. Se quiser, dá pra instalar como app no desktop e no celular, e
+                usar a janela flutuante por cima do seu editor — mas é opcional.
+              </p>
+            </details>
+
+            <details>
+              <summary>Somos uma empresa só, mas com áreas muito diferentes. Dá pra separar?</summary>
+              <p>
+                Dá. Cada setor tem seus próprios módulos ligados, suas categorias de reconhecimento,
+                seus períodos de votação e seus squads. Um subadmin pode administrar só o setor dele.
+                E se você tem mais de uma empresa, cada uma é um ambiente isolado.
+              </p>
+            </details>
+
+            <details>
+              <summary>Como funciona com terceirizados e consultorias?</summary>
+              <p>
+                Você gera um convite com prazo de validade e escolhe exatamente o que aquela pessoa
+                vai ver. Passou o prazo, o acesso morre sozinho. Convidado externo pontual entra por
+                link, sem virar usuário.
+              </p>
+            </details>
+
+            <details>
+              <summary>Nossos dados ficam onde?</summary>
+              <p>
+                <!-- PLACEHOLDER — preencher: região do hosting, política de retenção e se você
+                     oferece instalação no ambiente do cliente. A arquitetura permite (imagem Docker
+                     única), mas isso é decisão comercial, não técnica. -->
+                [Preencher: região de hospedagem, política de retenção e disponibilidade de instalação
+                no ambiente do cliente.]
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           8. CTA FINAL
+           ================================================================ -->
+      <section class="section final" id="contato" aria-labelledby="final-titulo">
+        <div class="container final__inner">
+          <h2 class="reveal" id="final-titulo">O corredor não volta sozinho</h2>
+          <p class="reveal" data-delay="1">
+            Coloque um squad no escritório por duas semanas. Se ninguém voltar por vontade própria,
+            você não perdeu nada.
+          </p>
+
+          <div class="hero__actions reveal" data-delay="2">
+            <!-- PLACEHOLDER: apontar para o formulário, Cal.com ou mailto real -->
+            <a class="btn btn--primary" href="#topo">
+              Começar agora
+              <span class="btn__arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="btn btn--ghost" href="#topo">Agendar uma demonstração</a>
+          </div>
+
+          <p class="hero__note reveal" data-delay="2">
+            <!-- PLACEHOLDER: condição de entrada — teste grátis? quantos dias? precisa de cartão? -->
+            [Condição de entrada: teste grátis, duração e se pede cartão.]
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <!-- ================================================================
+         RODAPÉ
+         ================================================================ -->
+    <footer class="footer">
+      <div class="container">
+        <div class="footer__inner">
+          <p>
+            <span class="wordmark" style="font-size: 0.9375rem">
+              <span class="wordmark__mark" aria-hidden="true"></span>
+              Legends
+            </span>
+            <!-- PLACEHOLDER: razão social -->
+            <br />
+            © <span data-year>2026</span> [Razão social]
+          </p>
+
+          <nav aria-label="Links do rodapé">
+            <a href="#planos">Planos</a>
+            <a href="#faq">Perguntas</a>
+            <a href="#contato">Contato</a>
+            <!-- PLACEHOLDER: termos, privacidade, status -->
+            <a href="#">Termos</a>
+            <a href="#">Privacidade</a>
+          </nav>
+        </div>
+
+        <p class="footer__credits">
+          Personagens e cenários em pixel-art do projeto
+          <a href="https://lpc.opengameart.org/" rel="noopener">Liberated Pixel Cup (LPC)</a>,
+          usados sob as licenças CC-BY-SA 3.0 e GPL 3.0. A lista completa de autores está em
+          <a href="/lpc/CREDITS.txt">/lpc/CREDITS.txt</a>. Esse crédito é exigido pela licença dos
+          assets — não remova.
+        </p>
+      </div>
+    </footer>
+
+    <!-- CTA fixo no mobile -->
+    <div class="sticky-cta">
+      <a class="btn btn--primary btn--block" href="#planos">Ver o escritório funcionando</a>
+    </div>
+  </body>
+</html>

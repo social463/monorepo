@@ -1,0 +1,19 @@
+# Créditos — assets de mapas do escritório
+
+## Móveis de escritório (Office-Furniture-Pixel-Art)
+- Autor: Antea (stcrbcn) — https://stcrbcn.itch.io/furniture-office-set
+- Licença: CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- Uso: mesas com computador, cadeiras, sofás, estantes, arquivos, impressora,
+  máquina de café, bebedouro, plantas, quadro, relógio, entre outros — usados
+  como tileset de 32×32 nos mapas do escritório virtual.
+
+## Piso/paredes legado
+- Origem: `apps/web/public/office/legacy-office-tileset.svg`, desenhado
+  internamente para a migração inicial do escritório (ver
+  `docs/superpowers/specs/2026-07-15-escritorio-editor-mapas-design.md`).
+  Sem licença de terceiros — arte própria do projeto.
+
+## Kart
+- Origem: imagem gerada com OpenAI para o Legends e finalizada internamente
+  como sprite pixel-art de 48×48 (`apps/web/public/office/kart.png`).
+- Sem asset ou licença de terceiros.

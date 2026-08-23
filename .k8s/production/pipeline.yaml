@@ -1,0 +1,130 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  - name: AWS_CREDENTIALS
+    value: aws-blue
+  - name: AWS_REGION
+    value: us-east-1
+  - name: GIT_USER_NAME
+    value: legends.pipeline
+  - name: GIT_USER_EMAIL
+    value: legends.pipeline@eumedicoresidente.com.br
+  - name: APP_NAME
+    value: legends
+  - name: IMAGE_TAG
+    value: $(Build.SourceVersion)
+  - name: PACKAGE_PATH
+    value: .
+  - name: BASE_REF
+    value: HEAD~1
+  - name: KUSTOMIZE_PATH
+    value: $(Pipeline.Workspace)/s/.k8s/production
+
+stages:
+  # Version-only bump skip disabled — uncomment CheckChanges and the two conditions below to restore.
+  # - stage: CheckChanges
+  #   displayName: Check if version-only bump
+  #   jobs:
+  #     - job: CheckJob
+  #       displayName: Detect version-only bump
+  #       steps:
+  #         - checkout: self
+  #           fetchDepth: 2
+  #         - script: |
+  #             chmod +x ./.scripts/is-version-only-bump.sh
+  #             RESULT=$(./.scripts/is-version-only-bump.sh "$(PACKAGE_PATH)")
+  #             echo "SkipBuildAndDeploy=$RESULT"
+  #             echo "##vso[task.setvariable variable=SkipBuildAndDeploy;isOutput=true]$RESULT"
+  #           name: SetSkipFlag
+  #           env:
+  #             BASE_REF: $(BASE_REF)
+
+  - stage: BuildAndPush
+    displayName: Build and Push Stage
+    # condition: eq(dependencies.CheckChanges.outputs['CheckJob.SetSkipFlag.SkipBuildAndDeploy'], 'false')
+    # dependsOn: CheckChanges
+    jobs:
+      - job: BuildAndPushJob
+        displayName: Build and Push Job
+        steps:
+          - checkout: self
+            persistCredentials: true
+            clean: true
+
+          - task: Docker@2
+            displayName: 'Build Docker Image'
+            inputs:
+              command: build
+              dockerfile: '$(System.DefaultWorkingDirectory)/Dockerfile'
+              buildContext: '$(System.DefaultWorkingDirectory)'
+              repository: '$(APP_NAME)'
+              tags: $(IMAGE_TAG)
+              arguments: |
+                --build-arg NPM_TOKEN=$(NPM_TOKEN)
+            env:
+              NPM_TOKEN: $(NPM_TOKEN)
+
+          - task: ECRPushImage@1
+            displayName: 'Push Docker Image to ECR'
+            env:
+              AWS_CREDENTIALS: $(AWS_CREDENTIALS)
+              AWS_REGION: $(AWS_REGION)
+              APP_NAME: $(APP_NAME)
+              IMAGE_TAG: $(IMAGE_TAG)
+            inputs:
+              awsCredentials: $(AWS_CREDENTIALS)
+              regionName: $(AWS_REGION)
+              imageSource: 'imagename'
+              sourceImageName: $(APP_NAME)
+              sourceImageTag: $(IMAGE_TAG)
+              pushTag: $(IMAGE_TAG)
+              repositoryName: $(APP_NAME)
+
+  - stage: Deploy
+    displayName: 'Deploy Stage'
+    # condition: and(succeeded(), eq(dependencies.CheckChanges.outputs['CheckJob.SetSkipFlag.SkipBuildAndDeploy'], 'false'))
+    dependsOn: BuildAndPush
+    jobs:
+      - job: DeployJob
+        displayName: 'Deploy Job'
+        steps:
+          - checkout: self
+            persistCredentials: true
+            clean: true
+            fetchDepth: 0
+
+          - script: |
+              set -euo pipefail
+              curl -fsSLo /tmp/kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.1/kustomize_v5.8.1_linux_amd64.tar.gz"
+              tar -xzf /tmp/kustomize.tar.gz -C /tmp
+              chmod +x /tmp/kustomize
+              /tmp/kustomize version
+            displayName: 'Instalando o Kustomize'
+
+          - script: |
+              cd $(KUSTOMIZE_PATH)
+              /tmp/kustomize edit set image $(APP_NAME)=$(ECR_URL):$(IMAGE_TAG)
+            displayName: 'Rodando o Kustomize'
+
+          - script: |
+              cd $(KUSTOMIZE_PATH)
+
+              git config --global user.name "$(GIT_USER_NAME)"
+              git config --global user.email "$(GIT_USER_EMAIL)"
+
+              git checkout $(Build.SourceBranchName)
+              git pull
+
+              git add kustomization.yaml
+
+              if git diff --cached --quiet; then
+                echo "Nenhuma alteracao no kustomization.yaml; tag ja aplicada."
+                exit 0
+              fi
+
+              git commit -m "Updating kustomization to $(IMAGE_TAG) in $(APP_NAME)"
+              git push origin $(Build.SourceBranchName)
+            displayName: 'Commit e Push das Alterações'

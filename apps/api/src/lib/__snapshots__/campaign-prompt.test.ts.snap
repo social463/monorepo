@@ -1,0 +1,24 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`prompt da campanha > monta o prompt com tema, público e datas 1`] = `
+"Você é o time de comunicação interna da empresa EMR, escrevendo em português do Brasil.
+Escreva 2 comunicado(s) para uma campanha sobre: Semana da segurança.
+Público-alvo: Todos.
+Observações do solicitante: Citar a CIPA
+
+Cada comunicado será publicado em uma destas datas, nesta ordem:
+1. terça-feira, 01 de setembro às 09:00
+2. quinta-feira, 03 de setembro às 09:00
+
+REGRAS
+- Um comunicado por data, na mesma ordem da lista.
+- O corpo tem no máximo 280 caracteres. Este limite é rígido.
+- O título tem no máximo 120 caracteres e é interno (não aparece no post).
+- A campanha deve progredir: abertura, desenvolvimento e encerramento. Não repita o mesmo texto.
+- Não invente número, data, nome de pessoa, benefício ou política que não esteja no tema.
+- Tom caloroso e profissional. Sem markdown, sem emojis, sem aspas.
+
+FORMATO DA RESPOSTA
+Responda APENAS com um array JSON, sem texto antes ou depois, com exatamente 2 objeto(s):
+[{"title": "...", "body": "...", "visualHint": "sugestão de imagem em uma frase"}]"
+`;

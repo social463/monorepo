@@ -1,0 +1,14 @@
+{
+  "name": "@legends/site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Landing page pública do Legends. HTML/CSS/JS puros — sem framework.",
+  "scripts": {
+    "dev": "vite --port 5180",
+    "build": "vite build",
+    "preview": "vite preview --port 5180"
+  },
+  "devDependencies": {
+    "vite": "^5.4.1"
+  }
+}

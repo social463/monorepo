@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+apps/web/dist/
+apps/api/storage/
+.playwright-mcp/
+.superpowers/
+scripts/.office-assets/
+.worktrees/
