@@ -79,6 +79,12 @@ done
 # 7. Rollback.
 if [ "$healthy" != true ]; then
   log "ERRO: health check falhou apos 60s. Ultimas linhas do container:"
+  # Esta saida (stdout) vira StandardOutputContent da invocacao SSM, e o
+  # send-deploy.sh ecoa isso no log do GitHub Actions — que e PUBLICO neste
+  # repositorio. Por isso a aplicacao NUNCA deve logar variavel de ambiente
+  # nem string de conexao (ex.: DATABASE_URL) no startup. Quem precisar de
+  # log mais completo do que estas 50 linhas deve buscar direto com
+  # `aws ssm get-command-invocation`, e nao aumentar o --tail aqui.
   docker logs --tail 50 "$CONTAINER" 2>&1 || true
 
   if [ -n "$PREVIOUS_IMAGE" ]; then
