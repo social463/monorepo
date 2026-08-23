@@ -3,6 +3,21 @@ resource "random_password" "jwt_secret" {
   special = false
 }
 
+# LIVEKIT_API_KEY, LIVEKIT_API_SECRET e LIVEKIT_URL deixaram de ser PREENCHER:
+# sao exigencia de BOOT da API (lib/config.ts lanca erro em producao se
+# faltarem, e o listen() nao sobe), nao um recurso opcional que degrada
+# sozinho. Um placeholder aqui deixaria a API fora do ar ate alguem lembrar
+# de preencher a mao.
+resource "random_password" "livekit_api_key" {
+  length  = 24
+  special = false
+}
+
+resource "random_password" "livekit_api_secret" {
+  length  = 48
+  special = false
+}
+
 # 32 bytes em base64, exatamente o que lib/crypto.ts espera.
 resource "random_bytes" "calendar_encryption_key" {
   length = 32
@@ -27,9 +42,6 @@ locals {
     GIPHY_API_KEY      = "PREENCHER"
     S3_BUCKET          = "PREENCHER"
     S3_PUBLIC_BASE_URL = "PREENCHER"
-    LIVEKIT_API_KEY    = "PREENCHER"
-    LIVEKIT_API_SECRET = "PREENCHER"
-    LIVEKIT_URL        = "PREENCHER"
   }
 
   # Valor conhecido agora e derivado da propria infra.
@@ -38,6 +50,9 @@ locals {
     GEMINI_MODEL                = "gemini-2.5-flash"
     S3_REGION                   = var.aws_region
     TEAMS_NOTIFICATIONS_ENABLED = "true"
+    # Subdominio do LiveKit self-hosted (mesma EC2, atras do Caddy). E o
+    # mesmo host que o bloco em infra/Caddyfile expoe.
+    LIVEKIT_URL = "wss://livekit.${var.app_domain}"
   }
 }
 
@@ -58,6 +73,20 @@ resource "aws_ssm_parameter" "jwt_secret" {
   type        = "SecureString"
   value       = random_password.jwt_secret.result
   description = "Obrigatorio em producao (lib/config.ts). Trocar desloga todo mundo."
+}
+
+resource "aws_ssm_parameter" "livekit_api_key" {
+  name        = "/legends/prod/LIVEKIT_API_KEY"
+  type        = "SecureString"
+  value       = random_password.livekit_api_key.result
+  description = "Obrigatorio em producao (lib/config.ts). Lido pelo bootstrap para gerar /etc/livekit/livekit.yaml."
+}
+
+resource "aws_ssm_parameter" "livekit_api_secret" {
+  name        = "/legends/prod/LIVEKIT_API_SECRET"
+  type        = "SecureString"
+  value       = random_password.livekit_api_secret.result
+  description = "Obrigatorio em producao (lib/config.ts). Lido pelo bootstrap para gerar /etc/livekit/livekit.yaml."
 }
 
 resource "aws_ssm_parameter" "calendar_encryption_key" {
@@ -91,4 +120,23 @@ resource "aws_ssm_parameter" "placeholder" {
   lifecycle {
     ignore_changes = [value]
   }
+}
+
+# Os tres parametros do LiveKit saem do map de placeholder e viram recurso
+# proprio (blocos acima). Sem isto o Terraform veria endereco de estado
+# diferente e destruiria o parametro antigo antes de criar o novo — o `moved`
+# preserva a identidade, e o resultado vira apenas uma atualizacao de valor.
+moved {
+  from = aws_ssm_parameter.placeholder["LIVEKIT_API_KEY"]
+  to   = aws_ssm_parameter.livekit_api_key
+}
+
+moved {
+  from = aws_ssm_parameter.placeholder["LIVEKIT_API_SECRET"]
+  to   = aws_ssm_parameter.livekit_api_secret
+}
+
+moved {
+  from = aws_ssm_parameter.placeholder["LIVEKIT_URL"]
+  to   = aws_ssm_parameter.derived["LIVEKIT_URL"]
 }

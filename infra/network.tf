@@ -22,6 +22,27 @@ resource "aws_security_group" "app" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Fallback do LiveKit quando o cliente esta atras de firewall que bloqueia
+  # UDP: o SDK cai para TCP nesta porta em vez de desistir da chamada.
+  ingress {
+    description = "LiveKit TCP fallback (WebRTC sem UDP disponivel)"
+    from_port   = 7881
+    to_port     = 7881
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Faixa de midia WebRTC do LiveKit. Precisa ficar aberta para a internet
+  # porque o participante remoto (fora da VPC) e quem envia audio/video para
+  # ca; sem isso a chamada nao troca midia, so sinalizacao.
+  ingress {
+    description = "LiveKit midia WebRTC (RTP/RTCP)"
+    from_port   = 50000
+    to_port     = 60000
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     description = "Saida liberada (pull do ECR, SSM, ACME, S3, LiveKit)"
     from_port   = 0
