@@ -34,6 +34,16 @@ variable "github_repo" {
   description = "owner/repo autorizado a assumir a role via OIDC."
 }
 
+variable "github_owner_id" {
+  type        = string
+  description = "ID numerico do dono do repo no GitHub (campo owner.id do token OIDC, visivel no sub no CloudTrail, ou em https://api.github.com/repos/<owner>/<repo>). Usado para casar o sub sem depender do nome do dono, que pode mudar."
+}
+
+variable "github_repo_id" {
+  type        = string
+  description = "ID numerico do repositorio no GitHub (campo id do token OIDC, visivel no sub no CloudTrail, ou em https://api.github.com/repos/<owner>/<repo>). Usado para casar o sub sem depender do nome do repo, que pode mudar."
+}
+
 variable "deploy_branch" {
   type        = string
   default     = "main"
