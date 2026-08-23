@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 CADDY_VERSION=2.10.2
 
-dnf -y update
+dnf -y makecache
 
 # ---------- Docker ----------
 # Pacote oficial do AL2023, sem repositorio externo.
@@ -41,8 +41,10 @@ if ! command -v caddy >/dev/null 2>&1; then
 fi
 
 # Usuario de sistema sem shell de login, dono do processo do Caddy.
+# --home-dir aponta pro mesmo diretorio onde o Caddy guarda os certificados
+# (senao o useradd cai em /home/caddy, que nao existe e nao pode ser criado).
 if ! id caddy >/dev/null 2>&1; then
-  useradd --system --no-create-home --shell /usr/sbin/nologin caddy
+  useradd --system --no-create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
 fi
 mkdir -p /etc/caddy /var/lib/caddy
 chown -R caddy:caddy /var/lib/caddy
@@ -60,6 +62,9 @@ Wants=network-online.target
 Type=notify
 User=caddy
 Group=caddy
+# HOME explicito: cobre tambem a maquina onde o usuario caddy ja existia com
+# outro home (script idempotente). E onde o Caddy persiste os certificados.
+Environment=HOME=/var/lib/caddy
 ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
 TimeoutStopSec=5s
