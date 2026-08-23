@@ -13,9 +13,15 @@ resource "random_password" "db" {
 }
 
 resource "aws_db_instance" "legends" {
-  identifier     = "legends-prod"
-  engine         = "postgres"
-  engine_version = "16.4"
+  identifier = "legends-prod"
+  engine     = "postgres"
+  # Major 16, a mesma do docker-compose.yml do dev. O minor NAO e escolha
+  # estetica: a AWS remove minors antigos do catalogo, e a 16.4 que este
+  # arquivo trazia ja nao existe mais ("Cannot find version 16.4 for postgres").
+  # Confira o que esta disponivel antes de mudar:
+  #   aws rds describe-db-engine-versions --engine postgres \
+  #     --query 'DBEngineVersions[?starts_with(EngineVersion,`16.`)].EngineVersion'
+  engine_version = "16.15"
   instance_class = var.db_instance_class
 
   allocated_storage     = var.db_allocated_storage
