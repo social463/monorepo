@@ -673,6 +673,237 @@ describe('público-alvo por tag', () => {
   })
 })
 
+describe('convite a pessoas específicas (Documento 3, seção 11)', () => {
+  const JANELA = '/calendar/events?from=2026-09-01&to=2026-09-30'
+
+  async function cenario(sufixo: string) {
+    const app = buildApp()
+    await app.ready()
+    const admin = await registerUser(app, 'Admin', `admin-conv-${sufixo}@x.com`)
+    const headers = { authorization: `Bearer ${tokenFor(app, admin, { role: 'ADMIN' })}` }
+    const type = await seedType()
+    return { app, admin, headers, type }
+  }
+
+  it('o convidado vê o evento mesmo fora do setor alvo', async () => {
+    const { app, headers, type } = await cenario('setor')
+    const outro = await prisma.sector.create({
+      data: { name: 'Ensino', slug: 'ensino-conv', enabledFeatures: ['calendario'] },
+    })
+    const alvo = await prisma.sector.create({
+      data: { name: 'Produto', slug: 'produto-conv', enabledFeatures: ['calendario'] },
+    })
+    const convidado = await registerUser(app, 'Convidado', 'conv-setor@x.com')
+    await prisma.user.update({ where: { id: convidado.id }, data: { sectorId: outro.id } })
+
+    await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, sectorIds: [alvo.id], guestIds: [convidado.id] },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: JANELA,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, convidado, { role: 'LEGEND', sectorId: outro.id, features: ['calendario'] })}`,
+      },
+    })
+
+    // O recorte por setor NÃO alcançaria essa pessoa — é o ponto do convite.
+    expect(res.json().occurrences).toHaveLength(1)
+    await app.close()
+  })
+
+  it('o convidado vê o evento mesmo fora da tag de público-alvo', async () => {
+    const { app, headers, type } = await cenario('tag')
+    const convidado = await registerUser(app, 'Convidado', 'conv-tag@x.com')
+    await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, audienceTags: ['Líder'], guestIds: [convidado.id] },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: JANELA,
+      headers: { authorization: `Bearer ${tokenFor(app, convidado, { role: 'LEGEND', features: ['calendario'] })}` },
+    })
+
+    // A visibilidade tem DOIS filtros — o `where` do setor e o de tag em
+    // memória. Mexer só num deixaria o convidado de fora sem erro aparecer.
+    expect(res.json().occurrences).toHaveLength(1)
+    await app.close()
+  })
+
+  it('convidar uma pessoa não abre o evento para as outras', async () => {
+    const { app, headers, type } = await cenario('vazamento')
+    const convidado = await registerUser(app, 'Convidado', 'conv-ok@x.com')
+    const estranho = await registerUser(app, 'Estranho', 'conv-nao@x.com')
+    await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, audienceTags: ['Líder'], guestIds: [convidado.id] },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: JANELA,
+      headers: { authorization: `Bearer ${tokenFor(app, estranho, { role: 'LEGEND', features: ['calendario'] })}` },
+    })
+
+    expect(res.json().occurrences).toHaveLength(0)
+    await app.close()
+  })
+
+  it('convite NÃO abre a Ação de Comunicação Interna', async () => {
+    const { app, headers, type } = await cenario('interno')
+    const convidado = await registerUser(app, 'Convidado', 'conv-interno@x.com')
+    await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, isInternalComm: true, guestIds: [convidado.id] },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: JANELA,
+      headers: { authorization: `Bearer ${tokenFor(app, convidado, { role: 'LEGEND', features: ['calendario'] })}` },
+    })
+
+    // O registro interno da G&G não vaza por convite: convidar não é autorizar.
+    expect(res.json().occurrences).toHaveLength(0)
+    await app.close()
+  })
+
+  it('avisa quem foi convidado, e não avisa quem convidou', async () => {
+    const { app, admin, headers, type } = await cenario('aviso')
+    const convidado = await registerUser(app, 'Convidado', 'conv-aviso@x.com')
+
+    await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [convidado.id, admin.id] },
+    })
+
+    const doConvidado = await prisma.notification.findMany({
+      where: { userId: convidado.id, type: 'CALENDAR_EVENT_INVITED' },
+    })
+    expect(doConvidado).toHaveLength(1)
+    expect(doConvidado[0]!.title).toContain(BASE.title)
+    // Quem convidou acabou de escrever o evento; avisá-lo seria ruído.
+    expect(await prisma.notification.count({ where: { userId: admin.id, type: 'CALENDAR_EVENT_INVITED' } })).toBe(0)
+    await app.close()
+  })
+
+  it('editar sem mexer na lista não reavisa ninguém', async () => {
+    const { app, headers, type } = await cenario('reaviso')
+    const convidado = await registerUser(app, 'Convidado', 'conv-reaviso@x.com')
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [convidado.id] },
+    })
+    const id = criado.json().event.id
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/calendar/events/${id}`,
+      headers,
+      payload: { ...BASE, typeId: type.id, description: 'corrigi uma vírgula', guestIds: [convidado.id] },
+    })
+
+    // Salvar o evento para corrigir a descrição não pode disparar convite de novo.
+    expect(await prisma.notification.count({ where: { userId: convidado.id, type: 'CALENDAR_EVENT_INVITED' } })).toBe(1)
+    await app.close()
+  })
+
+  it('adicionar um convidado na edição avisa só ele', async () => {
+    const { app, headers, type } = await cenario('novo')
+    const antigo = await registerUser(app, 'Antigo', 'conv-antigo@x.com')
+    const novo = await registerUser(app, 'Novo', 'conv-novo@x.com')
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [antigo.id] },
+    })
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/calendar/events/${criado.json().event.id}`,
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [antigo.id, novo.id] },
+    })
+
+    expect(await prisma.notification.count({ where: { userId: antigo.id, type: 'CALENDAR_EVENT_INVITED' } })).toBe(1)
+    expect(await prisma.notification.count({ where: { userId: novo.id, type: 'CALENDAR_EVENT_INVITED' } })).toBe(1)
+    await app.close()
+  })
+
+  it('remover o convidado tira o evento da vista dele', async () => {
+    const { app, headers, type } = await cenario('remover')
+    const convidado = await registerUser(app, 'Convidado', 'conv-remover@x.com')
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, audienceTags: ['Líder'], guestIds: [convidado.id] },
+    })
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/calendar/events/${criado.json().event.id}`,
+      headers,
+      payload: { ...BASE, typeId: type.id, audienceTags: ['Líder'], guestIds: [] },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: JANELA,
+      headers: { authorization: `Bearer ${tokenFor(app, convidado, { role: 'LEGEND', features: ['calendario'] })}` },
+    })
+    expect(res.json().occurrences).toHaveLength(0)
+    await app.close()
+  })
+
+  it('recusa convidado que não é da empresa ou está inativo', async () => {
+    const { app, headers, type } = await cenario('invalido')
+    const inativo = await registerUser(app, 'Inativo', 'conv-inativo@x.com')
+    await prisma.user.update({ where: { id: inativo.id }, data: { active: false } })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [inativo.id] },
+    })
+
+    expect(res.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('o DTO de gestão devolve os convidados', async () => {
+    const { app, headers, type } = await cenario('dto')
+    const convidado = await registerUser(app, 'Convidado', 'conv-dto@x.com')
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/calendar/events',
+      headers,
+      payload: { ...BASE, typeId: type.id, guestIds: [convidado.id] },
+    })
+
+    expect(criado.json().event.guests.map((g: { id: string }) => g.id)).toEqual([convidado.id])
+    await app.close()
+  })
+})
+
 describe('Ação de Comunicação Interna', () => {
   const JANELA = '/calendar/events?from=2026-09-01&to=2026-09-30'
 
@@ -895,6 +1126,127 @@ describe('GET /calendar/events/:id', () => {
       headers: { authorization: `Bearer ${tokenFor(app, lead, { role: 'LEAD' })}` },
     })
     expect(res.statusCode).toBe(403)
+    await app.close()
+  })
+})
+
+/**
+ * Documento 4, seção 13.2: o calendário editorial de Campanhas passa a aparecer
+ * na janela do calendário organizacional — a "visão sistêmica" que a G&G pediu.
+ *
+ * É PROJEÇÃO, não espelho: o item continua sendo só `CampaignPost`. Criar um
+ * `CalendarEvent` gêmeo seriam duas fontes para o mesmo dado, e o bug que o
+ * Lote A consertou nasceu exatamente disso.
+ */
+describe('calendário editorial no calendário organizacional', () => {
+  async function seedCampaignPost(overrides: Record<string, unknown> = {}) {
+    return prisma.campaignPost.create({
+      data: {
+        title: 'Aviso de manutenção',
+        body: 'O sistema fica indisponível no sábado.',
+        scheduledFor: new Date('2026-09-15T14:30:00.000Z'),
+        channel: 'MURAL',
+        audience: 'ALL',
+        companyId: DEFAULT_COMPANY_ID,
+        ...overrides,
+      },
+    })
+  }
+
+  const URL = '/calendar/events?from=2026-09-01&to=2026-09-30'
+
+  it('o time de G&G vê o item da janela', async () => {
+    const app = buildApp()
+    await app.ready()
+    const user = await registerUser(app, 'GG', `gg-${Math.random()}@empresa.com`)
+    await seedCampaignPost()
+
+    const res = await app.inject({
+      method: 'GET',
+      url: URL,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, user, { role: 'SUBADMIN', features: ['calendario', 'gente-gestao'] })}`,
+      },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().campaignPosts).toHaveLength(1)
+    expect(res.json().campaignPosts[0]).toMatchObject({
+      title: 'Aviso de manutenção',
+      channelLabel: 'Mural da empresa',
+    })
+    await app.close()
+  })
+
+  it('o colaborador não vê — é material de quem publica', async () => {
+    const app = buildApp()
+    await app.ready()
+    const user = await registerUser(app, 'Dev', `dev-${Math.random()}@empresa.com`)
+    await seedCampaignPost()
+
+    const res = await app.inject({
+      method: 'GET',
+      url: URL,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, user, { role: 'COLLABORATOR', features: ['calendario'] })}`,
+      },
+    })
+
+    expect(res.json().campaignPosts).toEqual([])
+    await app.close()
+  })
+
+  it('item cancelado fica de fora', async () => {
+    const app = buildApp()
+    await app.ready()
+    const user = await registerUser(app, 'GG', `gg-${Math.random()}@empresa.com`)
+    await seedCampaignPost({ status: 'CANCELLED' })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: URL,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, user, { role: 'ADMIN', features: ['calendario'] })}`,
+      },
+    })
+
+    expect(res.json().campaignPosts).toEqual([])
+    await app.close()
+  })
+
+  it('item do último dia da janela entra — o fim é um DIA, não um instante', async () => {
+    const app = buildApp()
+    await app.ready()
+    const user = await registerUser(app, 'GG', `gg-${Math.random()}@empresa.com`)
+    await seedCampaignPost({ scheduledFor: new Date('2026-09-30T20:00:00.000Z') })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: URL,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, user, { role: 'ADMIN', features: ['calendario'] })}`,
+      },
+    })
+
+    expect(res.json().campaignPosts).toHaveLength(1)
+    await app.close()
+  })
+
+  it('item fora da janela fica de fora', async () => {
+    const app = buildApp()
+    await app.ready()
+    const user = await registerUser(app, 'GG', `gg-${Math.random()}@empresa.com`)
+    await seedCampaignPost({ scheduledFor: new Date('2026-10-05T12:00:00.000Z') })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: URL,
+      headers: {
+        authorization: `Bearer ${tokenFor(app, user, { role: 'ADMIN', features: ['calendario'] })}`,
+      },
+    })
+
+    expect(res.json().campaignPosts).toEqual([])
     await app.close()
   })
 })

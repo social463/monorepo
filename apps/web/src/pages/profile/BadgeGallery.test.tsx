@@ -13,7 +13,7 @@ const badges: AwardedBadgeDTO[] = [
     source: 'AUTO',
     awardedBy: null,
     featured: false,
-    badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', global: true, sectorIds: [] },
+    badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] },
   },
   {
     id: 'ub2',
@@ -21,7 +21,7 @@ const badges: AwardedBadgeDTO[] = [
     source: 'AUTO',
     awardedBy: null,
     featured: false,
-    badge: { id: 'b2', slug: 'incansavel', name: 'Incansável', description: 'd', kind: 'IMPACT', iconKey: 'fire', threshold: 0, categorySlug: null, global: true, sectorIds: [] },
+    badge: { id: 'b2', slug: 'incansavel', name: 'Incansável', description: 'd', kind: 'IMPACT', iconKey: 'fire', threshold: 0, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] },
   },
 ]
 
@@ -40,7 +40,7 @@ function makeBadges(count: number): AwardedBadgeDTO[] {
       kind: 'IMPACT',
       iconKey: 'fire',
       threshold: 0,
-      categorySlug: null,
+      categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
       global: true,
       sectorIds: [],
     },
@@ -73,7 +73,7 @@ describe('BadgeGallery', () => {
         kind: 'STREAK',
         iconKey: 'fe-voltage',
         threshold: 14,
-        categorySlug: null,
+        categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
         global: true,
         sectorIds: [],
       },

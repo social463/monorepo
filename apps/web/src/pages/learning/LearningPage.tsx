@@ -458,26 +458,58 @@ function CertificateItem({ certificate }: { certificate: CertificateDTO }) {
   )
 }
 
+/**
+ * Atalho para "Envie seu Certificado" — o certificado de curso feito FORA do
+ * portal (Documento 4, seção 9.8).
+ *
+ * Era um link para um formulário no Notion, fora do produto; agora é uma página
+ * daqui, e o pedido cai na mesma fila do certificado interno. Não confundir com
+ * o certificado que o portal emite ao concluir um curso daqui: aquele nasce
+ * sozinho e passa pela aba Fila de `/admin/certificados`.
+ */
+function SendCertificateCallout() {
+  return (
+    <Link
+      to="/aprendizado/enviar-certificado"
+      className="flex items-center gap-md rounded-xl border border-primary/40 bg-primary/5 p-lg transition-colors hover:border-primary"
+    >
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
+        <Icon name="upload_file" className="text-[22px]" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-label text-label-lg text-on-surface">Fez um curso fora do portal?</span>
+        <span className="block text-body-sm text-on-surface-variant">
+          Envie seu certificado para a G&amp;G registrar na sua ficha.
+        </span>
+      </span>
+      <Icon name="chevron_right" className="shrink-0 text-[18px] text-primary" />
+    </Link>
+  )
+}
+
 function CertificatesTab() {
   const { data, isLoading, isError } = useQuery({ queryKey: ['learning', 'certificates'], queryFn: listCertificates })
 
   if (isLoading) return <Skeleton className="h-32 w-full" />
   if (isError) return <p className="text-body-md text-error">Erro ao carregar seus certificados.</p>
   const certificates = data?.certificates ?? []
-  if (certificates.length === 0) {
-    return (
-      <EmptyState
-        title="Nenhum certificado ainda"
-        description="Conclua um curso com certificado habilitado para receber o seu."
-      />
-    )
-  }
 
+  // O link vem ANTES da lista e aparece também no estado vazio: quem ainda não
+  // tem certificado nenhum é justamente quem está procurando por onde enviar.
   return (
     <div className="flex flex-col gap-md">
-      {certificates.map((certificate) => (
-        <CertificateItem key={certificate.id} certificate={certificate} />
-      ))}
+      <SendCertificateCallout />
+
+      {certificates.length === 0 ? (
+        <EmptyState
+          title="Nenhum certificado ainda"
+          description="Conclua um curso com certificado habilitado para receber o seu."
+        />
+      ) : (
+        certificates.map((certificate) => (
+          <CertificateItem key={certificate.id} certificate={certificate} />
+        ))
+      )}
     </div>
   )
 }

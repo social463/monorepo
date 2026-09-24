@@ -8,6 +8,7 @@
 import {
   CALENDAR_AUDIENCE_SUGGESTIONS,
   CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH,
+  CALENDAR_EVENT_TAG_MAX_LENGTH,
   CALENDAR_EVENT_TITLE_MAX_LENGTH,
   CALENDAR_RECURRENCES,
   CALENDAR_RECURRENCE_LABELS,
@@ -16,8 +17,13 @@ import {
   reminderOffsetLabel,
   type CalendarEventTypeDTO,
   type CalendarRecurrence,
+  type PublicUser,
   type UpsertCalendarEventRequest,
 } from '@legends/shared'
+import { useQuery } from '@tanstack/react-query'
+import { apiFetch } from '../lib/api'
+import { Icon } from './Icon'
+import { TargetPicker } from '../pages/mural-feedbacks/TargetPicker'
 import { inputCls } from '../pages/admin/shared'
 
 /** Setor no que o formulário precisa: id e nome (serve ao DTO admin e ao /sectors). */
@@ -30,6 +36,7 @@ export interface SectorOption {
 export const EMPTY_CALENDAR_EVENT: UpsertCalendarEventRequest = {
   title: '',
   description: '',
+  tag: '',
   date: '',
   endDate: '',
   startTime: '',
@@ -39,6 +46,7 @@ export const EMPTY_CALENDAR_EVENT: UpsertCalendarEventRequest = {
   audienceTags: [],
   isInternalComm: false,
   sectorIds: [],
+  guestIds: [],
   recurrence: 'NONE',
   recurrenceUntil: '',
   recurrenceCount: null,
@@ -52,6 +60,7 @@ export const EMPTY_CALENDAR_EVENT: UpsertCalendarEventRequest = {
 export function normalizeCalendarEvent(values: UpsertCalendarEventRequest): UpsertCalendarEventRequest {
   return {
     ...values,
+    tag: values.tag?.trim() ? values.tag.trim() : null,
     endDate: values.endDate ? values.endDate : null,
     startTime: values.startTime ? values.startTime : null,
     // Hora de fim sem hora de início não significa nada — some junto, em vez de
@@ -67,6 +76,7 @@ export function normalizeCalendarEvent(values: UpsertCalendarEventRequest): Upse
 export function calendarEventToForm(event: {
   title: string
   description: string
+  tag: string | null
   date: string
   endDate: string | null
   startTime: string | null
@@ -76,6 +86,7 @@ export function calendarEventToForm(event: {
   isInternalComm: boolean
   type: { id: string }
   sectorIds: string[]
+  guests: PublicUser[]
   recurrence: CalendarRecurrence
   recurrenceUntil: string | null
   recurrenceCount: number | null
@@ -84,6 +95,7 @@ export function calendarEventToForm(event: {
   return {
     title: event.title,
     description: event.description,
+    tag: event.tag ?? '',
     date: event.date,
     endDate: event.endDate ?? '',
     startTime: event.startTime ?? '',
@@ -93,6 +105,7 @@ export function calendarEventToForm(event: {
     audienceTags: event.audienceTags,
     isInternalComm: event.isInternalComm,
     sectorIds: event.sectorIds,
+    guestIds: event.guests.map((g) => g.id),
     recurrence: event.recurrence,
     recurrenceUntil: event.recurrenceUntil ?? '',
     recurrenceCount: event.recurrenceCount,
@@ -128,6 +141,21 @@ export function CalendarEventForm({
   const sectorIds = value.sectorIds ?? []
   const reminders = value.reminderDaysBefore ?? []
   const audienceTags = value.audienceTags ?? []
+  const guestIds = value.guestIds ?? []
+  /*
+   * Os nomes dos convidados saem da MESMA query que o `TargetPicker` usa
+   * (`['users','company']`), já em cache: o formulário guarda só os ids, e
+   * manter uma segunda lista de objetos em estado local seria a chance de as
+   * duas divergirem — o clássico "removi o chip e o id continuou no payload".
+   */
+  const empresa = useQuery({
+    queryKey: ['users', 'company'],
+    queryFn: () => apiFetch<{ users: PublicUser[] }>('/users/company'),
+    staleTime: 60_000,
+  })
+  const convidados = guestIds
+    .map((id) => empresa.data?.users.find((u) => u.id === id))
+    .filter((u): u is PublicUser => Boolean(u))
   const corDaCategoria = colorOf(types, value.typeId)
 
   function toggleSector(id: string) {
@@ -192,6 +220,22 @@ export function CalendarEventForm({
           </label>
         </div>
       </div>
+
+      {/* A etiqueta é mais fina que a categoria ("Simulado" dentro de "Evento")
+          e por isso NÃO dá cor nem entra no filtro: uma coluna de filtro por
+          vocabulário novo faria a barra crescer sem dono. */}
+      <label className="flex flex-col gap-1">
+        <span className="font-label text-label-sm text-on-surface-variant">
+          Etiqueta (opcional)
+        </span>
+        <input
+          value={value.tag ?? ''}
+          maxLength={CALENDAR_EVENT_TAG_MAX_LENGTH}
+          placeholder="Ex.: Simulado, Circuito, Café Temático"
+          onChange={(e) => set({ tag: e.target.value })}
+          className={inputCls}
+        />
+      </label>
 
       <label className="flex flex-col gap-1">
         <span className="font-label text-label-sm text-on-surface-variant">Descrição</span>
@@ -271,6 +315,41 @@ export function CalendarEventForm({
           Use “Todos” para visibilidade geral. Outras tags filtram por perfil (setor G&amp;G, lideranças, CEO).
         </span>
       </label>
+
+      {/* Convidados nominais (Documento 3, seção 11). Convive com o público-alvo
+          acima: um evento pode ter os dois, e eles se SOMAM — o convidado vê o
+          evento mesmo estando fora do setor e fora da tag. */}
+      <div className="flex flex-col gap-1">
+        <span className="font-label text-label-sm text-on-surface-variant">Convidados (por nome)</span>
+        <TargetPicker
+          value={null}
+          onChange={(user) => {
+            if (user && !guestIds.includes(user.id)) set({ guestIds: [...guestIds, user.id] })
+          }}
+          excludeIds={guestIds}
+          placeholder="Procurar pessoa na empresa…"
+        />
+        {convidados.length > 0 && (
+          <ul className="mt-xs flex flex-wrap gap-xs">
+            {convidados.map((guest) => (
+              <li key={guest.id}>
+                <button
+                  type="button"
+                  onClick={() => set({ guestIds: guestIds.filter((id) => id !== guest.id) })}
+                  aria-label={`Remover ${guest.name} dos convidados`}
+                  className="flex items-center gap-xs rounded-full border border-primary/40 bg-primary/10 px-sm py-0.5 font-label text-label-sm text-primary hover:border-error hover:text-error"
+                >
+                  {guest.name}
+                  <Icon name="close" className="text-[14px]" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <span className="text-body-sm text-on-surface-variant">
+          Quem for convidado enxerga o evento e recebe o aviso, mesmo fora do setor e do público-alvo acima.
+        </span>
+      </div>
 
       {canMarkInternal && (
         <label className="flex cursor-pointer items-start justify-between gap-md rounded-lg border border-tertiary/40 bg-tertiary-container/20 p-md">

@@ -27,7 +27,7 @@ const room: RetroRoomDTO = {
 }
 
 const pub = (id: string, name: string): PublicUser => ({
-  id, name, email: `${id}@x`, role: 'LEGEND', area: null, position: null, squad: null,
+  id, name, email: `${id}@x`, role: 'LEGEND', area: null, position: null, positionCategory: null, squad: null,
   photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false,
 })
 const roomWithParticipants: RetroRoomDTO = {
@@ -60,8 +60,8 @@ vi.mock('../lib/retro-api', () => ({
   toggleRetroAnonymous: vi.fn().mockResolvedValue({ room: { id: 'r1', title: 'Retro 1', status: 'OPEN', anonymous: true, votesPerParticipant: 3, createdAt: '', concludedAt: null, creator: { id: 'l1', name: 'Lia' }, participantCount: 2, myRole: 'FACILITATOR', participants: [], myRemainingVotes: 3, cards: [] } }),
   setRetroParticipants: vi.fn().mockResolvedValue({ room: { id: 'r1', title: 'Retro 1', status: 'OPEN', anonymous: false, votesPerParticipant: 3, createdAt: '', concludedAt: null, creator: { id: 'l1', name: 'Lia' }, participantCount: 1, myRole: 'FACILITATOR', participants: [], myRemainingVotes: 3, cards: [] } }),
   listInvitableUsers: vi.fn().mockResolvedValue({ users: [
-    { id: 'b1', name: 'Bia', email: 'b@x', role: 'LEGEND', position: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '' },
-    { id: 'd1', name: 'Dan', email: 'd@x', role: 'LEGEND', position: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '' },
+    { id: 'b1', name: 'Bia', email: 'b@x', role: 'LEGEND', position: null, positionCategory: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '' },
+    { id: 'd1', name: 'Dan', email: 'd@x', role: 'LEGEND', position: null, positionCategory: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '' },
   ] }),
   getRetroCarryover: vi.fn().mockResolvedValue({ toValidate: [], overdue: [] }),
   setRetroCarryover: vi.fn().mockResolvedValue({ item: {} }),

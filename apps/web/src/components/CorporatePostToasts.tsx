@@ -54,8 +54,11 @@ export function CorporatePostToasts() {
 
   if (items.length === 0) return null
 
+  // Sem container fixo próprio: quem posiciona é o `ToastStack` do `AppLayout`.
+  // Dois stacks fixos no mesmo canto — este e o do convite de evento — se
+  // sobreporiam exatamente.
   return (
-    <div className="pointer-events-none fixed bottom-lg right-lg z-50 flex flex-col gap-sm">
+    <>
       {items.map((item) => (
         <div
           key={item.postId}
@@ -85,6 +88,6 @@ export function CorporatePostToasts() {
           </button>
         </div>
       ))}
-    </div>
+    </>
   )
 }

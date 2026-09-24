@@ -113,6 +113,62 @@ export async function awardXp(input: AwardXpInput): Promise<XpAwardOutcome> {
   }
 }
 
+export interface AwardFixedXpInput {
+  userId: string
+  companyId: string
+  /** Valor a creditar. <= 0 não gera lançamento. */
+  amount: number
+  event: XpEvent
+  /** Referência ÚNICA da ação (ex.: id do selo). Compõe o dedupeKey. */
+  reference: string
+  /** Transação em curso; quando presente, o crédito entra nela. */
+  tx?: Prisma.TransactionClient
+  now?: Date
+}
+
+export type AwardFixedXpOutcome =
+  | { status: 'CREDITED'; amount: number; transactionId: string }
+  | { status: 'SKIPPED' }
+  | { status: 'DUPLICATE' }
+
+/**
+ * Credita Pontos com valor VINDO DO CHAMADOR (não de `XpRule`).
+ *
+ * Par de `awardFixedCoins`, e existe pelo mesmo motivo: a recompensa do selo é
+ * configurada por selo, e `XpRule` só sabe valor fixo por evento. Sem regra,
+ * não há teto de janela para consultar.
+ *
+ * Aceita um `tx` para o crédito entrar na MESMA transação que concede o selo —
+ * é o que garante "concedeu e creditou, ou nada". O `tx` cru não passa por
+ * `scopedPrisma`, então `companyId` vai explícito no `data`.
+ */
+export async function awardFixedXp(input: AwardFixedXpInput): Promise<AwardFixedXpOutcome> {
+  if (input.amount <= 0) return { status: 'SKIPPED' }
+
+  const ymd = ymdInSaoPaulo(input.now ?? new Date())
+  const client = input.tx ?? scopedPrisma(input.companyId)
+
+  try {
+    const created = await client.xpTransaction.create({
+      data: {
+        userId: input.userId,
+        event: input.event,
+        ruleId: null,
+        amount: input.amount,
+        dedupeKey: `${input.event}:${input.reference}`,
+        day: dayFromYmd(ymd),
+        companyId: input.companyId,
+      },
+    })
+    return { status: 'CREDITED', amount: created.amount, transactionId: created.id }
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      return { status: 'DUPLICATE' }
+    }
+    throw err
+  }
+}
+
 /**
  * Estorna um crédito de XP **apagando a linha** do livro-razão.
  *

@@ -4,6 +4,8 @@ import {
   CAMPAIGN_AUDIENCES,
   CAMPAIGN_AUDIENCE_LABELS,
   CAMPAIGN_BODY_MAX_LENGTH,
+  CAMPAIGN_BODY_TARGET_MAX,
+  CAMPAIGN_BODY_TARGET_MIN,
   CAMPAIGN_CHANNELS,
   CAMPAIGN_CHANNEL_LABELS,
   CAMPAIGN_POST_STATUSES,
@@ -19,6 +21,13 @@ describe('contrato de campanhas', () => {
   // post, senão existe item agendado que jamais consegue ser publicado.
   it('mantém o corpo dentro do que o post do feed aceita', () => {
     expect(CAMPAIGN_BODY_MAX_LENGTH).toBeLessThanOrEqual(CORPORATE_POST_BODY_MAX_LENGTH)
+  })
+
+  // O alvo é o que o prompt pede; o teto é só a trave. Alvo encostado no teto
+  // traz de volta o comunicado telegráfico, que é o que 280 causava.
+  it('deixa folga entre o fôlego pedido e o teto', () => {
+    expect(CAMPAIGN_BODY_TARGET_MIN).toBeLessThan(CAMPAIGN_BODY_TARGET_MAX)
+    expect(CAMPAIGN_BODY_TARGET_MAX).toBeLessThan(CAMPAIGN_BODY_MAX_LENGTH)
   })
 
   it('mantém a quantidade entre 1 e 20', () => {

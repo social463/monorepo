@@ -5,6 +5,7 @@ import {
   setAccessToken,
   clearAccessToken,
   refreshAccessToken,
+  onSessionExpired,
 } from '../lib/api'
 import { identifyAnalytics } from '../lib/analytics'
 
@@ -39,6 +40,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     })
   }, [])
+
+  // Sessão recusada pelo servidor em pleno uso (cookie de refresh expirado,
+  // revogado por troca de papel, ou família derrubada por reuso): zerar o
+  // `user` é o que faz o `ProtectedRoute` levar ao login. Sem isto a tela ficava
+  // de pé respondendo "Não autorizado" a cada ação, sem caminho de volta.
+  useEffect(() => onSessionExpired(() => setUser(null)), [])
 
   // Empresa e setor viram user properties no GA4 — é o que permite segmentar
   // qualquer relatório por tenant. Depende dos campos, não da identidade do

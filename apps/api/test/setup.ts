@@ -55,6 +55,10 @@ beforeEach(async () => {
     prisma.corporatePostMention.deleteMany(),
     prisma.corporatePostComment.deleteMany(),
     prisma.corporatePost.deleteMany(),
+    // Depois do post: a FK é SetNull, mas apagar o catálogo primeiro deixaria
+    // o teste seguinte com posts sem categoria por motivo errado.
+    prisma.corporatePostTag.deleteMany(),
+    prisma.calendarEventGuest.deleteMany(),
     prisma.monthlyHighlight.deleteMany(),
     prisma.feedbackReaction.deleteMany(),
     prisma.feedbackComment.deleteMany(),
@@ -64,8 +68,14 @@ beforeEach(async () => {
     // Depois dos feedbacks E dos votos: as duas tabelas de junção apontam para
     // cá desde que o catálogo virou um só.
     prisma.recognitionCategory.deleteMany(),
+    prisma.badgeClaim.deleteMany(),
     prisma.badgeSector.deleteMany(),
     prisma.badge.deleteMany(),
+    // Depois do selo: é `Badge.badgeCategoryId` que aponta para cá. Os cinco
+    // temas semeados pela migration saem junto de propósito — são dado de
+    // empresa, como as categorias de reconhecimento, e não infraestrutura
+    // como o setor e as duas empresas preservados no fim desta lista.
+    prisma.badgeCategory.deleteMany(),
     prisma.votingPeriod.deleteMany(),
     prisma.retroReaction.deleteMany(),
     prisma.retroVote.deleteMany(),
@@ -75,6 +85,13 @@ beforeEach(async () => {
     prisma.retroRoom.deleteMany(),
     prisma.squadMember.deleteMany(),
     prisma.squad.deleteMany(),
+    // Metas e OKRs: filhos antes dos pais, e o ciclo antes da empresa (FK RESTRICT).
+    prisma.okrKrDependency.deleteMany(),
+    prisma.okrCheckIn.deleteMany(),
+    prisma.okrAssignment.deleteMany(),
+    prisma.okrKeyResult.deleteMany(),
+    prisma.okrObjective.deleteMany(),
+    prisma.okrCycle.deleteMany(),
     prisma.pdiActionHistory.deleteMany(),
     prisma.pdiActionEvidence.deleteMany(),
     prisma.pdiAction.deleteMany(),
@@ -95,7 +112,13 @@ beforeEach(async () => {
     prisma.courseEnrollment.deleteMany(),
     prisma.courseLesson.deleteMany(),
     prisma.courseModule.deleteMany(),
+    prisma.courseAudienceSector.deleteMany(),
     prisma.course.deleteMany(),
+    // Catálogo do curso (Documento 4, 9.6 e 9.7). Depois do curso: as ligações
+    // caem por cascade dele, e `Course.categoryId` é quem aponta para cá.
+    prisma.courseCategory.deleteMany(),
+    prisma.competency.deleteMany(),
+    prisma.instructor.deleteMany(),
     // Depois do curso: é o `Course.certificateTemplateId` que aponta para cá.
     prisma.certificateTemplate.deleteMany(),
     // Antes do bloco do adminAuditLog de propósito — ver o comentário abaixo.
@@ -107,6 +130,11 @@ beforeEach(async () => {
     prisma.adminAuditLog.deleteMany(),
     prisma.calendarConnection.deleteMany(),
     prisma.vacation.deleteMany(),
+    prisma.vacationPlanPeriod.deleteMany(),
+    prisma.vacationRequest.deleteMany(),
+    prisma.vacationPlan.deleteMany(),
+    prisma.vacationEntitlement.deleteMany(),
+    prisma.vacationCampaign.deleteMany(),
     prisma.accessLog.deleteMany(),
     prisma.analyticsEvent.deleteMany(),
     prisma.eventPhotoComment.deleteMany(),
@@ -129,6 +157,39 @@ beforeEach(async () => {
     prisma.oneOnOneMeeting.deleteMany(),
     prisma.oneOnOneSeries.deleteMany(),
     prisma.oneOnOneTopicTemplate.deleteMany(),
+    // INOVA: filhos antes do projeto (a maioria cairia por cascade do
+    // `inovaProject.deleteMany()`, exceto `InovaActivity`, que também aponta
+    // pra User via `actorId`), e o projeto antes do user.deleteMany() por
+    // causa de `InovaProject.createdById` / `InovaDiaryEntry.createdById`.
+    prisma.inovaPhaseHistory.deleteMany(),
+    prisma.inovaDiaryEntry.deleteMany(),
+    prisma.inovaProjectTask.deleteMany(),
+    prisma.inovaActivity.deleteMany(),
+    prisma.inovaProject.deleteMany(),
+    // Biblioteca de vídeos do Guia: aponta pra User via `createdById`, igual
+    // `InovaProject`/`InovaDiaryEntry` — mesma razão de vir antes do user.deleteMany().
+    prisma.inovaGuiaVideo.deleteMany(),
+    // Eu Aprendiz: filhos antes dos pais. Quase tudo cairia por cascade do
+    // encontro, mas submissão, presença, matrícula, convocação, recibo e
+    // assinatura também apontam pra User — por isso vêm antes do
+    // user.deleteMany() logo abaixo.
+    prisma.apprenticeTaskItem.deleteMany(),
+    prisma.apprenticeTask.deleteMany(),
+    prisma.apprenticeSectorMove.deleteMany(),
+    prisma.apprenticeJourney.deleteMany(),
+    prisma.apprenticeContractSignature.deleteMany(),
+    prisma.apprenticeContract.deleteMany(),
+    prisma.apprenticeSurveyReceipt.deleteMany(),
+    prisma.apprenticeSurveyResponse.deleteMany(),
+    prisma.apprenticeMakeupAttendee.deleteMany(),
+    prisma.apprenticeMakeup.deleteMany(),
+    prisma.apprenticeAttendance.deleteMany(),
+    prisma.apprenticeSubmission.deleteMany(),
+    prisma.apprenticeActivity.deleteMany(),
+    prisma.apprenticeMeetingMaterial.deleteMany(),
+    prisma.apprenticeMeeting.deleteMany(),
+    prisma.apprenticeEnrollment.deleteMany(),
+    prisma.apprenticeClass.deleteMany(),
     prisma.user.deleteMany(),
     // Preserva o setor default semeado pela migration (sector-dev-produto); remove só os criados em teste.
     prisma.sector.deleteMany({ where: { id: { not: DEFAULT_SECTOR_ID } } }),

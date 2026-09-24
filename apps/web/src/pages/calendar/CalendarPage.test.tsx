@@ -60,10 +60,14 @@ function occ(over: Partial<CalendarEventOccurrenceDTO> = {}): CalendarEventOccur
 }
 
 let occurrences: CalendarEventOccurrenceDTO[] = []
+/** Calendário editorial na janela (Documento 4, seção 13.2). */
+let campaignPosts: unknown[] = []
 
 function routeApi() {
   mockApiFetch.mockImplementation((path: string) => {
-    if (path.startsWith('/calendar/events?')) return Promise.resolve({ occurrences, types: TIPOS })
+    if (path.startsWith('/calendar/events?')) {
+      return Promise.resolve({ occurrences, types: TIPOS, campaignPosts })
+    }
     if (path.startsWith('/sectors')) return Promise.resolve({ sectors: [] })
     return Promise.reject(new Error(`rota não mockada: ${path}`))
   })
@@ -254,5 +258,49 @@ describe('CalendarPage', () => {
     const botao = await screen.findByRole('button', { name: /Semana da Cultura/ })
     // 14h com a grade começando às 6h e 44px por hora: (14−6)×44 = 352px.
     expect(botao).toHaveStyle({ top: '352px' })
+  })
+})
+
+/**
+ * Documento 4, seção 13.2: o calendário editorial de Campanhas aparece na
+ * janela do calendário organizacional — a "visão sistêmica" que a G&G pediu.
+ *
+ * Faixa acima da grade, e não barra dentro dela: item de campanha é comunicado
+ * agendado, não evento que ocupa o dia.
+ */
+describe('CalendarPage — calendário editorial', () => {
+  beforeEach(() => {
+    occurrences = []
+    campaignPosts = []
+    routeApi()
+  })
+
+  it('lista os comunicados agendados da janela, com link para Campanhas', async () => {
+    campaignPosts = [
+      {
+        id: 'cp1',
+        title: 'Aviso de manutenção',
+        scheduledFor: '2026-09-15T14:30:00.000Z',
+        status: 'SCHEDULED',
+        channelLabel: 'Mural da empresa',
+        campaignTheme: 'Semana da segurança',
+      },
+    ]
+    renderPage()
+
+    expect(await screen.findByRole('region', { name: 'Calendário editorial' })).toBeInTheDocument()
+    expect(screen.getByText('Aviso de manutenção')).toBeInTheDocument()
+    expect(screen.getByText(/Semana da segurança · Mural da empresa/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Gerenciar em Campanhas' })).toHaveAttribute(
+      'href',
+      '/admin/campanhas',
+    )
+  })
+
+  it('sem item na janela, a faixa não aparece — quem não é G&G recebe lista vazia', async () => {
+    renderPage()
+
+    await screen.findByRole('button', { name: 'Mês' })
+    expect(screen.queryByRole('region', { name: 'Calendário editorial' })).not.toBeInTheDocument()
   })
 })

@@ -21,7 +21,7 @@ import {
 import { scopedPrisma } from '../lib/tenant-scope'
 import { recordAuditLog } from './audit-log-service'
 import { CourseAdminError, readableCourseWhere, writableCourseWhere, type CourseActor } from './course-admin-service'
-import { issueCertificate, LearningError, viewerSectorId, visibleCourseWhere, type Viewer } from './learning-service'
+import { issueCertificate, LearningError, viewerScope, visibleCourseWhere, type Viewer } from './learning-service'
 
 /**
  * Autoria de quiz (de aula e final) e de questões, e a resposta (consumo) do
@@ -32,7 +32,7 @@ import { issueCertificate, LearningError, viewerSectorId, visibleCourseWhere, ty
  * `course-admin-service.ts`.
  *
  * A seção "Responder", no fim do arquivo, é a fatia de consumo: usa o recorte
- * de leitura de `learning-service.ts` (`visibleCourseWhere`/`viewerSectorId`),
+ * de leitura de `learning-service.ts` (`visibleCourseWhere`/`viewerScope`),
  * não `readableCourseWhere` — este é escopo de autoria (admin/subadmin), não
  * de quem só faz o curso.
  */
@@ -471,7 +471,7 @@ export async function reorderQuestions(input: {
 
 // ---------------------------------------------------------------------------
 // Responder (consumo, não autoria) — recorte de leitura vem de
-// `visibleCourseWhere`/`viewerSectorId` (learning-service), o mesmo usado no
+// `visibleCourseWhere`/`viewerScope` (learning-service), o mesmo usado no
 // resto do consumo de curso: publicado + (sem setor OU setor da pessoa). Exige
 // inscrição no curso — sem ela, tratado como inexistente (404), igual ao
 // recorte por setor: nunca 403, pra não confirmar que o quiz existe.
@@ -480,7 +480,7 @@ export async function reorderQuestions(input: {
 /** Resolve o quiz alcançável em LEITURA de consumo + confere inscrição no curso dono. */
 async function findQuizForRespondent(viewer: Viewer, quizId: string): Promise<CourseQuiz> {
   const db = scopedPrisma(viewer.companyId)
-  const sectorId = await viewerSectorId(viewer)
+  const sectorId = await viewerScope(viewer)
   const quiz = await db.courseQuiz.findFirst({ where: { id: quizId, course: visibleCourseWhere(sectorId) } })
   if (!quiz) throw new LearningError('Quiz não encontrado.', 404)
 

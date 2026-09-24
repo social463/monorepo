@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import type { Mock } from 'vitest'
+import { DEFAULT_BONUS_PROGRAM } from '@legends/shared'
 import { CultureHubPage } from './CultureHubPage'
 import { apiFetch, ApiError } from '../../lib/api'
 
@@ -83,6 +84,11 @@ function routeApi(overrides: Partial<Record<string, unknown>> = {}) {
     if (path === '/culture/manuals') return { manuals: overrides.manuals ?? [MANUAL] }
     if (path === '/culture/benefits') return { benefits: overrides.benefits ?? [BENEFIT] }
     if (path.endsWith('/download')) return { url: 'https://s3.exemplo.com/assinado' }
+    // O card do manual consulta o programa para saber se ESTE manual é o que
+    // abre a calculadora. `manualId: null` = nenhum manual abre.
+    if (path === '/bonus-program') {
+      return { settings: overrides.bonusProgram ?? { ...DEFAULT_BONUS_PROGRAM, manualId: null } }
+    }
     throw new Error(`rota não mockada: ${path}`)
   })
 }
@@ -203,6 +209,26 @@ describe('CultureHubPage', () => {
     expect(screen.queryByRole('button', { name: /PDF/ })).not.toBeInTheDocument()
     // "Ler manual" virou link para a tela de leitura.
     expect(screen.getByRole('link', { name: /Ler manual/ })).toBeInTheDocument()
+  })
+
+  // A calculadora não está mais no menu lateral: quem chega nela vem daqui.
+  it('o manual vinculado ganha o botão da calculadora no card', async () => {
+    routeApi({ bonusProgram: { ...DEFAULT_BONUS_PROGRAM, manualId: 'm1' } })
+    wrap(<CultureHubPage />, '/cultura?aba=manuais')
+    await screen.findByText('Código de Ética')
+
+    expect(screen.getByRole('link', { name: /Calculadora/ })).toHaveAttribute(
+      'href',
+      '/cultura/calculadora-todos-pelos-9',
+    )
+  })
+
+  it('manual não vinculado não mostra o botão da calculadora', async () => {
+    routeApi()
+    wrap(<CultureHubPage />, '/cultura?aba=manuais')
+    await screen.findByText('Código de Ética')
+
+    expect(screen.queryByRole('link', { name: /Calculadora/ })).not.toBeInTheDocument()
   })
 
   it('benefício leva para a tela de detalhe, sem abrir modal', async () => {

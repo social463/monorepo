@@ -1,3 +1,4 @@
+import type { PublicUser } from './auth'
 /**
  * Eventos do **Calendário Endomarketing** — ações, datas comemorativas, campanhas
  * e ritos institucionais da empresa. É a única fonte da tela do calendário: as
@@ -33,6 +34,18 @@ export function reminderOffsetLabel(days: number): string {
 export const CALENDAR_REMINDER_HOUR = 9
 
 export const CALENDAR_EVENT_TITLE_MAX_LENGTH = 120
+/**
+ * A **tag** é o rótulo que a planilha da G&G traz na coluna `Tag` — "Simulado",
+ * "Circuito", "Porta de Prova", "Café Temático". Ela descreve o evento com a
+ * granularidade do negócio, e é MAIS fina que a categoria: as 25 tags da
+ * planilha caem nas 10 categorias do catálogo.
+ *
+ * Cor e ícone continuam saindo da **categoria**, e o filtro do topo também. É
+ * o que impede a barra de filtro de crescer uma coluna por vocabulário novo da
+ * planilha — a tag aparece como etiqueta no evento, ao lado da categoria, que
+ * é como o Portal EMR já fazia.
+ */
+export const CALENDAR_EVENT_TAG_MAX_LENGTH = 60
 export const CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH = 1000
 
 /** Teto do intervalo aceito em `GET /calendar/events` — impede que a rota vire dump. */
@@ -219,6 +232,8 @@ export interface CalendarEventDTO {
   id: string
   title: string
   description: string
+  /** Rótulo fino do evento ("Simulado", "Circuito"), ou null. Ver `CALENDAR_EVENT_TAG_MAX_LENGTH`. */
+  tag: string | null
   /** Data civil YYYY-MM-DD da primeira (ou única) ocorrência. */
   date: string
   /**
@@ -248,6 +263,15 @@ export interface CalendarEventDTO {
    */
   sectorIds: string[]
   sectorNames: string[]
+  /**
+   * Convidados nominalmente (Documento 3, seção 11). Eles enxergam o evento
+   * **independentemente de setor e de tag** — é o ponto do convite: chamar quem
+   * o recorte por setor não alcança. As três regras se somam.
+   *
+   * Só viaja para quem ADMINISTRA o evento: a lista de nomes é da gestão, não
+   * do calendário de quem só olha.
+   */
+  guests: PublicUser[]
   recurrence: CalendarRecurrence
   /** Fim da recorrência por data civil, ou null. Exclusivo com `recurrenceCount`. */
   recurrenceUntil: string | null
@@ -265,6 +289,8 @@ export interface CalendarEventDTO {
 export interface CalendarEventOccurrenceDTO {
   eventId: string
   iso: string
+  /** Rótulo fino do evento ("Simulado", "Circuito"), ou null. A cor continua vindo da categoria. */
+  tag?: string | null
   /**
    * Último dia DESTA ocorrência (igual a `iso` quando o evento cabe num dia).
    * A tela desenha a barra contínua a partir do par — sem ele, um evento de
@@ -300,6 +326,34 @@ export function addedByLabel(createdByName: string, createdAt: string): string {
 export interface CalendarEventsResponse {
   occurrences: CalendarEventOccurrenceDTO[]
   types: CalendarEventTypeDTO[]
+  /**
+   * O calendário editorial de Campanhas, na mesma janela (Documento 4, seção
+   * 13.2): a "visão sistêmica de todos os eventos" que a G&G pediu.
+   *
+   * Lista separada, e não `CalendarEventOccurrenceDTO` sintético, porque item
+   * de campanha **não é evento**: não tem tipo, cor de categoria, recorrência,
+   * convidado nem lembrete. Fabricar um `typeId` falso para caber no DTO
+   * obrigaria toda tela que consome ocorrência a saber que algumas são mentira.
+   *
+   * Vazia para quem não é admin nem do bloco de Gente e Gestão — mesma regra de
+   * `isInternalComm`: o calendário editorial é material de quem publica, e o
+   * resto da empresa vê o comunicado quando ele sai.
+   */
+  campaignPosts: CalendarCampaignPostDTO[]
+}
+
+/** Item do calendário editorial projetado no calendário organizacional. */
+export interface CalendarCampaignPostDTO {
+  id: string
+  title: string
+  /** Instante agendado, ISO 8601. */
+  scheduledFor: string
+  /** `SCHEDULED` | `PUBLISHED` | `CANCELLED`, do catálogo de campanhas. */
+  status: string
+  /** Rótulo do canal ("Mural da empresa", "Teams"…), já resolvido. */
+  channelLabel: string
+  /** Tema da campanha, quando o item pertence a uma. */
+  campaignTheme: string | null
 }
 
 export interface CalendarEventListResponse {
@@ -315,6 +369,7 @@ export interface CalendarEventResponse {
 export interface UpsertCalendarEventRequest {
   title: string
   description?: string
+  tag?: string | null
   date: string
   endDate?: string | null
   startTime?: string | null
@@ -324,6 +379,8 @@ export interface UpsertCalendarEventRequest {
   audienceTags?: string[]
   isInternalComm?: boolean
   sectorIds?: string[]
+  /** Ids dos convidados. Ausente = não mexe; lista vazia = tira todos. */
+  guestIds?: string[]
   recurrence?: CalendarRecurrence
   recurrenceUntil?: string | null
   recurrenceCount?: number | null

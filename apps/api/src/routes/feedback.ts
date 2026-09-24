@@ -22,14 +22,21 @@ import {
   listFeedbacksForUser,
   listFeedbacksReceivedBy,
   listFeedbacksSentBy,
+  getFeedbackWallSeenAt,
   listSharedFeedbacks,
+  markFeedbackWallSeen,
   setFeedbackShared,
   toggleReaction,
   updateFeedback,
 } from '../services/feedback-service'
 import { getAiSettings } from '../services/ai-settings-service'
 import { evaluateBadgesForUser, syncFeedbackBadgesForUser } from '../services/badge-service'
-import { notifyFeedbackReceived, notifyReaction, notifyBadgesEarned } from '../services/notification-service'
+import {
+  notifyFeedbackComment,
+  notifyFeedbackReceived,
+  notifyReaction,
+} from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { awardCoins } from '../services/coin-service'
 import { awardXp } from '../services/xp-service'
 import {
@@ -69,7 +76,7 @@ const generateSchema = z.object({
 })
 
 const updateFeedbackSchema = z.object({
-  message: z.string().trim().min(MIN_FEEDBACK_FIELD_LENGTH),
+  message: z.string().trim().min(MIN_FEEDBACK_FIELD_LENGTH).max(FEEDBACK_MESSAGE_MAX_LENGTH),
 })
 
 const toggleReactionSchema = z.object({
@@ -97,7 +104,24 @@ export async function feedbackRoutes(app: FastifyInstance) {
     })
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
-    return reply.send({ feedbacks: page.map((f) => toSharedFeedbackDTO(f, request.user.sub)), hasMore })
+    const wallSeenAt = await getFeedbackWallSeenAt(request.user.companyId, request.user.sub)
+    return reply.send({
+      feedbacks: page.map((f) => toSharedFeedbackDTO(f, request.user.sub)),
+      hasMore,
+      wallSeenAt: wallSeenAt ? wallSeenAt.toISOString() : null,
+    })
+  })
+
+  /**
+   * "Abri o mural agora." Marca a aba como vista, e é isso que apaga o selo
+   * "Novo" da prévia da Home.
+   *
+   * Só a PÁGINA do mural chama — a prévia da Home, não: ver a chamada na Home
+   * já apagaria a marcação que ela mesma acabou de mostrar.
+   */
+  app.post('/feedbacks/mural/seen', { onRequest: [app.authenticate] }, async (request, reply) => {
+    await markFeedbackWallSeen(request.user.companyId, request.user.sub)
+    return reply.code(204).send()
   })
 
   /** Aba Recebidos: tudo que a pessoa recebeu, inclusive o que está privado. */
@@ -145,16 +169,33 @@ export async function feedbackRoutes(app: FastifyInstance) {
     }
     const { id } = request.params as { id: string }
     try {
-      const { comment } = await createFeedbackComment({
-        feedbackId: id,
-        message: parsed.data.message,
-        viewer: {
-          id: request.user.sub,
-          role: request.user.role,
-          adminAccess: request.user.adminAccess,
-          companyId: request.user.companyId,
-        },
-      })
+      const { comment, feedbackAuthorId, feedbackTargetId, recipientIds, previousCommenterIds } =
+        await createFeedbackComment({
+          feedbackId: id,
+          message: parsed.data.message,
+          viewer: {
+            id: request.user.sub,
+            role: request.user.role,
+            adminAccess: request.user.adminAccess,
+            companyId: request.user.companyId,
+          },
+        })
+      // Best-effort, como o resto do produto: avisar é pontuação da resposta e
+      // nunca pode derrubá-la — a resposta já está gravada aqui.
+      try {
+        await notifyFeedbackComment(
+          {
+            feedbackId: id,
+            feedbackTargetId,
+            ownerIds: [feedbackAuthorId, ...recipientIds],
+            previousCommenterIds,
+            actorId: request.user.sub,
+          },
+          request.user.companyId,
+        )
+      } catch (notifyErr) {
+        request.log.error(notifyErr)
+      }
       return reply.code(201).send({ comment: toFeedbackCommentDTO(comment) })
     } catch (err) {
       if (err instanceof FeedbackError) return reply.code(err.status).send({ message: err.message })
@@ -277,7 +318,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
         request.log.error(badgeErr)
       }
       try {
-        await notifyBadgesEarned(request.user.sub, awardedBadges.map((b) => b.badgeId), request.user.companyId)
+        await settleBadgesEarned(request.user.sub, awardedBadges.map((b) => b.badgeId), request.user.companyId)
       } catch (notifyErr) {
         request.log.error(notifyErr)
       }
@@ -288,7 +329,7 @@ export async function feedbackRoutes(app: FastifyInstance) {
       for (const recipient of feedback.recipients) {
         try {
           const earned = await evaluateBadgesForUser(recipient.userId)
-          await notifyBadgesEarned(recipient.userId, earned.map((b) => b.badgeId), request.user.companyId)
+          await settleBadgesEarned(recipient.userId, earned.map((b) => b.badgeId), request.user.companyId)
         } catch (badgeErr) {
           request.log.error(badgeErr)
         }

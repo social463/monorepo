@@ -5,20 +5,16 @@
  * para que o catálogo, o player e o certificado tenham o que exercitar em dev.
  */
 
+import type { CourseLessonBlock } from '@legends/shared'
+
 type SeedLessonType = 'VIDEO' | 'TEXT'
 type SeedLevel = 'BEGINNER' | 'INTERMEDIATE' | 'ADVANCED'
 
 interface SeedLesson {
   title: string
-  type: SeedLessonType
-  contentHtml: string
   durationMinutes: number
-  /**
-   * Link do vídeo, na forma que se copia do navegador
-   * (`youtube.com/watch?v=…`, `youtu.be/…`, `vimeo.com/…`). O player normaliza
-   * para a URL embutível — ver `toVideoEmbedUrl` em `@legends/shared`.
-   */
-  videoUrl?: string
+  /** Conteúdo em blocos, como a autoria grava desde o Documento 4, seção 9.1. */
+  blocks: CourseLessonBlock[]
 }
 
 interface SeedModule {
@@ -40,6 +36,11 @@ interface SeedCourse {
   modules: SeedModule[]
 }
 
+/**
+ * Monta a aula de seed em blocos. O vídeo vem primeiro e o texto depois, que é
+ * a ordem em que a migration converteu as aulas que já existiam — seed e dado
+ * migrado saem iguais.
+ */
 function lesson(
   title: string,
   durationMinutes: number,
@@ -47,7 +48,23 @@ function lesson(
   type: SeedLessonType = 'TEXT',
   videoUrl?: string,
 ): SeedLesson {
-  return { title, type, durationMinutes, contentHtml: `<p>${body}</p>`, videoUrl }
+  const blocks: CourseLessonBlock[] = []
+  if (type === 'VIDEO' && videoUrl) {
+    blocks.push({ id: `${slugId(title)}-video`, type: 'video', url: videoUrl, source: 'youtube' })
+  }
+  blocks.push({ id: `${slugId(title)}-texto`, type: 'text', text: body })
+  return { title, durationMinutes, blocks }
+}
+
+/** Id estável por aula: o seed roda de novo e não deve inventar bloco novo. */
+function slugId(title: string): string {
+  return `blk-${title
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40)}`
 }
 
 export const LEARNING_SEED: SeedCourse[] = [

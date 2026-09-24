@@ -20,6 +20,8 @@ export const XP_EVENTS = [
   'CORPORATE_POST_REACTION',
   'CORPORATE_POST_COMMENT',
   'CORPORATE_POST_READ_FULL',
+  'BADGE_EARNED',
+  'COURSE_COMPLETED',
 ] as const
 export type XpEvent = (typeof XP_EVENTS)[number]
 
@@ -32,6 +34,8 @@ export const XP_EVENT_LABELS: Record<XpEvent, string> = {
   CORPORATE_POST_REACTION: 'Reagir a um comunicado',
   CORPORATE_POST_COMMENT: 'Comentar um comunicado',
   CORPORATE_POST_READ_FULL: 'Ler um comunicado por inteiro',
+  BADGE_EARNED: 'Selo conquistado',
+  COURSE_COMPLETED: 'Curso concluído',
 }
 
 /** Frase de ajuda por evento — formulário do admin e Manual do Game. */
@@ -44,6 +48,8 @@ export const XP_EVENT_DESCRIPTIONS: Record<XpEvent, string> = {
   CORPORATE_POST_REACTION: 'Creditado uma vez por comunicado, na primeira reação. Some se a pessoa desfizer todas.',
   CORPORATE_POST_COMMENT: 'Creditado uma vez por comunicado, no primeiro comentário. Some se a pessoa apagar todos.',
   CORPORATE_POST_READ_FULL: 'Creditado ao abrir o conteúdo completo de um comunicado longo.',
+  BADGE_EARNED: 'Creditado ao conquistar um selo; o valor vem do próprio selo. Paga uma vez por selo.',
+  COURSE_COMPLETED: 'Creditado ao concluir um curso; o valor vem do próprio curso. Paga uma vez por curso.',
 }
 
 /**
@@ -59,7 +65,12 @@ export const XP_REVOCABLE_EVENTS = ['CORPORATE_POST_REACTION', 'CORPORATE_POST_C
  * mas o XP do desafio é um valor só, da empresa — senão cada desafio precisaria
  * cadastrar duas recompensas.
  */
-export const XP_RULE_EVENTS = XP_EVENTS
+/**
+ * `BADGE_EARNED` fica de fora do CRUD de regras: o valor é do selo, e
+ * `awardFixedXp` nunca consulta `XpRule` (Documento 4, seção 11.4). Mesma
+ * exclusão que `CHALLENGE_APPROVED` já tem do lado dos coins.
+ */
+export const XP_RULE_EVENTS = XP_EVENTS.filter((event) => event !== 'BADGE_EARNED')
 
 /** Janela em que o teto da regra é contado (dia civil de America/Sao_Paulo). */
 export const XP_CAP_WINDOWS = ['NONE', 'DAY', 'WEEK', 'MONTH'] as const

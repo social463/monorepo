@@ -1,4 +1,5 @@
 import type {
+  BodyInput,
   Direction,
   OfficeClientMessage,
   MoveDirection,
@@ -6,11 +7,26 @@ import type {
   OfficeKart,
   OfficeNearbyMessageKind,
   OfficeOccupant,
+  OfficeRoomManager,
   OfficeServerMessage,
+  PaintSplat,
   TilePosition,
 } from '@legends/shared'
 
 type Handler<T> = (payload: T) => void
+
+/**
+ * De onde veio um `input`: a tecla de uma pessoa ou a caminhada automática.
+ *
+ * Existe porque as duas passam pelo MESMO caminho desde o movimento livre — o
+ * Seguir "segura a tecla" e é a amostragem do quadro que a transforma em
+ * deslocamento. Sem a procedência, quem cancela o Seguir ao ver alguém assumir o
+ * controle cancela também o input que o próprio Seguir acabou de gerar: um passo
+ * e para.
+ */
+export type OfficeInputSource = 'keyboard' | 'auto'
+
+type InputHandler = (input: BodyInput, source: OfficeInputSource) => void
 
 export interface NearbyMessage {
   userId: string
@@ -23,12 +39,6 @@ export interface NearbyMessage {
  * pressionado. `dir` é de PASSO (`MoveDirection`, inclui diagonais), não o
  * facing do sprite: quem converte é `facingForMove`.
  */
-export interface MoveIntent {
-  dir: MoveDirection
-  sprint: boolean
-  /** Sequência do passo (ver `OfficeBridge.nextMoveSeq`); ausente = não previsto. */
-  seq?: number
-}
 
 /** Mudança de estado de fala (LiveKit) de um ocupante — 100% local ao navegador, nunca vai ao servidor. */
 export interface SpeakingChanged {
@@ -55,7 +65,9 @@ export interface SpeakingChanged {
  */
 export class OfficeBridge {
   private serverHandlers = new Set<Handler<OfficeServerMessage>>()
-  private moveHandlers = new Set<Handler<MoveIntent>>()
+  private moveHandlers = new Set<InputHandler>()
+  private autoWalkHandlers = new Set<Handler<MoveDirection | null>>()
+  private selfBodyHandlers = new Set<Handler<{ x: number; y: number }>>()
   private clickHandlers = new Set<Handler<string>>()
   private deskClickHandlers = new Set<Handler<string>>()
   private deskHoverHandlers = new Set<Handler<string | null>>()
@@ -69,6 +81,17 @@ export class OfficeBridge {
   private karts = new Map<string, OfficeKart>()
   /** Onde cada bola parou, na versão do servidor — o mesmo papel de `karts`. */
   private balls = new Map<string, OfficeBall>()
+  /**
+   * Marcas de tinta vivas, por id — mesmo papel de `balls`: o replay sintético
+   * precisa delas para que a cena montada DEPOIS do `welcome` não nasça com os
+   * personagens limpos enquanto o servidor ainda os considera pintados.
+   *
+   * Guardadas com o instante em que vencem, e não com o `ttlMs` que chegou:
+   * sem isso o mapa cresceria a sessão inteira (nada aqui apaga marca vencida)
+   * e o replay entregaria à cena manchas que já deviam ter sumido. Como no
+   * hub, quem lê é quem poda — `livePaintSplats`.
+   */
+  private paintSplats = new Map<string, PaintSplat & { expiresAt: number }>()
   /** Espelha `confettiActive` do hub — necessário pro replay sintético (ver `onServerMessage`) não perder quem já está segurando F. */
   private confettiActiveIds = new Set<string>()
   /** Espelha `raisedHandActive` do hub (mesmo papel de `confettiActiveIds`) — quem está com a mão levantada em qualquer lugar do escritório, pro replay sintético não perder o ícone de quem já levantou. */
@@ -77,10 +100,10 @@ export class OfficeBridge {
   private editingActiveIds = new Set<string>()
   /** Espelha `lockedRooms` do hub (mesmo papel de `confettiActiveIds`) — salas trancadas nesta sessão, pro replay sintético não perder o cadeado. */
   private lockedRoomIds = new Set<string>()
+  /** Espelha os managers de sala do hub (mesmo papel de `lockedRoomIds`) — quem manda em cada sala, pro replay sintético não perder o selo. */
+  private roomManagers: OfficeRoomManager[] = []
   private youId: string | null = null
   private movementLocked = false
-  /** Contador monotônico dos passos enviados (ver `nextMoveSeq`). */
-  private moveSeq = 0
   /** Flag mutável (como `movementLocked`): true enquanto EU tenho edição não salva, pra suprimir refetch. */
   private editingDirty = false
   /** Um `map-decor-updated` chegou enquanto `editingDirty` era true — ver `setEditingDirty`. */
@@ -90,6 +113,18 @@ export class OfficeBridge {
   private connected = false
   /** Distingue "nunca chegou welcome" de "chegou um welcome com 0 ocupantes". */
   private welcomed = false
+  /**
+   * Último `seq` SEU que o servidor confirmou.
+   *
+   * Guardado aqui porque o `welcome` SINTÉTICO precisa dele: a cena remonta
+   * (StrictMode, HMR, troca de rota) sem que o socket caia, e um preditor novo
+   * começando do zero teria todo input descartado como atrasado — o personagem
+   * andaria até a primeira remontagem e nunca mais sairia do lugar.
+   *
+   * Sai do snapshot, e não só do `welcome`: é o valor VIVO, e é o que faz a
+   * retomada valer também para quem remonta a cena no meio de uma caminhada.
+   */
+  private lastSelfSeq = 0
 
   onServerMessage(handler: Handler<OfficeServerMessage>): () => void {
     this.serverHandlers.add(handler)
@@ -104,8 +139,11 @@ export class OfficeBridge {
         handRaisedUserIds: [...this.handRaisedActiveIds],
         editorUserIds: [...this.editingActiveIds],
         lockedRoomIds: [...this.lockedRoomIds],
+        roomManagers: [...this.roomManagers],
         karts: [...this.karts.values()],
         balls: [...this.balls.values()],
+        paintSplats: this.livePaintSplats(),
+        seq: this.lastSelfSeq,
       })
     }
     return () => this.serverHandlers.delete(handler)
@@ -122,13 +160,27 @@ export class OfficeBridge {
       case 'welcome':
         this.welcomed = true
         this.youId = message.youId
+        // Só AVANÇA: o `welcome` sintético carrega o valor guardado, e deixá-lo
+        // sobrescrever com um número menor desfaria a retomada que ele existe
+        // para fazer.
+        if ((message.seq ?? 0) > this.lastSelfSeq) this.lastSelfSeq = message.seq ?? 0
         this.occupants = new Map(message.occupants.map((o) => [o.userId, o]))
         this.karts = new Map((message.karts ?? []).map((kart) => [kart.id, kart]))
         this.balls = new Map((message.balls ?? []).map((ball) => [ball.id, ball]))
+        this.paintSplats = new Map(
+          (message.paintSplats ?? []).map((splat) => [
+            splat.id,
+            { ...splat, expiresAt: Date.now() + splat.ttlMs },
+          ]),
+        )
         this.confettiActiveIds = new Set(message.confettiUserIds ?? [])
         this.handRaisedActiveIds = new Set(message.handRaisedUserIds ?? [])
         this.editingActiveIds = new Set(message.editorUserIds ?? [])
         this.lockedRoomIds = new Set(message.lockedRoomIds ?? [])
+        this.roomManagers = message.roomManagers ?? []
+        break
+      case 'room-managers-changed':
+        this.roomManagers = message.managers
         break
       case 'room-lock-changed':
         if (message.locked) this.lockedRoomIds.add(message.roomId)
@@ -149,16 +201,30 @@ export class OfficeBridge {
         this.occupants.delete(message.userId)
         this.confettiActiveIds.delete(message.userId)
         this.handRaisedActiveIds.delete(message.userId)
+        for (const [id, splat] of this.paintSplats) {
+          if (splat.userId === message.userId) this.paintSplats.delete(id)
+        }
         break
-      case 'moved': {
-        const occupant = this.occupants.get(message.userId)
-        if (occupant) {
-          const next = { ...occupant, x: message.x, y: message.y, dir: message.dir }
-          delete next.thoughtText
-          this.occupants.set(message.userId, next)
+      case 'snapshot': {
+        for (const ball of message.balls ?? []) this.balls.set(ball.id, { ...ball })
+        const eu = message.players.find((player) => player.userId === this.youId)
+        if (eu && eu.seq > this.lastSelfSeq) this.lastSelfSeq = eu.seq
+        // O bridge guarda a posição para quem NÃO é a cena (overlay de vídeo,
+        // painéis, `useOfficeKarts`). A cena não lê daqui — ela prevê e
+        // interpola no quadro, e passar por este mapa a 20Hz seria um
+        // `setState` por pacote na árvore inteira.
+        for (const player of message.players) {
+          const occupant = this.occupants.get(player.userId)
+          if (!occupant) continue
+          // O pensamento NÃO morre aqui: o snapshot repete todo mundo sempre
+          // que alguém se mexe, e apagar em bloco tirava o pensamento de quem
+          // estava parado pensando. Quem manda apagar é o servidor, por
+          // `thought-cleared`.
+          const next = { ...occupant, x: player.x, y: player.y, dir: player.dir }
+          this.occupants.set(player.userId, next)
           if (occupant.ridingKartId) {
             const kart = this.karts.get(occupant.ridingKartId)
-            if (kart) this.karts.set(kart.id, { ...kart, x: message.x, y: message.y, dir: message.dir })
+            if (kart) this.karts.set(kart.id, { ...kart, x: player.x, y: player.y, dir: player.dir })
           }
         }
         break
@@ -171,15 +237,6 @@ export class OfficeBridge {
             const kart = this.karts.get(occupant.ridingKartId)
             if (kart) this.karts.set(kart.id, { ...kart, dir: message.dir })
           }
-        }
-        break
-      }
-      case 'sync': {
-        // Reancoragem de posição recusada: sempre sobre "você".
-        if (!this.youId) break
-        const occupant = this.occupants.get(this.youId)
-        if (occupant) {
-          this.occupants.set(this.youId, { ...occupant, x: message.x, y: message.y, dir: message.dir })
         }
         break
       }
@@ -210,6 +267,14 @@ export class OfficeBridge {
         if (occupant) this.occupants.set(message.userId, { ...occupant, thoughtText: message.text })
         break
       }
+      case 'thought-cleared': {
+        const occupant = this.occupants.get(message.userId)
+        if (!occupant) break
+        const next = { ...occupant }
+        delete next.thoughtText
+        this.occupants.set(message.userId, next)
+        break
+      }
       case 'map-changed':
         break
       case 'kart-ride': {
@@ -226,23 +291,33 @@ export class OfficeBridge {
       case 'karts-updated':
         this.karts = new Map(message.karts.map((kart) => [kart.id, kart]))
         break
-      case 'ball-kicked': {
-        // Só o tile FINAL entra no snapshot: quem se inscrever no meio da
-        // rolagem recebe a bola parada onde ela vai parar, não onde está no
-        // meio da animação — replay sintético não tem como animar o passado.
-        const landing = message.kick.path.at(-1)
-        if (landing) {
-          this.balls.set(message.kick.ballId, {
-            id: message.kick.ballId,
-            x: landing.x,
-            y: landing.y,
-          })
-        }
+      case 'ball-kicked':
+        // Guarda a bola COM a velocidade: quem se inscrever no meio da rolagem
+        // recebe o estado de onde ela está e para onde vai, e a cena continua a
+        // integração dali — antes só dava para guardar o tile final, porque a
+        // trajetória vinha resolvida de uma vez.
+        this.balls.set(message.ball.id, { ...message.ball })
         break
-      }
       case 'balls-updated':
         this.balls = new Map(message.balls.map((ball) => [ball.id, ball]))
         break
+      case 'paint-marker': {
+        const occupant = this.occupants.get(message.userId)
+        if (occupant) {
+          const next = { ...occupant }
+          if (message.active) next.paintMarker = true
+          else delete next.paintMarker
+          this.occupants.set(message.userId, next)
+        }
+        break
+      }
+      case 'paintball-shot': {
+        // Só a MARCA entra no snapshot; o voo da bolinha não, pelo mesmo
+        // motivo do chute: replay sintético não anima o passado.
+        const { splat } = message.shot
+        if (splat) this.paintSplats.set(splat.id, { ...splat, expiresAt: Date.now() + splat.ttlMs })
+        break
+      }
       case 'editors-changed':
         this.editingActiveIds = new Set(message.userIds)
         break
@@ -256,6 +331,7 @@ export class OfficeBridge {
     editorUserIds: string[]
     karts: OfficeKart[]
     balls: OfficeBall[]
+    paintSplats: PaintSplat[]
   } {
     return {
       youId: this.youId,
@@ -263,7 +339,23 @@ export class OfficeBridge {
       editorUserIds: [...this.editingActiveIds],
       karts: [...this.karts.values()],
       balls: [...this.balls.values()],
+      paintSplats: this.livePaintSplats(),
     }
+  }
+
+  /**
+   * Marcas que ainda não venceram, com o `ttlMs` restante — a ÚNICA leitura de
+   * `paintSplats`, e por isso quem poda as vencidas. Mesmo desenho do hub:
+   * marca de tinta não merece um timer por unidade.
+   */
+  private livePaintSplats(): PaintSplat[] {
+    const now = Date.now()
+    const live: PaintSplat[] = []
+    for (const [id, { expiresAt, ...splat }] of this.paintSplats) {
+      if (expiresAt <= now) this.paintSplats.delete(id)
+      else live.push({ ...splat, ttlMs: expiresAt - now })
+    }
+    return live
   }
 
   /**
@@ -277,24 +369,61 @@ export class OfficeBridge {
   }
 
   /**
-   * Numera os passos mandados ao servidor. O contador é do bridge (e não da
-   * cena) porque é o bridge que sobrevive a remontagens do canvas — reiniciar
-   * a numeração no meio da sessão faria um `sync` atrasado casar com a
-   * predição errada.
+   * Intenção contínua do TECLADO, a caminho do servidor.
+   *
+   * Quem numera (`seq`) agora é o preditor da cena, não o bridge: o `seq` deixou
+   * de ser "o identificador daquele passo, para o `sync` desfazer exatamente
+   * ele" e passou a ser "até onde o servidor já processou". Ele pertence a quem
+   * mantém a fila de não confirmados, que é o preditor.
    */
-  nextMoveSeq(): number {
-    this.moveSeq += 1
-    return this.moveSeq
+  /**
+   * Direção que a caminhada automática quer manter — `null` para soltar.
+   *
+   * O Seguir deixou de mandar passo por mensagem: no movimento contínuo não há
+   * passo, há intenção. Ele agora "segura a tecla" por você, e quem transforma
+   * isso em deslocamento é a mesma amostragem de input do teclado, na cena. Sem
+   * isso haveria dois caminhos até o servidor, e só um deles passaria pela
+   * predição — o personagem andaria de teleporte quando estivesse seguindo.
+   */
+  onAutoWalk(handler: Handler<MoveDirection | null>): () => void {
+    this.autoWalkHandlers.add(handler)
+    return () => this.autoWalkHandlers.delete(handler)
   }
 
-  onMoveIntent(handler: Handler<MoveIntent>): () => void {
+  emitAutoWalk(dir: MoveDirection | null): void {
+    for (const handler of this.autoWalkHandlers) handler(dir)
+  }
+
+  /**
+   * Posição PREVISTA do próprio corpo, em pixel, na cadência do input.
+   *
+   * É a volta do `onAutoWalk`: quem segura a tecla precisa saber onde o corpo
+   * está para decidir quando virar a esquina e quando soltar. O snapshot não
+   * serve para isso — ele chega um round-trip atrasado, e esterçar por ele
+   * viraria depois da esquina. Fica no bridge (e não num acoplamento direto
+   * cena↔React) pelo mesmo motivo do resto: nenhum dos dois lados conhece o
+   * outro.
+   *
+   * Nunca vai para o servidor: o que o servidor recebe é o `input`.
+   */
+  onSelfBody(handler: Handler<{ x: number; y: number }>): () => void {
+    this.selfBodyHandlers.add(handler)
+    return () => this.selfBodyHandlers.delete(handler)
+  }
+
+  emitSelfBody(body: { x: number; y: number }): void {
+    for (const handler of this.selfBodyHandlers) handler(body)
+  }
+
+  onInput(handler: InputHandler): () => void {
     this.moveHandlers.add(handler)
     return () => this.moveHandlers.delete(handler)
   }
 
-  emitMoveIntent(intent: MoveIntent): void {
+  /** `source` diz quem pediu o passo — ver `OfficeInputSource`. */
+  emitInput(input: BodyInput, source: OfficeInputSource = 'keyboard'): void {
     if (this.movementLocked) return
-    for (const handler of this.moveHandlers) handler(intent)
+    for (const handler of this.moveHandlers) handler(input, source)
   }
 
   setMovementLocked(locked: boolean): void {
@@ -395,10 +524,9 @@ export class OfficeBridge {
   }
 
   /**
-   * Canal genérico React → servidor (call, call-response, e os moves do
-   * FollowController). Separado de `emitMoveIntent`, que é só o TECLADO —
-   * assim o follow pode ser cancelado ao ouvir `onMoveIntent` sem se
-   * autocancelar com os próprios passos.
+   * Canal genérico React → servidor (call, call-response, …). Separado de
+   * `emitInput`, que é só o TECLADO — assim o follow pode ser cancelado ao
+   * ouvir `onInput` sem se autocancelar com os próprios passos.
    */
   onClientMessage(handler: Handler<OfficeClientMessage>): () => void {
     this.clientHandlers.add(handler)

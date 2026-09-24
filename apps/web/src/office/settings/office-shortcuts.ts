@@ -30,6 +30,8 @@ export const OFFICE_SHORTCUT_GROUPS: OfficeShortcutGroup[] = [
       { keys: ['Z'], label: 'Tocar na bola', context: 'empurrão de um tile, com a bola ao alcance' },
       { keys: ['X'], label: 'Chutar a bola', context: 'com a bola ao alcance; com Shift, chute com corrida' },
       { keys: ['C'], label: 'Chute alto', context: 'a bola sobe e passa por cima de mesas e gente' },
+      { keys: ['Q'], label: 'Pegar ou guardar o marcador', context: 'a arma de paintball; desarmado, o tiro não sai' },
+      { keys: ['V'], label: 'Atirar paintball', context: 'na direção que você encara; deixa uma marca de tinta em quem levar' },
       { keys: ['Ctrl/Cmd', 'D'], label: 'Ir para minha mesa', context: 'quando houver mesa reivindicada' },
       { keys: ['Enter'], label: 'Abrir chat por perto', context: 'fora de campos de texto' },
       { keys: ['F'], label: 'Soltar confete', context: 'segure para manter ativo' },

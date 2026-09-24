@@ -34,7 +34,7 @@ async function createCourse(app: ReturnType<typeof buildApp>, token: string) {
     method: 'POST',
     url: '/admin/courses',
     headers: auth(token),
-    payload: { title: 'Liderança na prática', category: 'Liderança' },
+    payload: { title: 'Liderança na prática' },
   })
   return res.json().course as { id: string; slug: string; published: boolean; modules: { id: string }[] }
 }
@@ -80,7 +80,7 @@ async function createCourseWithLesson(app: ReturnType<typeof buildApp>, token: s
     method: 'POST',
     url: `/admin/course-modules/${moduleId}/lessons`,
     headers: auth(token),
-    payload: { title: 'Aula', type: 'TEXT', durationMinutes: 10 },
+    payload: { title: 'Aula', durationMinutes: 10 },
   })
   const lessonId = lessonRes.json().course.modules[0].lessons[0].id as string
   return { courseId: course.id, lessonId }
@@ -107,7 +107,7 @@ describe('autoria de curso (admin)', () => {
           method: 'POST',
           url: '/admin/courses',
           headers: auth(dev),
-          payload: { title: 'X', category: 'Y' },
+          payload: { title: 'X' },
         })
       ).statusCode,
     ).toBe(403)
@@ -161,8 +161,10 @@ describe('autoria de curso (admin)', () => {
       headers: auth(token),
       payload: {
         title: 'O que é 1:1',
-        type: 'VIDEO',
-        videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        blocks: [
+          { id: 'b1', type: 'video', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', source: 'youtube' },
+          { id: 'b2', type: 'text', text: 'Assista antes de vir.' },
+        ],
         durationMinutes: 25,
       },
     })
@@ -172,15 +174,103 @@ describe('autoria de curso (admin)', () => {
       method: 'POST',
       url: `/admin/course-modules/${moduleId}/lessons`,
       headers: auth(token),
-      payload: { title: 'Preparando a pauta', type: 'TEXT', contentHtml: '<p>Oi</p>', durationMinutes: 35 },
+      payload: {
+        title: 'Preparando a pauta',
+        blocks: [{ id: 'b3', type: 'text', text: 'Oi' }],
+        durationMinutes: 35,
+      },
     })
     const body = second.json().course
 
-    // O link é guardado como veio; a conversão para embed é do player.
-    expect(body.modules[0].lessons[0].videoUrl).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+    // Uma aula, dois blocos, na ordem em que foram enviados — que é o que a
+    // seção 9.1 pede e o que o formato único não permitia.
+    expect(body.modules[0].lessons[0].blocks).toEqual([
+      { id: 'b1', type: 'video', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', source: 'youtube' },
+      { id: 'b2', type: 'text', text: 'Assista antes de vir.' },
+    ])
     expect(body.modules[0].lessons.map((l: { sortOrder: number }) => l.sortOrder)).toEqual([0, 1])
     expect(body.durationMinutes).toBe(60)
     expect(body.totalLessons).toBe(2)
+
+    await app.close()
+  })
+
+  it('recusa bloco com URL de protocolo perigoso', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await adminToken(app)
+    const course = await createCourse(app, token)
+    const withModule = await app.inject({
+      method: 'POST',
+      url: `/admin/courses/${course.id}/modules`,
+      headers: auth(token),
+      payload: { title: 'Fundamentos' },
+    })
+    const moduleId = withModule.json().course.modules[0].id as string
+
+    // O renderer é React e não injeta marcação, mas `href` aceitaria
+    // `javascript:` — e aí o clique do aluno vira execução. Quem barra é o
+    // schema compartilhado, e este teste é o que prova que a rota o usa.
+    const res = await app.inject({
+      method: 'POST',
+      url: `/admin/course-modules/${moduleId}/lessons`,
+      headers: auth(token),
+      payload: {
+        title: 'Aula',
+        blocks: [{ id: 'b1', type: 'button', label: 'Clique', url: 'javascript:alert(1)' }],
+      },
+    })
+    expect(res.statusCode).toBe(400)
+
+    await app.close()
+  })
+
+  /**
+   * Cinco estados (Documento 4, seção 9.6). O que muda entre eles é o que a G&G
+   * vê na fila de trabalho; para o aluno, só `PUBLISHED` existe.
+   */
+  it('percorre os estados intermediários sem publicar, e a guarda vale só para publicar', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await adminToken(app)
+    const course = await createCourse(app, token)
+
+    // Curso vazio PODE ir para revisão: é justamente para isso que os estados
+    // intermediários servem. Só publicar exige conteúdo.
+    for (const status of ['REVIEW', 'PENDING_APPROVAL', 'ARCHIVED', 'DRAFT'] as const) {
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/admin/courses/${course.id}`,
+        headers: auth(token),
+        payload: { status },
+      })
+      expect(res.statusCode, status).toBe(200)
+      expect(res.json().course.status).toBe(status)
+      // `published` é derivado: nenhum dos quatro o liga.
+      expect(res.json().course.published, status).toBe(false)
+    }
+
+    await app.close()
+  })
+
+  // `publishedAt` é a PRIMEIRA publicação — ordena "Novos cursos" e não pode
+  // pular para o topo a cada ida e volta entre rascunho e revisão.
+  it('publishedAt marca a primeira publicação e não é reescrito depois', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await adminToken(app)
+    const { courseId } = await createCourseWithLesson(app, token)
+
+    const patch = (status: string) =>
+      app.inject({ method: 'PATCH', url: `/admin/courses/${courseId}`, headers: auth(token), payload: { status } })
+
+    const primeira = (await patch('PUBLISHED')).json().course.publishedAt
+    expect(primeira).not.toBeNull()
+
+    await patch('DRAFT')
+    await patch('REVIEW')
+    const republicado = (await patch('PUBLISHED')).json().course.publishedAt
+    expect(republicado).toBe(primeira)
 
     await app.close()
   })
@@ -195,7 +285,7 @@ describe('autoria de curso (admin)', () => {
       method: 'PATCH',
       url: `/admin/courses/${course.id}`,
       headers: auth(token),
-      payload: { published: true },
+      payload: { status: 'PUBLISHED' },
     })
     expect(tooEarly.statusCode).toBe(409)
 
@@ -209,14 +299,14 @@ describe('autoria de curso (admin)', () => {
       method: 'POST',
       url: `/admin/course-modules/${moduleRes.json().course.modules[0].id}/lessons`,
       headers: auth(token),
-      payload: { title: 'Aula', type: 'TEXT', durationMinutes: 10 },
+      payload: { title: 'Aula', durationMinutes: 10 },
     })
 
     const published = await app.inject({
       method: 'PATCH',
       url: `/admin/courses/${course.id}`,
       headers: auth(token),
-      payload: { published: true },
+      payload: { status: 'PUBLISHED' },
     })
     expect(published.statusCode).toBe(200)
     expect(published.json().course.published).toBe(true)
@@ -241,7 +331,7 @@ describe('autoria de curso (admin)', () => {
       method: 'POST',
       url: `/admin/course-modules/${moduleRes.json().course.modules[0].id}/lessons`,
       headers: auth(token),
-      payload: { title: 'Aula', type: 'TEXT', durationMinutes: 10 },
+      payload: { title: 'Aula', durationMinutes: 10 },
     })
 
     const draftCatalog = await app.inject({ method: 'GET', url: '/learning/courses', headers: auth(dev) })
@@ -251,7 +341,7 @@ describe('autoria de curso (admin)', () => {
       method: 'PATCH',
       url: `/admin/courses/${course.id}`,
       headers: auth(token),
-      payload: { published: true },
+      payload: { status: 'PUBLISHED' },
     })
 
     const liveCatalog = await app.inject({ method: 'GET', url: '/learning/courses', headers: auth(dev) })
@@ -277,13 +367,13 @@ describe('autoria de curso (admin)', () => {
       method: 'POST',
       url: `/admin/course-modules/${moduleRes.json().course.modules[0].id}/lessons`,
       headers: auth(token),
-      payload: { title: 'Aula', type: 'TEXT', durationMinutes: 10 },
+      payload: { title: 'Aula', durationMinutes: 10 },
     })
     await app.inject({
       method: 'PATCH',
       url: `/admin/courses/${course.id}`,
       headers: auth(token),
-      payload: { published: true },
+      payload: { status: 'PUBLISHED' },
     })
     await app.inject({ method: 'POST', url: `/learning/courses/${course.id}/enroll`, headers: auth(dev) })
 
@@ -299,7 +389,7 @@ describe('autoria de curso (admin)', () => {
     const token = await adminToken(app)
     const company = await prisma.company.create({ data: { id: 'company-outra', name: 'Outra', slug: 'outra' } })
     const alien = await prisma.course.create({
-      data: { slug: 'alheio', title: 'Alheio', category: 'X', companyId: company.id },
+      data: { slug: 'alheio', title: 'Alheio', companyId: company.id },
     })
 
     const res = await app.inject({ method: 'GET', url: `/admin/courses/${alien.id}`, headers: auth(token) })
@@ -324,7 +414,7 @@ describe('autoria de curso (admin)', () => {
       method: 'POST',
       url: `/admin/course-modules/${moduleRes.json().course.modules[0].id}/lessons`,
       headers: auth(token),
-      payload: { title: 'Aula', type: 'TEXT', durationMinutes: 99999 },
+      payload: { title: 'Aula', durationMinutes: 99999 },
     })
 
     expect(res.statusCode).toBe(400)
@@ -411,10 +501,10 @@ describe('autoria de quiz (admin)', () => {
     await app.ready()
     const outroSector = await prisma.sector.create({ data: { name: 'Financeiro', slug: 'financeiro-quiz' } })
     const alien = await prisma.course.create({
-      data: { slug: 'curso-fora-do-setor', title: 'Curso de outro setor', category: 'X', sectorId: outroSector.id },
+      data: { slug: 'curso-fora-do-setor', title: 'Curso de outro setor', sectorId: outroSector.id },
     })
     const own = await prisma.course.create({
-      data: { slug: 'curso-do-setor', title: 'Curso do próprio setor', category: 'X', sectorId: DEFAULT_SECTOR_ID },
+      data: { slug: 'curso-do-setor', title: 'Curso do próprio setor', sectorId: DEFAULT_SECTOR_ID },
     })
     const token = await subadminToken(app)
 
@@ -641,7 +731,6 @@ describe('curso — aprovação de certificado e modelo (round-trip)', () => {
       headers: auth(token),
       payload: {
         title: 'Curso com fila',
-        category: 'Liderança',
         requiresCertificateApproval: true,
         certificateTemplateId: template.id,
       },
@@ -720,7 +809,7 @@ describe('curso — aprovação de certificado e modelo (round-trip)', () => {
       method: 'POST',
       url: '/admin/courses',
       headers: auth(token),
-      payload: { title: 'Curso com modelo alheio', category: 'Liderança', certificateTemplateId: foreign.id },
+      payload: { title: 'Curso com modelo alheio', certificateTemplateId: foreign.id },
     })
     expect(created.statusCode).toBe(404)
     expect(created.json().message).toBe('Modelo de certificado não encontrado.')

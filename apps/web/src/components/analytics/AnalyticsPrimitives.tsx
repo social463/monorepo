@@ -4,6 +4,7 @@ import type {
   AccessSeriesPointDTO,
   DistributionSliceDTO,
   EngagementMoodTrendPointDTO,
+  EngagementSeriesPointDTO,
 } from '@legends/shared'
 import { WEEKDAY_LABELS } from '@legends/shared'
 import { Icon } from '../Icon'
@@ -142,6 +143,89 @@ export function AccessSeriesChart({ points }: { points: AccessSeriesPointDTO[] }
 }
 
 /**
+ * Três séries diárias no mesmo eixo — feedbacks, reações e comentários —, o
+ * gráfico de engajamento da aba Dashboard (seção 3 do Documento 3).
+ *
+ * Paleta categórica: cada série é uma coisa distinta, não um grau da mesma. A
+ * legenda repete o nome ao lado do quadradinho porque a cor sozinha não pode
+ * carregar a identidade da série.
+ */
+const ENGAGEMENT_SERIES = [
+  { key: 'feedbacks' as const, label: 'Feedbacks', color: '#25de88' },
+  { key: 'reactions' as const, label: 'Reações', color: '#7cc6ff' },
+  { key: 'comments' as const, label: 'Comentários', color: '#ffb36d' },
+]
+
+export function EngagementSeriesChart({ points }: { points: EngagementSeriesPointDTO[] }) {
+  const max = Math.max(
+    1,
+    ...points.flatMap((point) => [point.feedbacks, point.reactions, point.comments]),
+  )
+  const total = points.reduce(
+    (sum, point) => sum + point.feedbacks + point.reactions + point.comments,
+    0,
+  )
+
+  if (points.length === 0 || total === 0) {
+    return <EmptyState message="Nenhuma interação registrada no período." />
+  }
+
+  const stepX = points.length > 1 ? CHART_WIDTH / (points.length - 1) : 0
+  const lineFor = (key: (typeof ENGAGEMENT_SERIES)[number]['key']) =>
+    points
+      .map((point, index) => {
+        const y = CHART_HEIGHT - (point[key] / max) * CHART_HEIGHT
+        return `${(index * stepX).toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+
+  return (
+    <figure className="flex flex-col gap-xs">
+      <figcaption className="sr-only">
+        Feedbacks, reações e comentários por dia, de {formatDayLabel(points[0].day)} a{' '}
+        {formatDayLabel(points[points.length - 1].day)}.
+      </figcaption>
+      <svg
+        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+        preserveAspectRatio="none"
+        className="h-44 w-full"
+        role="img"
+        aria-label={`Engajamento por dia. ${total} interações no período.`}
+      >
+        {ENGAGEMENT_SERIES.map((serie) => (
+          <polyline
+            key={serie.key}
+            points={lineFor(serie.key)}
+            fill="none"
+            stroke={serie.color}
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+      </svg>
+      <div className="flex flex-wrap items-center justify-between gap-sm font-label text-label-sm text-on-surface-variant">
+        <span>{formatDayLabel(points[0].day)}</span>
+        <span className="flex flex-wrap gap-md">
+          {ENGAGEMENT_SERIES.map((serie) => (
+            <span key={serie.key} className="flex items-center gap-xs">
+              <span
+                aria-hidden
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: serie.color }}
+              />
+              {serie.label}
+            </span>
+          ))}
+        </span>
+        <span>{formatDayLabel(points[points.length - 1].day)}</span>
+      </div>
+    </figure>
+  )
+}
+
+/**
  * Distribuição em barras horizontais proporcionais ao maior valor.
  *
  * `showShare` desliga o percentual do total, que só faz sentido quando as
@@ -271,6 +355,78 @@ const HEATMAP_HOURS = Array.from({ length: 24 }, (_, hour) => hour)
  * aqui a grade 7×24 é preenchida — inclusive madrugada, que fica visível em
  * vez de ser recortada (um acesso às 3h é justamente o que interessa ver).
  */
+/**
+ * Rosca de distribuição — a "matriz de reações" da seção 4.8 do Documento 3.
+ *
+ * Paleta categórica de seis, na ordem em que as fatias chegam (já ordenadas por
+ * volume no servidor). O rótulo vai na legenda ao lado, com contagem e
+ * percentual: cor sozinha não identifica fatia, e texto dentro de uma rosca de
+ * 1% não cabe.
+ */
+const DONUT_COLORS = ['#25de88', '#7cc6ff', '#ffb36d', '#c89bff', '#ff8fa3', '#6ee7d7', '#859587']
+
+export function DonutChart({
+  slices,
+  emptyMessage,
+}: {
+  slices: { key: string; label: string; count: number }[]
+  emptyMessage: string
+}) {
+  const total = slices.reduce((sum, slice) => sum + slice.count, 0)
+  if (total === 0) return <EmptyState message={emptyMessage} />
+
+  // SVG de círculo único com `stroke-dasharray`: cada fatia é um arco do mesmo
+  // traço, deslocado pelo offset acumulado. Sem `path` com trigonometria e sem
+  // biblioteca — a rosca é o único gráfico circular do produto.
+  const RAIO = 60
+  const CIRC = 2 * Math.PI * RAIO
+  let offset = 0
+
+  return (
+    <div className="flex flex-wrap items-center gap-lg">
+      <svg viewBox="0 0 160 160" className="h-40 w-40 shrink-0" role="img" aria-label={`Distribuição de ${total} reações`}>
+        <g transform="rotate(-90 80 80)">
+          {slices.map((slice, index) => {
+            const fatia = (slice.count / total) * CIRC
+            const dash = `${fatia} ${CIRC - fatia}`
+            const el = (
+              <circle
+                key={slice.key}
+                cx="80"
+                cy="80"
+                r={RAIO}
+                fill="none"
+                stroke={DONUT_COLORS[index % DONUT_COLORS.length]}
+                strokeWidth="28"
+                strokeDasharray={dash}
+                strokeDashoffset={-offset}
+              />
+            )
+            offset += fatia
+            return el
+          })}
+        </g>
+      </svg>
+
+      <ul className="flex min-w-0 flex-1 flex-col gap-xs">
+        {slices.map((slice, index) => (
+          <li key={slice.key} className="flex items-center gap-sm text-body-sm text-on-surface-variant">
+            <span
+              aria-hidden
+              className="h-3 w-3 shrink-0 rounded-full"
+              style={{ backgroundColor: DONUT_COLORS[index % DONUT_COLORS.length] }}
+            />
+            <span className="min-w-0 flex-1 truncate text-on-surface">{slice.label}</span>
+            <span className="shrink-0 tabular-nums">
+              {slice.count} · {Math.round((slice.count / total) * 100)}%
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export function AccessHeatmap({ cells }: { cells: AccessHeatmapCellDTO[] }) {
   if (cells.length === 0) {
     return <EmptyState message="Nenhum acesso registrado no período." />

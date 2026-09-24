@@ -27,6 +27,8 @@ interface FormState {
   channel: CampaignChannel
   quantity: number
   notes: string
+  /** Modelo padrão da empresa (Documento 4, 13.4). Nasce ligado. */
+  applyTemplate: boolean
 }
 
 const inicial: FormState = {
@@ -37,6 +39,7 @@ const inicial: FormState = {
   channel: 'MURAL',
   quantity: 3,
   notes: '',
+  applyTemplate: true,
 }
 
 /** `type="date"` devolve `YYYY-MM-DD`; a API quer ISO com fuso. */
@@ -67,6 +70,7 @@ export function CampaignGenerator({
         audience: form.audience,
         channel: form.channel,
         quantity: form.quantity,
+        applyTemplate: form.applyTemplate,
         ...(form.notes.trim() ? { notes: form.notes.trim() } : {}),
       }),
     onSuccess: (data) => setDrafts(data.drafts),
@@ -230,6 +234,31 @@ export function CampaignGenerator({
           />
         </div>
 
+        {/*
+          O modelo padrão vem ligado (Documento 4, seção 13.4). Desligar é a
+          saída para gerar algo fora do padrão numa geração específica — não
+          apaga o que está cadastrado no painel abaixo.
+        */}
+        <div className="md:col-span-2">
+          <label className="flex cursor-pointer items-start gap-sm">
+            <input
+              type="checkbox"
+              checked={form.applyTemplate}
+              onChange={(e) => setForm({ ...form, applyTemplate: e.target.checked })}
+              className="mt-1"
+            />
+            <span>
+              <span className="font-label text-label-md text-on-surface">
+                Aplicar o modelo padrão (Brevidade Inteligente)
+              </span>
+              <span className="block text-body-sm text-on-surface-variant">
+                Título provocativo, lide, "Por que isso importa" e ação necessária. Desligue para
+                gerar algo fora do padrão.
+              </span>
+            </span>
+          </label>
+        </div>
+
         <div className="md:col-span-2">
           <label htmlFor="gen-notes" className="font-label text-label-sm text-on-surface-variant">
             Observações (opcional)
@@ -285,8 +314,11 @@ export function CampaignGenerator({
                 </button>
               </div>
 
+              {/* Alto o bastante para o comunicado inteiro caber sem rolagem:
+                  o gerador entrega de 600 a 1.500 caracteres, e revisar isso
+                  numa janelinha de 4 linhas era ler por uma fresta. */}
               <textarea
-                rows={4}
+                rows={12}
                 value={draft.body}
                 maxLength={CAMPAIGN_BODY_MAX_LENGTH}
                 aria-label={`Comunicado ${index + 1}`}

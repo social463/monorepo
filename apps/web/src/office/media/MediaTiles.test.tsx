@@ -856,3 +856,77 @@ describe('MediaTiles', () => {
     })
   })
 })
+
+describe('MediaTiles — remover da reunião (#22775)', () => {
+  it('mostra o botão no tile de quem está na sala e devolve o userId', () => {
+    const onRemoveFromRoom = vi.fn()
+    render(
+      <MediaTiles
+        remotes={[remote({ cameraTrack: fakeVideoTrack() })]}
+        expanded
+        onToggleExpanded={vi.fn()}
+        showAllPresent
+        removableUserIds={['a']}
+        onRemoveFromRoom={onRemoveFromRoom}
+      />,
+    )
+
+    fireEvent.click(screen.getAllByLabelText('Remover Ana da reunião')[0])
+
+    expect(onRemoveFromRoom).toHaveBeenCalledWith('a')
+  })
+
+  it('sem permissão de moderar, o botão não aparece', () => {
+    render(
+      <MediaTiles
+        remotes={[remote({ cameraTrack: fakeVideoTrack() })]}
+        expanded
+        onToggleExpanded={vi.fn()}
+        showAllPresent
+        removableUserIds={['a']}
+      />,
+    )
+
+    expect(screen.queryByLabelText('Remover Ana da reunião')).not.toBeInTheDocument()
+  })
+
+  it('não oferece remover quem não está na sala', () => {
+    render(
+      <MediaTiles
+        remotes={[remote({ cameraTrack: fakeVideoTrack() })]}
+        expanded
+        onToggleExpanded={vi.fn()}
+        showAllPresent
+        removableUserIds={[]}
+        onRemoveFromRoom={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByLabelText('Remover Ana da reunião')).not.toBeInTheDocument()
+  })
+
+  it('clicar em remover não pina o tile (o clique não vaza para a grade)', () => {
+    const onRemoveFromRoom = vi.fn()
+    render(
+      <MediaTiles
+        remotes={[
+          remote({ cameraTrack: fakeVideoTrack() }),
+          remote({ userId: 'b', name: 'Bruno', cameraTrack: fakeVideoTrack() }),
+        ]}
+        expanded
+        onToggleExpanded={vi.fn()}
+        showAllPresent
+        removableUserIds={['a', 'b']}
+        onRemoveFromRoom={onRemoveFromRoom}
+      />,
+    )
+    // Grade uniforme: sem tela compartilhada e sem pin, ninguém está em destaque.
+    expect(screen.queryByTestId('featured-tile')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getAllByLabelText('Remover Bruno da reunião')[0])
+
+    expect(onRemoveFromRoom).toHaveBeenCalledWith('b')
+    // O tile inteiro é clicável e pina em destaque — remover não pode fazer isso.
+    expect(screen.queryByTestId('featured-tile')).not.toBeInTheDocument()
+  })
+})

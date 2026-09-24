@@ -9,6 +9,7 @@ import {
   listCertificates,
   listCourses,
   rateCourse,
+  requestCertificate,
   setCourseFavorite,
   setLessonCompletion,
 } from './learning-service'
@@ -31,14 +32,12 @@ async function makeUser(email: string, name = 'Dev') {
   return prisma.user.create({ data: { name, email, passwordHash: 'x' } })
 }
 
-async function makeCourse(input: { slug: string; lessons: number; published?: boolean; certificate?: boolean; mandatory?: boolean }) {
+async function makeCourse(input: { slug: string; lessons: number; status?: 'DRAFT' | 'PUBLISHED'; certificate?: boolean; mandatory?: boolean }) {
   const course = await prisma.course.create({
     data: {
       slug: input.slug,
       title: `Curso ${input.slug}`,
-      category: 'Liderança',
-      competencies: ['Liderança'],
-      published: input.published ?? true,
+      status: input.status ?? 'PUBLISHED',
       publishedAt: new Date(),
       certificateEnabled: input.certificate ?? true,
       mandatory: input.mandatory ?? false,
@@ -81,7 +80,7 @@ describe('learning-service', () => {
   })
 
   it('não expõe curso em rascunho no catálogo nem por id direto', async () => {
-    const { course } = await makeCourse({ slug: 'rascunho', lessons: 2, published: false })
+    const { course } = await makeCourse({ slug: 'rascunho', lessons: 2, status: 'DRAFT' })
 
     const { courses } = await listCourses(viewer)
     expect(courses).toHaveLength(0)
@@ -125,6 +124,85 @@ describe('learning-service', () => {
 
     const enrollment = await prisma.courseEnrollment.findFirstOrThrow({ where: { userId: viewer.userId } })
     expect(enrollment.completedAt).not.toBeNull()
+  })
+
+  /**
+   * Recompensa por curso (Documento 4, seção 9.6). Até aqui concluir rendia
+   * SELO, e era o selo que carregava ponto e moeda.
+   */
+  describe('recompensa ao concluir', () => {
+    async function saldo(courseId: string) {
+      const [coins, xp] = await Promise.all([
+        prisma.coinTransaction.findMany({ where: { userId: viewer.userId, event: 'COURSE_COMPLETED' } }),
+        prisma.xpTransaction.findMany({ where: { userId: viewer.userId, event: 'COURSE_COMPLETED' } }),
+      ])
+      return {
+        coins: coins.reduce((soma, t) => soma + t.amount, 0),
+        xp: xp.reduce((soma, t) => soma + t.amount, 0),
+        lancamentos: coins.length + xp.length,
+        referenciaCoin: coins[0]?.dedupeKey,
+      }
+    }
+
+    it('credita o valor DO CURSO ao concluir, com os padrões do documento', async () => {
+      const { course, lessons } = await makeCourse({ slug: 'com-premio', lessons: 1 })
+      await enrollInCourse(viewer, course.id)
+      await setLessonCompletion(viewer, lessons[0].id, true)
+
+      const depois = await saldo(course.id)
+      expect(depois.xp).toBe(25)
+      expect(depois.coins).toBe(10)
+      // O dedupe é por CURSO: é ele que impede pagar duas vezes.
+      expect(depois.referenciaCoin).toBe(`COURSE_COMPLETED:${course.id}`)
+    })
+
+    it('respeita o valor configurado no curso', async () => {
+      const { course, lessons } = await makeCourse({ slug: 'premio-alto', lessons: 1 })
+      await prisma.course.update({ where: { id: course.id }, data: { rewardPoints: 100, rewardCoins: 50 } })
+      await enrollInCourse(viewer, course.id)
+      await setLessonCompletion(viewer, lessons[0].id, true)
+
+      const depois = await saldo(course.id)
+      expect(depois.xp).toBe(100)
+      expect(depois.coins).toBe(50)
+    })
+
+    /**
+     * O ponto do desenho: desmarcar uma aula e marcar de novo reconclui o curso,
+     * e não pode pagar de novo. Quem garante é o `@@unique([userId, dedupeKey])`
+     * — não uma consulta "já paguei?" antes de creditar.
+     */
+    it('reconcluir não paga de novo', async () => {
+      const { course, lessons } = await makeCourse({ slug: 'reconcluido', lessons: 1 })
+      await enrollInCourse(viewer, course.id)
+
+      await setLessonCompletion(viewer, lessons[0].id, true)
+      await setLessonCompletion(viewer, lessons[0].id, false)
+      await setLessonCompletion(viewer, lessons[0].id, true)
+
+      const depois = await saldo(course.id)
+      expect(depois.lancamentos).toBe(2)
+      expect(depois.xp).toBe(25)
+      expect(depois.coins).toBe(10)
+    })
+
+    // Zero é "sem recompensa", e um extrato com "0 EMR Coins" seria ruído.
+    it('zero não gera lançamento', async () => {
+      const { course, lessons } = await makeCourse({ slug: 'sem-premio', lessons: 1 })
+      await prisma.course.update({ where: { id: course.id }, data: { rewardPoints: 0, rewardCoins: 0 } })
+      await enrollInCourse(viewer, course.id)
+      await setLessonCompletion(viewer, lessons[0].id, true)
+
+      expect((await saldo(course.id)).lancamentos).toBe(0)
+    })
+
+    it('não paga antes de o curso estar concluído', async () => {
+      const { course, lessons } = await makeCourse({ slug: 'no-meio', lessons: 3 })
+      await enrollInCourse(viewer, course.id)
+      await setLessonCompletion(viewer, lessons[0].id, true)
+
+      expect((await saldo(course.id)).lancamentos).toBe(0)
+    })
   })
 
   it('não emite certificado enquanto a inscrição não estiver concluída', async () => {
@@ -250,8 +328,7 @@ describe('learning-service', () => {
       data: {
         slug: 'de-outra-empresa',
         title: 'De outra empresa',
-        category: 'Liderança',
-        published: true,
+        status: 'PUBLISHED',
         publishedAt: new Date(),
         companyId: company.id,
       },
@@ -418,4 +495,102 @@ describe('issueCertificate — quiz final e fila de aprovação (Task 9)', () =>
       expect(resolveCertificateTemplateForCourse).not.toHaveBeenCalled()
     },
   )
+})
+
+/**
+ * Documento 4, seção 9.3: o certificado era 100% automático. Quem concluía um
+ * curso que exige aprovação entrava na fila sem saber, e quem era barrado por
+ * outra razão não via nada — não havia o que pedir nem o que ler.
+ */
+describe('requestCertificate — pedido feito pela pessoa', () => {
+  let viewer: { userId: string; companyId: string }
+
+  beforeEach(async () => {
+    const user = await makeUser('pede-cert@empresa.com')
+    viewer = { userId: user.id, companyId: COMPANY }
+  })
+
+  it('recusa antes da conclusão — é a mesma guarda que a tela aplica no botão', async () => {
+    const { course } = await makeCourse({ slug: 'pedir-sem-concluir', lessons: 2 })
+    await enrollInCourse(viewer, course.id)
+
+    await expect(requestCertificate(viewer, course.id)).rejects.toThrow(LearningError)
+    expect(await prisma.certificateRequest.count({ where: { userId: viewer.userId } })).toBe(0)
+  })
+
+  it('recusa curso que não emite certificado', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'pedir-sem-cert', lessons: 1, certificate: false })
+    await enrollInCourse(viewer, course.id)
+    await setLessonCompletion(viewer, lessons[0].id, true)
+
+    await expect(requestCertificate(viewer, course.id)).rejects.toThrow(LearningError)
+  })
+
+  it('enfileira o pedido do curso concluído que espera aprovação', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'pedir-com-aprovacao', lessons: 1 })
+    await prisma.course.update({ where: { id: course.id }, data: { requiresCertificateApproval: true } })
+    await enrollInCourse(viewer, course.id)
+    await setLessonCompletion(viewer, lessons[0].id, true)
+    await prisma.certificateRequest.deleteMany({ where: { userId: viewer.userId } })
+
+    await requestCertificate(viewer, course.id)
+
+    const pedidos = await prisma.certificateRequest.findMany({ where: { userId: viewer.userId } })
+    expect(pedidos).toHaveLength(1)
+    expect(pedidos[0].status).toBe('PENDING')
+  })
+
+  it('pedir de novo é idempotente — não abre uma segunda linha na fila', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'pedir-duas-vezes', lessons: 1 })
+    await prisma.course.update({ where: { id: course.id }, data: { requiresCertificateApproval: true } })
+    await enrollInCourse(viewer, course.id)
+    await setLessonCompletion(viewer, lessons[0].id, true)
+
+    await requestCertificate(viewer, course.id)
+    await requestCertificate(viewer, course.id)
+
+    expect(await prisma.certificateRequest.count({ where: { userId: viewer.userId } })).toBe(1)
+  })
+
+  it('reabre a recusa em vez de criar outra linha', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'pedir-apos-recusa', lessons: 1 })
+    await prisma.course.update({ where: { id: course.id }, data: { requiresCertificateApproval: true } })
+    await enrollInCourse(viewer, course.id)
+    await setLessonCompletion(viewer, lessons[0].id, true)
+    await prisma.certificateRequest.updateMany({
+      where: { userId: viewer.userId },
+      data: { status: 'REJECTED', rejectionReason: 'Falta o quiz final.' },
+    })
+
+    await requestCertificate(viewer, course.id)
+
+    const pedidos = await prisma.certificateRequest.findMany({ where: { userId: viewer.userId } })
+    expect(pedidos).toHaveLength(1)
+    expect(pedidos[0].status).toBe('PENDING')
+    // O motivo da recusa anterior fica: outro revisor precisa saber que já foi
+    // recusada uma vez (ver `ensureCertificateRequestForEnrollment`).
+    expect(pedidos[0].rejectionReason).toBe('Falta o quiz final.')
+  })
+
+  it('curso já emitido é no-op — não há o que aprovar', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'pedir-com-certificado', lessons: 1 })
+    await enrollInCourse(viewer, course.id)
+    const concluido = await setLessonCompletion(viewer, lessons[0].id, true)
+    expect(concluido.certificate).not.toBeNull()
+
+    await requestCertificate(viewer, course.id)
+
+    expect(await prisma.certificateRequest.count({ where: { userId: viewer.userId } })).toBe(0)
+  })
+
+  it('o detalhe do curso devolve o estado da fila', async () => {
+    const { course, lessons } = await makeCourse({ slug: 'detalhe-com-pedido', lessons: 1 })
+    await prisma.course.update({ where: { id: course.id }, data: { requiresCertificateApproval: true } })
+    await enrollInCourse(viewer, course.id)
+    await setLessonCompletion(viewer, lessons[0].id, true)
+
+    const detalhe = await getCourseDetail(viewer, course.id)
+
+    expect(detalhe.certificateRequest?.status).toBe('PENDING')
+  })
 })

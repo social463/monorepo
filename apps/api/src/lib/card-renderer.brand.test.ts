@@ -49,8 +49,20 @@ describe('cardBrandFrom', () => {
     }
   })
 
-  it('usa o nome exibido da empresa como wordmark', () => {
+  /**
+   * O título é "DESTAQUES <EMPRESA>". Vinha de `appName` e saía errado: o app da
+   * EMR chama-se "Portal EMR", então o card dizia "DESTAQUES PORTAL EMR". São
+   * dois nomes distintos — um é como o produto se apresenta por dentro, o outro
+   * é quem está destacando alguém.
+   */
+  it('usa o nome da EMPRESA como wordmark, não o do app', () => {
+    const branding = brandingFromPreset({ ...BRAND_PRESETS.emr, appName: 'Portal EMR' })
+    expect(cardBrandFrom(branding, { companyName: 'EMR' }).wordmark).toBe('EMR')
+  })
+
+  it('sem o nome da empresa, cai no do app — o título nunca sai vazio', () => {
     expect(cardBrandFrom(brandingFromPreset(BRAND_PRESETS.emr)).wordmark).toBe('EMR LEGENDS')
+    expect(cardBrandFrom(brandingFromPreset(BRAND_PRESETS.emr), { companyName: '  ' }).wordmark).toBe('EMR LEGENDS')
   })
 })
 
@@ -75,7 +87,7 @@ describe('buildCardSvg com marca', () => {
   })
 
   it('com marca, pinta o card nas cores da empresa', () => {
-    const brand = cardBrandFrom(brandingFromPreset(BRAND_PRESETS.emr))
+    const brand = cardBrandFrom(brandingFromPreset(BRAND_PRESETS.emr), { companyName: 'EMR Legends' })
     const svg = buildCardSvg({ ...dados, brand })
     expect(svg).toContain(brand.bgCenter)
     expect(svg).toContain(brand.accent)

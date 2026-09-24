@@ -13,7 +13,12 @@ import { SelectMenu } from '../../components/SelectMenu'
 import { categoryDotClass } from './category-colors'
 import { NewFeedbackForm } from './NewFeedbackForm'
 import { SharedFeedbackCard } from './SharedFeedbackCard'
-import { fetchSharedFeedbacks, sharedFeedbacksPageKey, useToggleSharedReaction } from './shared-feedbacks'
+import {
+  fetchSharedFeedbacks,
+  sharedFeedbacksPageKey,
+  useMarkFeedbackWallSeen,
+  useToggleSharedReaction,
+} from './shared-feedbacks'
 
 type Tab = 'mural' | 'enviar' | 'recebidos' | 'enviados'
 
@@ -206,6 +211,8 @@ function MyFeedbacksTab({ kind }: { kind: 'received' | 'sent' }) {
 export function MuralFeedbacksPage() {
   const { user } = useAuth()
   const [tab, setTab] = useState<Tab>('mural')
+  // Abrir a página é o que apaga o selo "Novo" da Home (Documento 3, seção 9.3).
+  useMarkFeedbackWallSeen()
   // Admin não deixa feedback (a API recusa com 403), então a aba nem aparece.
   const canWrite = Boolean(user) && user?.role !== 'ADMIN' && user?.role !== 'SUBADMIN'
   const tabs = TABS.filter((t) => t.id !== 'enviar' || canWrite)

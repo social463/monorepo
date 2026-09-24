@@ -86,6 +86,27 @@ export const CULTURE_VISUAL_ASSET_FIT_LABELS: Record<CultureVisualAssetFit, stri
 export const CULTURE_VISUAL_ASSET_FILE_NAME_MAX_LENGTH = 120
 
 /**
+ * A qual das duas identidades visuais a peça pertence (Documento 4, seção 7).
+ *
+ * A EMR tem duas marcas convivendo: a atual, que ainda é a que vai para fora,
+ * e a nova, restrita ao ambiente interno até a divulgação oficial. A regra de
+ * uso viaja junto com a aba — quem baixa não precisa lembrar do combinado.
+ */
+export const CULTURE_VISUAL_ASSET_BRANDS = ['CURRENT', 'NEW'] as const
+export type CultureVisualAssetBrand = (typeof CULTURE_VISUAL_ASSET_BRANDS)[number]
+
+export const CULTURE_VISUAL_ASSET_BRAND_LABELS: Record<CultureVisualAssetBrand, string> = {
+  CURRENT: 'Marca Atual',
+  NEW: 'Nova Marca',
+}
+
+/** Legenda fixa exibida dentro de cada aba, acima das peças. */
+export const CULTURE_VISUAL_ASSET_BRAND_RULES: Record<CultureVisualAssetBrand, string> = {
+  CURRENT: 'Uso interno e externo, até a divulgação oficial da nova marca.',
+  NEW: 'Uso restrito ao ambiente interno. Não deve ser usada fora da empresa.',
+}
+
+/**
  * Peça do kit de identidade visual. Uma imagem só por peça: ela é ao mesmo
  * tempo o preview do card e o arquivo que a pessoa baixa — não há "preview" e
  * "arquivo" separados, porque o que se distribui aqui É a imagem.
@@ -103,6 +124,7 @@ export interface CultureVisualAssetDTO {
   /** Nome sugerido no download. */
   fileName: string
   fit: CultureVisualAssetFit
+  brand: CultureVisualAssetBrand
   order: number
   published: boolean
   updatedAt: string
@@ -115,6 +137,7 @@ export interface CreateCultureVisualAssetRequest {
   storageKey: string
   fileName: string
   fit?: CultureVisualAssetFit
+  brand?: CultureVisualAssetBrand
   published?: boolean
 }
 
@@ -247,4 +270,33 @@ export interface CultureBenefitsResponse {
 /** Resposta da rota de download: link assinado, de curta duração. */
 export interface CultureManualDownloadResponse {
   url: string
+}
+
+/**
+ * Por quantos dias depois da admissão (`User.joinedAt`) os materiais da pessoa
+ * também aparecem no **perfil dela**, e não só na aba Kit visual.
+ *
+ * Os primeiros meses são quando ela mais precisa do plano de 90 dias e do kit
+ * de chegada, e é exatamente quando ela ainda não sabe que existe uma aba
+ * chamada "Kit visual". Passado o período, a seção some do perfil — o material
+ * continua na aba, para sempre. Nada é apagado: o que expira é o destaque.
+ */
+export const ONBOARDING_MATERIALS_WINDOW_DAYS = 90
+
+/**
+ * Os materiais da chegada, do jeito que o perfil precisa deles.
+ *
+ * Quem decide se a janela está aberta é o **servidor**, como o `canSign` do
+ * mural de aniversário: o relógio do navegador é do usuário, e uma seção que
+ * aparece por mudar a data da máquina não é seção, é enfeite. Fechada a janela,
+ * `assets` vem **vazia** — a lista não trafega para ninguém que não vá vê-la.
+ */
+export interface CultureOnboardingKitResponse {
+  /** A janela dos 90 dias ainda está aberta para esta pessoa. */
+  active: boolean
+  /** Quando a seção some do perfil. `null` quando a janela já fechou. */
+  endsAt: string | null
+  /** Dias inteiros que faltam, para o aviso do card. `0` fora da janela. */
+  daysLeft: number
+  assets: CulturePersonalAssetDTO[]
 }

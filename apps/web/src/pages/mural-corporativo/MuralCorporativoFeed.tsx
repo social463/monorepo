@@ -1,11 +1,46 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { canPublishCorporatePostDirectly } from '@legends/shared'
 import { Icon } from '../../components/Icon'
 import { useAuth } from '../../auth/AuthContext'
-import { useCorporateMuralFeed, useCreateCorporatePost } from '../../lib/use-corporate-mural'
+import { useCorporateMuralFeed, useCorporatePostTags, useCreateCorporatePost } from '../../lib/use-corporate-mural'
 import { CorporatePostComposer } from './CorporatePostComposer'
 import { CorporatePostCard } from './CorporatePostCard'
+
+/**
+ * Pílula do filtro por tipo de comunicação.
+ *
+ * A cor da tag pinta a borda e o ponto, não o fundo: com seis pílulas coloridas
+ * lado a lado, fundo cheio faria a selecionada sumir no meio das outras — e é a
+ * seleção que precisa saltar. Selecionada, a pílula usa a cor de marca.
+ */
+function TagPill({
+  label,
+  color,
+  active,
+  onClick,
+}: {
+  label: string
+  color?: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex items-center gap-xs rounded-full border px-md py-1 font-label text-label-md transition-colors ${
+        active
+          ? 'border-primary bg-primary/10 text-primary'
+          : 'border-outline-variant/60 text-on-surface-variant hover:text-on-surface'
+      }`}
+    >
+      {color && <span aria-hidden className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />}
+      {label}
+    </button>
+  )
+}
 
 /** Feed do mural corporativo: composer + lista + scroll infinito + deep-link.
  *
@@ -15,7 +50,10 @@ import { CorporatePostCard } from './CorporatePostCard'
  * conexões abertas por pessoa, com só uma delas invalidando a query. */
 export function MuralCorporativoFeed() {
   const { user } = useAuth()
-  const feed = useCorporateMuralFeed()
+  // Filtro por tipo de comunicação (seção 13 do Documento 3). Vazio = tudo.
+  const [tagId, setTagId] = useState('')
+  const tags = useCorporatePostTags()
+  const feed = useCorporateMuralFeed(tagId || undefined)
   const create = useCreateCorporatePost()
   const sentinelRef = useRef<HTMLDivElement>(null)
   const { hash } = useLocation()
@@ -71,6 +109,23 @@ export function MuralCorporativoFeed() {
           canPublishDirectly={canPublishDirectly}
         />
       </div>
+
+      {/* Pílulas de filtro no topo, como a seção 13 pede. Some quando a empresa
+          não tem catálogo — um filtro de um item só ocupa espaço sem servir. */}
+      {(tags.data?.tags?.length ?? 0) > 0 && (
+        <div role="group" aria-label="Filtrar por tipo de comunicação" className="flex flex-wrap gap-sm">
+          <TagPill label="Todos" active={tagId === ''} onClick={() => setTagId('')} />
+          {(tags.data?.tags ?? []).map((tag) => (
+            <TagPill
+              key={tag.id}
+              label={tag.name}
+              color={tag.color}
+              active={tagId === tag.id}
+              onClick={() => setTagId(tagId === tag.id ? '' : tag.id)}
+            />
+          ))}
+        </div>
+      )}
 
       {feed.isLoading ? (
         <p className="text-body-sm text-on-surface-variant">Carregando…</p>

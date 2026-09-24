@@ -10,7 +10,7 @@ import {
   ProfileError,
 } from '../services/profile-service'
 import { evaluateTenureBadgesForUser, listBadgesForUser } from '../services/badge-service'
-import { notifyBadgesEarned } from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { getXpBalance } from '../services/xp-service'
 import { sectorFeaturesFor, sectorNamesFor } from '../lib/sector-features'
 import { squadLabel, toAwardedBadgeDTO, toPublicUser, toRetroActionItemDTO } from '../lib/serialize'
@@ -44,7 +44,7 @@ export async function profileRoutes(app: FastifyInstance) {
     try {
       const awarded = await evaluateTenureBadgesForUser(id)
       if (awarded.length > 0) {
-        await notifyBadgesEarned(id, awarded.map((b) => b.badgeId), request.user.companyId)
+        await settleBadgesEarned(id, awarded.map((b) => b.badgeId), request.user.companyId)
       }
     } catch (err) {
       request.log.error(err)

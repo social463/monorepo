@@ -11,7 +11,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   isLeaderRole,
-  mapZoneAt,
+  mapZoneAtTile,
   claimedDeskInMeetingRoom,
   type ActiveOfficeMapDTO,
   type OfficeConfigDTO,
@@ -19,6 +19,8 @@ import {
   type OfficeKart,
   type OfficeOccupant,
   type OfficeUserStatus,
+  TILE_SIZE,
+  tileOfPixel,
 } from '@legends/shared'
 import { useAuth } from '../../auth/AuthContext'
 import { apiFetch } from '../../lib/api'
@@ -37,6 +39,7 @@ import { mapMessageEffect } from './mapMessage'
 import { useRoomChat, type RoomChatState } from '../media/useRoomChat'
 import { useRaisedHands, type RaisedHandsState } from '../media/useRaisedHands'
 import { useRoomLock, type RoomLockState } from '../media/useRoomLock'
+import { useRoomModeration, type RoomModerationState } from '../media/useRoomModeration'
 import { useRoomAudio, type RoomAudioState } from '../media/useRoomAudio'
 import { RoomAudioPlayer } from '../media/RoomAudioPlayer'
 import {
@@ -75,6 +78,8 @@ export interface OfficeSessionValue {
   roomChat: RoomChatState
   raisedHands: RaisedHandsState
   roomLock: RoomLockState
+  /** Quem manda em cada sala e a remoção de participante da chamada. */
+  roomModeration: RoomModerationState
   roomAudio: RoomAudioState
   /** Troca manual do próprio status de presença (online/away/brb) — só da sessão. */
   setUserStatus(status: OfficeUserStatus): void
@@ -173,7 +178,14 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
   // Áudio espacial só no espaço aberto — em zonas a sala já é isolada
   // (autoSubscribe) e o pan por posição não se aplica.
   const isOpenRoom = media.roomName !== null && media.roomName === media.openRoom
-  const currentZone = you && activeMap ? mapZoneAt(activeMap.document, you.x, you.y) : null
+  // `mapZoneAtTile` recebe TILE; o occupant fala pixel desde o movimento livre.
+  // Passar pixel aqui não dá erro — dá zona nenhuma, e a sala de reunião deixa
+  // de existir para quem está dentro dela (some a tranca, o chat, o áudio e a
+  // moderação de uma vez).
+  const tileSize = activeMap?.document.map.tileWidth ?? TILE_SIZE
+  const youTile = you ? tileOfPixel(you, tileSize) : null
+  const currentZone =
+    youTile && activeMap ? mapZoneAtTile(activeMap.document, youTile.x, youTile.y) : null
   // Portão de som: liga assim que você pisa na sala de silêncio, desliga ao
   // sair. Fica aqui porque é a camada que sabe a sua zona; quem consome são os
   // emissores de som, inclusive a cena Phaser (ver `lib/office-silence`).
@@ -194,11 +206,11 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
       : null
   const canControlRoomLock = !claimedDeskInCurrentRoom || claimedDeskInCurrentRoom.claimedBy?.id === youId
   // Sala de reunião OU zona privada ("espaço de conversa") — mesma dupla que
-  // o servidor aceita pra levantar a mão (ver `raiseHandZoneId` no
+  // o servidor aceita pra levantar a mão (ver `raiseHandZoneIdAtTile` no
   // OfficeHub). Zona privada não tem Room no banco, então usa o mesmo id
   // ad-hoc da sala de áudio por proximidade: externalKey, ou o id do objeto
   // se ela não tiver externalKey.
-  const raiseHandZoneId =
+  const raiseHandZoneIdAtTile =
     currentZone?.type === 'meeting-room'
       ? (currentRoom?.id ?? null)
       : currentZone?.type === 'private-zone'
@@ -210,12 +222,20 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
     you ? { userId: you.userId, name: you.name } : null,
     connected,
   )
-  const raisedHands = useRaisedHands(bridge, raiseHandZoneId, youId, connected, media.localSpeaking)
+  const raisedHands = useRaisedHands(bridge, raiseHandZoneIdAtTile, youId, connected, media.localSpeaking)
   // Só sala de reunião (não zona privada): a tranca depende de um `Room` de
   // verdade, que é o que o servidor usa pra decidir quem entra.
   const roomLock = useRoomLock(bridge, currentRoom?.id ?? null, youId, connected, canControlRoomLock)
   // Só sala de reunião, como a tranca: a faixa é da sala, e zona privada não tem `Room`.
   const roomAudio = useRoomAudio(bridge, currentRoom?.id ?? null, youId, connected, isGuest)
+  // Convidado nunca modera: a sala é da empresa, não de quem entrou por link.
+  const roomModeration = useRoomModeration(
+    bridge,
+    currentRoom?.id ?? null,
+    youId,
+    connected,
+    !isGuest && user?.role === 'ADMIN',
+  )
   const setUserStatus = useCallback(
     (status: OfficeUserStatus) => bridge.emitClientMessage({ type: 'set-status', status }),
     [bridge],
@@ -343,6 +363,7 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
       roomChat,
       raisedHands,
       roomLock,
+      roomModeration,
       roomAudio,
       setUserStatus,
       setCharacterName,
@@ -375,6 +396,7 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
       roomChat,
       raisedHands,
       roomLock,
+      roomModeration,
       roomAudio,
       setUserStatus,
       setCharacterName,
@@ -397,6 +419,10 @@ export function OfficeSessionProvider({ children }: { children: ReactNode }) {
               track={r.audioTrack}
               you={you}
               occupant={remoteOccupant}
+              // A régua do ganho e do pan é a MESMA que resolve a sua zona logo
+              // acima: o grafo raciocina em tile e o occupant fala pixel.
+              tileWidth={tileSize}
+              tileHeight={activeMap?.document.map.tileHeight ?? TILE_SIZE}
               outputDeviceId={audioOutputDeviceId}
               volume={volume}
             />

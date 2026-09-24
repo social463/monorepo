@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../app'
 import { prisma } from '../lib/prisma'
 
@@ -328,6 +329,30 @@ describe('rotas de fixar, ler e alcance', () => {
     await app.close()
   })
 
+  it('viewerRead é de QUEM PEDE: o mesmo post é lido para um e não lido para outro', async () => {
+    const app = buildApp()
+    await app.ready()
+    const head = await makeUser(app, 'ADMIN')
+    const leu = await makeUser(app, 'LEGEND')
+    const naoLeu = await makeUser(app, 'LEGEND')
+    const post = await app.inject({
+      method: 'POST', url: '/corporate-posts', headers: auth(head.token), payload: { content: 'aviso' },
+    })
+    const id = post.json().post.id
+    await app.inject({ method: 'POST', url: `/corporate-posts/${id}/read`, headers: auth(leu.token) })
+
+    const feedDeQuemLeu = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(leu.token) })
+    const feedDeQuemNao = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(naoLeu.token) })
+
+    const acha = (res: { json: () => { items: { id: string; viewerRead: boolean }[] } }) =>
+      res.json().items.find((p) => p.id === id)!
+    expect(acha(feedDeQuemLeu).viewerRead).toBe(true)
+    // Sem isso a marcação "Novo" da Home sumiria para todo mundo assim que uma
+    // pessoa qualquer abrisse o comunicado.
+    expect(acha(feedDeQuemNao).viewerRead).toBe(false)
+    await app.close()
+  })
+
   it('o painel de alcance é 200 para admin e 403 para lenda', async () => {
     const app = buildApp()
     await app.ready()
@@ -597,6 +622,495 @@ describe('rotas de aprovação, público-alvo e XP', () => {
     })
     // Ainda tem o segundo comentário: nada muda.
     expect(await prisma.xpTransaction.count({ where: { userId: lenda.user.id } })).toBe(1)
+    await app.close()
+  })
+})
+
+describe('tipos de comunicação do Feed (Documento 3, seção 13)', () => {
+  /**
+   * Cria as categorias do teste. O `setup.ts` limpa o catálogo entre testes, e
+   * a provisão de verdade acontece no onboarding da empresa — aqui a gente
+   * monta o que cada caso precisa, sem depender do seed da migration.
+   */
+  async function criarTags(app: FastifyInstance, token: string, ...nomes: string[]) {
+    const criadas = []
+    for (const name of nomes) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/admin/corporate-post-tags',
+        headers: auth(token),
+        payload: { name },
+      })
+      criadas.push(res.json().tag as { id: string; name: string; slug: string })
+    }
+    return criadas
+  }
+
+  it('lista só as categorias ativas no catálogo público', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const [institucional, treinamento] = await criarTags(app, admin.token, 'Institucional', 'Treinamento')
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/corporate-post-tags/${treinamento.id}`,
+      headers: auth(admin.token),
+      payload: { active: false },
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/corporate-post-tags', headers: auth(admin.token) })
+
+    expect(res.json().tags.map((t: { id: string }) => t.id)).toEqual([institucional.id])
+    await app.close()
+  })
+
+  it('publica com categoria e a devolve no DTO', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const [tag] = await criarTags(app, admin.token, 'Institucional')
+
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'aviso com tipo', tagId: tag.id },
+    })
+
+    expect(criado.statusCode).toBe(201)
+    expect(criado.json().post.tag).toMatchObject({ id: tag.id, name: tag.name })
+    await app.close()
+  })
+
+  it('o filtro do feed é do SERVIDOR: só volta o que tem a categoria pedida', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const tags = await criarTags(app, admin.token, 'Institucional', 'Endomarketing')
+    const criar = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/corporate-posts', headers: auth(admin.token), payload })
+    await criar({ content: 'institucional', tagId: tags[0].id })
+    await criar({ content: 'endomarketing', tagId: tags[1].id })
+    await criar({ content: 'sem categoria' })
+
+    const filtrado = await app.inject({
+      method: 'GET',
+      url: `/corporate-posts?tagId=${tags[0].id}`,
+      headers: auth(admin.token),
+    })
+
+    const textos = filtrado.json().items.map((p: { content: string }) => p.content)
+    expect(textos).toEqual(['institucional'])
+    await app.close()
+  })
+
+  it('recusa categoria inativa em comunicado novo', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const [tag] = await criarTags(app, admin.token, 'Institucional')
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/corporate-post-tags/${tag.id}`,
+      headers: auth(admin.token),
+      payload: { active: false },
+    })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'aviso', tagId: tag.id },
+    })
+
+    // Desativar existe para tirar a categoria de circulação; aceitá-la pelo
+    // corpo da request seria a porta dos fundos disso.
+    expect(res.statusCode).toBe(400)
+    expect(res.json().message).toMatch(/inativa/i)
+    await app.close()
+  })
+
+  it('a categoria desativada some do catálogo público, mas não dos posts que já a usam', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const [tag] = await criarTags(app, admin.token, 'Institucional')
+    await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'aviso antigo', tagId: tag.id },
+    })
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/corporate-post-tags/${tag.id}`,
+      headers: auth(admin.token),
+      payload: { active: false },
+    })
+
+    const catalogo = await app.inject({ method: 'GET', url: '/corporate-post-tags', headers: auth(admin.token) })
+    expect(catalogo.json().tags.map((t: { id: string }) => t.id)).not.toContain(tag.id)
+
+    const feed = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(admin.token) })
+    // Post já publicado continua classificado — é história, não escolha nova.
+    expect(feed.json().items[0].tag).toMatchObject({ id: tag.id })
+    await app.close()
+  })
+
+  it('criar categoria com nome repetido é 409, com dica de reativar quando está inativa', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const [tag] = await criarTags(app, admin.token, 'Institucional')
+
+    const repetida = await app.inject({
+      method: 'POST',
+      url: '/admin/corporate-post-tags',
+      headers: auth(admin.token),
+      payload: { name: 'Institucional' },
+    })
+    expect(repetida.statusCode).toBe(409)
+
+    await app.inject({
+      method: 'PATCH',
+      url: `/admin/corporate-post-tags/${tag.id}`,
+      headers: auth(admin.token),
+      payload: { active: false },
+    })
+    const depois = await app.inject({
+      method: 'POST',
+      url: '/admin/corporate-post-tags',
+      headers: auth(admin.token),
+      payload: { name: tag.name },
+    })
+    expect(depois.json().message).toMatch(/Reative-a/i)
+    await app.close()
+  })
+})
+
+describe('comunicado dirigido à liderança', () => {
+  async function publicar(app: FastifyInstance, token: string, audience: string, extra = {}) {
+    return app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(token),
+      payload: { content: 'aviso da liderança', audience, ...extra },
+    })
+  }
+
+  it('o líder vê; o colaborador não', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const lead = await makeUser(app, 'LEAD')
+    const legend = await makeUser(app, 'LEGEND')
+    await publicar(app, admin.token, 'LEADERS')
+
+    const doLider = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(lead.token) })
+    const doColega = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(legend.token) })
+
+    expect(doLider.json().items).toHaveLength(1)
+    expect(doColega.json().items).toHaveLength(0)
+    await app.close()
+  })
+
+  it('MANAGER e HEAD também alcançam — é o LEADER_ROLES inteiro', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const manager = await makeUser(app, 'MANAGER')
+    const head = await makeUser(app, 'HEAD')
+    await publicar(app, admin.token, 'LEADERS')
+
+    for (const quem of [manager, head]) {
+      const res = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(quem.token) })
+      expect(res.json().items).toHaveLength(1)
+    }
+    await app.close()
+  })
+
+  it('quem modera continua vendo, mesmo sem liderar ninguém', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    await publicar(app, admin.token, 'LEADERS')
+
+    const res = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(admin.token) })
+
+    expect(res.json().items).toHaveLength(1)
+    await app.close()
+  })
+
+  it('avisa a liderança e não avisa o colaborador', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const lead = await makeUser(app, 'LEAD')
+    const legend = await makeUser(app, 'LEGEND')
+
+    await publicar(app, admin.token, 'LEADERS', { title: 'Alinhamento de metas' })
+
+    // `makeUser` devolve `{ user, token }`: usar `lead.id` daria `undefined`, e
+    // no Prisma `undefined` num `where` significa "sem filtro" — a contagem
+    // pegaria TODAS as notificações e o teste passaria por coincidência.
+    const paraLider = await prisma.notification.count({
+      where: { userId: lead.user.id, type: 'CORPORATE_POST_PUBLISHED' },
+    })
+    const paraColega = await prisma.notification.count({
+      where: { userId: legend.user.id, type: 'CORPORATE_POST_PUBLISHED' },
+    })
+    expect(paraLider).toBe(1)
+    expect(paraColega).toBe(0)
+    await app.close()
+  })
+
+  it('não exige setor, ao contrário do escopo por setores', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    // `LEADERS` recorta por papel: pedir setor seria pedir um dado sem sentido.
+    expect((await publicar(app, admin.token, 'LEADERS')).statusCode).toBe(201)
+    // Já `SECTORS` sem setor nenhum continua sendo 400.
+    expect((await publicar(app, admin.token, 'SECTORS')).statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('o DTO devolve o escopo, para o card poder marcar o post como restrito', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    const criado = await publicar(app, admin.token, 'LEADERS')
+
+    expect(criado.json().post.audience).toBe('LEADERS')
+    expect(criado.json().post.audienceSectors).toEqual([])
+    await app.close()
+  })
+
+  it('o alcance é medido contra os líderes, não contra a empresa', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const lead = await makeUser(app, 'LEAD')
+    // Colaboradores que NÃO são público deste comunicado.
+    await makeUser(app, 'LEGEND')
+    await makeUser(app, 'LEGEND')
+    const criado = await publicar(app, admin.token, 'LEADERS')
+    await app.inject({
+      method: 'POST',
+      url: `/corporate-posts/${criado.json().post.id}/read`,
+      headers: auth(lead.token),
+    })
+
+    const reach = await app.inject({ method: 'GET', url: '/admin/corporate-posts/reach', headers: auth(admin.token) })
+    const linha = reach.json().items.find((p: { postId: string }) => p.postId === criado.json().post.id)
+
+    // 1 líder de 1 elegível = 100%. Contra a empresa inteira daria 25%.
+    expect(linha.audience).toBe(1)
+    expect(linha.readPct).toBe(100)
+    await app.close()
+  })
+})
+
+/**
+ * Documento 4, seção 12: publicação era sempre imediata. Agendado fica fora do
+ * feed até o tick do scheduler, que é também quem notifica.
+ */
+describe('agendamento de comunicado', () => {
+  const daquiUmaHora = () => new Date(Date.now() + 60 * 60 * 1000).toISOString()
+
+  it('quem publica direto agenda: nasce SCHEDULED e não entra no feed', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'comunicado de amanhã', publishAt: daquiUmaHora() },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().post.status).toBe('SCHEDULED')
+    expect(res.json().post.publishAt).not.toBeNull()
+
+    const feed = await app.inject({ method: 'GET', url: '/corporate-posts', headers: auth(admin.token) })
+    expect(feed.json().items).toHaveLength(0)
+  })
+
+  it('o agendado aparece em "Meus envios", com a data marcada', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'comunicado de amanhã', publishAt: daquiUmaHora() },
+    })
+
+    const envios = await app.inject({
+      method: 'GET',
+      url: '/corporate-posts/pending?mine=true',
+      headers: auth(admin.token),
+    })
+    const item = envios.json().items[0]
+    expect(item.status).toBe('SCHEDULED')
+    expect(item.publishAt).not.toBeNull()
+  })
+
+  it('data no passado é 400 — não é agendamento, é fuso ou dedo trocado', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'ontem', publishAt: new Date(Date.now() - 60_000).toISOString() },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('quem passa pela aprovação não agenda: o post nasce PENDING e sem data', async () => {
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(lenda.token),
+      payload: { content: 'posso agendar?', publishAt: daquiUmaHora() },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().post.status).toBe('PENDING')
+    expect(res.json().post.publishAt).toBeNull()
+  })
+})
+
+
+describe('enquete no Feed', () => {
+  const enquete = { question: 'Qual logo?', options: ['Azul', 'Verde'] }
+
+  async function postPublicadoComEnquete(app: FastifyInstance) {
+    const admin = await makeUser(app, 'ADMIN')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'Escolha aí', poll: enquete },
+    })
+    return { admin, post: res.json().post }
+  }
+
+  it('cria o post com enquete e não devolve resultado antes do voto', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { post } = await postPublicadoComEnquete(app)
+
+    expect(post.poll.question).toBe('Qual logo?')
+    expect(post.poll.hasVoted).toBe(false)
+    expect(post.poll.totalVotes).toBeNull()
+    expect(post.poll.options.map((o: { voteCount: number | null }) => o.voteCount)).toEqual([null, null])
+    expect(post.poll.canVote).toBe(true)
+    await app.close()
+  })
+
+  it('vota, revela o resultado, e o segundo voto é 409', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { post } = await postPublicadoComEnquete(app)
+    const votante = await makeUser(app, 'LEGEND')
+
+    const votou = await app.inject({
+      method: 'POST',
+      url: `/corporate-posts/${post.id}/poll/vote`,
+      headers: auth(votante.token),
+      payload: { optionId: post.poll.options[0].id },
+    })
+    expect(votou.statusCode).toBe(200)
+    expect(votou.json().post.poll.hasVoted).toBe(true)
+    expect(votou.json().post.poll.totalVotes).toBe(1)
+    expect(votou.json().post.poll.options[0].percentage).toBe(100)
+
+    const denovo = await app.inject({
+      method: 'POST',
+      url: `/corporate-posts/${post.id}/poll/vote`,
+      headers: auth(votante.token),
+      payload: { optionId: post.poll.options[1].id },
+    })
+    expect(denovo.statusCode).toBe(409)
+    await app.close()
+  })
+
+  it('ver quem votou exige ter votado', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { post } = await postPublicadoComEnquete(app)
+    const votante = await makeUser(app, 'LEGEND')
+
+    const antes = await app.inject({
+      method: 'GET',
+      url: `/corporate-posts/${post.id}/poll/votes`,
+      headers: auth(votante.token),
+    })
+    expect(antes.statusCode).toBe(403)
+
+    await app.inject({
+      method: 'POST',
+      url: `/corporate-posts/${post.id}/poll/vote`,
+      headers: auth(votante.token),
+      payload: { optionId: post.poll.options[1].id },
+    })
+    const depois = await app.inject({
+      method: 'GET',
+      url: `/corporate-posts/${post.id}/poll/votes`,
+      headers: auth(votante.token),
+    })
+    expect(depois.statusCode).toBe(200)
+    expect(depois.json().options[1].voters).toHaveLength(1)
+    await app.close()
+  })
+
+  it('recusa opções repetidas na criação', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: { content: 'x', poll: { question: 'Q', options: ['Sim', 'sim'] } },
+    })
+    expect(res.statusCode).toBe(400)
+    await app.close()
+  })
+
+  // A enquete não disputa vaga com anexo, ao contrário da Resenha.
+  it('aceita enquete e GIF no mesmo post', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/corporate-posts',
+      headers: auth(admin.token),
+      payload: {
+        content: 'com os dois',
+        gif: { url: 'https://media.giphy.com/media/x/giphy.gif', width: 1, height: 1 },
+        poll: enquete,
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json().post.poll).not.toBeNull()
+    expect(res.json().post.gif).not.toBeNull()
     await app.close()
   })
 })

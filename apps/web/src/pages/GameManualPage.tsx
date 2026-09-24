@@ -89,6 +89,13 @@ const ACTION_ACCENTS: Accent[] = [
   { tint: 'bg-emerald-500/10', border: 'border-emerald-500/30', disc: 'bg-emerald-600 text-white', chip: '' },
 ]
 
+/**
+ * Ações que pagam com valor PRÓPRIO — do curso, do selo ou do desafio — em vez
+ * de uma regra da empresa. Elas não têm `CoinRule`/`XpRule`, então não entram
+ * na grade de cards acima; a lista existe para elas não sumirem do manual.
+ */
+const VARIABLE_REWARD_EVENTS = ['COURSE_COMPLETED', 'BADGE_EARNED', 'CHALLENGE_APPROVED'] as const
+
 /** Ícone de cada ação que rende ponto ou coin. */
 const EVENT_ICONS: Record<XpEvent, string> = {
   VOTE_CAST: 'how_to_vote',
@@ -96,6 +103,8 @@ const EVENT_ICONS: Record<XpEvent, string> = {
   FEEDBACK_REACTION: 'favorite',
   MOOD_ANSWERED: 'mood',
   CHALLENGE_APPROVED: 'flag',
+  BADGE_EARNED: 'military_tech',
+  COURSE_COMPLETED: 'school',
   CORPORATE_POST_REACTION: 'sentiment_satisfied',
   CORPORATE_POST_COMMENT: 'chat_bubble',
   CORPORATE_POST_READ_FULL: 'menu_book',
@@ -323,6 +332,29 @@ function EarningSection({
           ))}
         </div>
       )}
+
+      {/* Estes três pagam, mas NÃO aparecem nos cards acima: o valor deles não
+          vem de uma regra da empresa — vem do próprio curso, selo ou desafio, e
+          muda de um para o outro. Sem esta lista eles ficariam invisíveis no
+          manual, e o Documento 4 (seção 9.6) pede o contrário: o que a pessoa
+          ganha tem de estar aqui. */}
+      <div className="mt-md rounded-xl border border-outline-variant/40 p-md">
+        <h3 className="font-label text-label-lg text-on-surface">E ainda rendem, com valor próprio</h3>
+        <p className="mt-1 text-body-sm text-on-surface-variant">
+          Aqui o quanto não é fixo: cada item traz a própria recompensa.
+        </p>
+        <ul className="mt-sm flex flex-col gap-xs">
+          {VARIABLE_REWARD_EVENTS.map((event) => (
+            <li key={event} className="flex items-start gap-sm text-body-sm text-on-surface-variant">
+              <Icon name={EVENT_ICONS[event]} className="mt-0.5 text-[18px] text-primary" />
+              <span>
+                <strong className="font-label text-on-surface">{XP_EVENT_LABELS[event]}</strong> —{' '}
+                {XP_EVENT_DESCRIPTIONS[event]}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
 
       {/* A moeda vem primeiro: é a dúvida que traz a pessoa até aqui. Sem a
           feature, os pontos assumem o lugar dela. */}

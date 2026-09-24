@@ -44,7 +44,7 @@ describe('Administração › Marca', () => {
 
     expect(await screen.findByDisplayValue('EMR Legends')).toBeInTheDocument()
     // Pelo placeholder: o seletor `type=color` carrega o mesmo valor do campo de texto.
-    expect(screen.getByPlaceholderText('#35bd78')).toHaveValue('#35bd78')
+    expect(screen.getByPlaceholderText('#6ce190')).toHaveValue('#6ce190')
     // O esquema vem marcado como o que está salvo.
     // Dois grupos usam os mesmos rótulos (esquema padrão e prévia); ambos partem do salvo.
     for (const botao of screen.getAllByRole('button', { name: 'Claro' })) {
@@ -80,7 +80,7 @@ describe('Administração › Marca', () => {
       appName: 'EMR Legends',
       defaultScheme: 'light',
       allowUserScheme: true,
-      brandColor: '#35bd78',
+      brandColor: '#6ce190',
     })
     // E o console interno NÃO se repinta com a marca do cliente.
     expect(document.documentElement.style.getPropertyValue('--brand-primary')).toBe('')
@@ -132,7 +132,7 @@ describe('Administração › Marca', () => {
     })
 
     wrap(<BrandingSection companyId={EMPRESA} />)
-    const campo = await screen.findByPlaceholderText('#35bd78')
+    const campo = await screen.findByPlaceholderText('#6ce190')
     await waitFor(() => expect(preview).toHaveBeenCalled())
     preview.mockClear()
 

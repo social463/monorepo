@@ -57,6 +57,14 @@ describe('auditSubjectName', () => {
   it('ignora string vazia ou só espaços', () => {
     expect(auditSubjectName({ before: null, after: { name: '   ', title: 'Vale este' } })).toBe('Vale este')
   })
+
+  // `subject` é o rótulo que um service escreve de propósito (ex.: recorte do
+  // texto de um comunicado sem título) — vence qualquer outro campo homônimo.
+  it('prioriza subject sobre os demais campos', () => {
+    expect(auditSubjectName({ before: null, after: { subject: 'Recorte do texto', title: 'outro' } })).toBe(
+      'Recorte do texto',
+    )
+  })
 })
 
 describe('auditChangedFields', () => {

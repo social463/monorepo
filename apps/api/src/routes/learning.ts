@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { COURSE_LEVELS, MAX_COURSE_RATING, MAX_COURSE_RATING_COMMENT_LENGTH, MIN_COURSE_RATING } from '@legends/shared'
+import {
+  COURSE_LEVELS,
+  MAX_COURSE_RATING,
+  MAX_COURSE_RATING_COMMENT_LENGTH,
+  MIN_COURSE_RATING,
+} from '@legends/shared'
 import {
   LearningError,
   enrollInCourse,
@@ -13,6 +18,7 @@ import {
   listTracks,
   myLearning,
   rateCourse,
+  requestCertificate,
   setCourseFavorite,
   setLessonCompletion,
 } from '../services/learning-service'
@@ -77,6 +83,24 @@ export async function learningRoutes(app: FastifyInstance) {
     try {
       const viewer = { userId: request.user.sub, companyId: request.user.companyId }
       return reply.code(201).send({ enrollment: await enrollInCourse(viewer, params.data.id) })
+    } catch (err) {
+      if (err instanceof LearningError) return reply.code(err.status).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Pedido de certificado feito pela pessoa (Documento 4, seção 9.3). Devolve
+   * o curso já atualizado para a tela não precisar de um segundo GET só para
+   * descobrir em que estado a fila ficou.
+   */
+  app.post('/learning/courses/:id/certificate-request', gate, async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params)
+    if (!params.success) return reply.code(400).send({ message: 'Parâmetros inválidos.' })
+    try {
+      const viewer = { userId: request.user.sub, companyId: request.user.companyId }
+      await requestCertificate(viewer, params.data.id)
+      return reply.code(201).send({ course: await getCourseDetail(viewer, params.data.id) })
     } catch (err) {
       if (err instanceof LearningError) return reply.code(err.status).send({ message: err.message })
       throw err

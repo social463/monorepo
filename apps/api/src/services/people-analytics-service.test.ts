@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest'
 import { DEFAULT_COMPANY_ID, DEFAULT_SECTOR_ID } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import {
+  getAccessHeatmap,
   getEngagementOverview,
+  getInovaOverview,
   getPeopleOverview,
   normalizeAccessPath,
   recordAccess,
+  resolveWindow,
 } from './people-analytics-service'
 
 // Relógio fixo: 2026-06-25 às 16:00 em São Paulo. Toda a semeadura abaixo é
@@ -47,7 +50,7 @@ async function mkAccess(userId: string, path: string, at: Date, companyId = DEFA
   return prisma.accessLog.create({ data: { userId, path, companyId, createdAt: at } })
 }
 
-const scope = { companyId: DEFAULT_COMPANY_ID, sectorId: null, range: '30d' as const, now: NOW }
+const scope = { companyId: DEFAULT_COMPANY_ID, sectorId: null, window: { range: '30d' } as const, now: NOW }
 
 describe('normalizeAccessPath', () => {
   it('descarta query string e hash', () => {
@@ -105,9 +108,10 @@ describe('getPeopleOverview', () => {
     const overview = await getPeopleOverview(scope)
 
     expect(overview.activePeople).toBe(3)
-    expect(overview.uniqueUsers7d).toBe(1)
-    expect(overview.uniqueUsers30d).toBe(2)
-    // 2 de 3 pessoas ativas acessaram nos últimos 30 dias.
+    // Os cards agora seguem a JANELA: 30 dias pegam Ana e Bruno, não Carla.
+    expect(overview.uniqueUsersInRange).toBe(2)
+    expect(overview.accessesInRange).toBe(3)
+    // 2 de 3 pessoas ativas acessaram na janela.
     expect(overview.adoptionRate).toBe(67)
   })
 
@@ -118,7 +122,7 @@ describe('getPeopleOverview', () => {
     await mkAccess(ana.id, '/mural', noonAt('2026-06-24'))
     await mkAccess(bruno.id, '/', noonAt('2026-06-24'))
 
-    const overview = await getPeopleOverview({ ...scope, range: '7d' })
+    const overview = await getPeopleOverview({ ...scope, window: { range: '7d' } })
 
     expect(overview.accessSeries).toHaveLength(7)
     expect(overview.accessSeries.at(0)?.day).toBe('2026-06-19')
@@ -139,7 +143,7 @@ describe('getPeopleOverview', () => {
     // 02:00Z do dia 25 ainda é 23:00 do dia 24 em São Paulo.
     await mkAccess(ana.id, '/', new Date('2026-06-25T02:00:00.000Z'))
 
-    const overview = await getPeopleOverview({ ...scope, range: '7d' })
+    const overview = await getPeopleOverview({ ...scope, window: { range: '7d' } })
     expect(overview.accessSeries.find((p) => p.day === '2026-06-24')?.accesses).toBe(1)
     expect(overview.accessSeries.find((p) => p.day === '2026-06-25')?.accesses).toBe(0)
   })
@@ -179,37 +183,6 @@ describe('getPeopleOverview', () => {
     ])
   })
 
-  it('calcula a adesão da votação do período ativo, excluindo quem não vota', async () => {
-    const ana = await mkUser('Ana')
-    await mkUser('Bruno')
-    await mkUser('Chefe', { role: 'ADMIN' }) // não é elegível
-    const period = await prisma.votingPeriod.create({
-      data: {
-        monthRef: '2026-06',
-        sectorId: DEFAULT_SECTOR_ID,
-        startsAt: new Date('2026-06-01T00:00:00.000Z'),
-        endsAt: new Date('2026-06-30T23:59:59.000Z'),
-      },
-    })
-    await prisma.vote.create({
-      data: { voterId: ana.id, votedId: ana.id, periodId: period.id, justification: 'x'.repeat(30) },
-    })
-
-    const overview = await getPeopleOverview(scope)
-    expect(overview.votingAdoption).toEqual({
-      periodId: period.id,
-      monthRef: '2026-06',
-      eligible: 2,
-      voted: 1,
-      rate: 50,
-    })
-  })
-
-  it('devolve votingAdoption null quando não há período aberto', async () => {
-    await mkUser('Ana')
-    expect((await getPeopleOverview(scope)).votingAdoption).toBeNull()
-  })
-
   it('recorta tudo pelo setor quando sectorId é informado', async () => {
     const outro = await mkSector('sector-gente', 'Gente e Gestão')
     const daGente = await mkUser('Gina', { sectorId: outro.id, squad: 'RH' })
@@ -221,7 +194,7 @@ describe('getPeopleOverview', () => {
 
     expect(overview.sectorId).toBe(outro.id)
     expect(overview.activePeople).toBe(1)
-    expect(overview.uniqueUsers30d).toBe(1)
+    expect(overview.uniqueUsersInRange).toBe(1)
     expect(overview.bySquad).toEqual([{ key: 'RH', label: 'RH', count: 1 }])
   })
 
@@ -235,11 +208,11 @@ describe('getPeopleOverview', () => {
 
     const overview = await getPeopleOverview(scope)
     expect(overview.activePeople).toBe(1)
-    expect(overview.uniqueUsers30d).toBe(1)
+    expect(overview.uniqueUsersInRange).toBe(1)
 
     const outro = await getPeopleOverview({ ...scope, companyId: outraEmpresa.id })
     expect(outro.activePeople).toBe(1)
-    expect(outro.uniqueUsers30d).toBe(1)
+    expect(outro.uniqueUsersInRange).toBe(1)
   })
 
   it('monta o mapa de calor por dia da semana e hora civil de São Paulo', async () => {
@@ -254,9 +227,9 @@ describe('getPeopleOverview', () => {
     // (DOW 3), não quinta. É o caso que pega conversão de fuso trocada.
     await mkAccess(ana.id, '/', new Date('2026-06-25T02:00:00.000Z'))
 
-    const { accessHeatmap } = await getPeopleOverview({ ...scope, range: '7d' })
+    const { cells } = await getAccessHeatmap({ ...scope, window: { range: '7d' } })
 
-    expect(accessHeatmap).toEqual([
+    expect(cells).toEqual([
       { weekday: 1, hour: 9, accesses: 1 },
       { weekday: 3, hour: 12, accesses: 2 },
       { weekday: 3, hour: 15, accesses: 1 },
@@ -266,14 +239,14 @@ describe('getPeopleOverview', () => {
 
   it('mapa de calor devolve vazio (não a grade zerada) sem acessos', async () => {
     await mkUser('Ana')
-    expect((await getPeopleOverview(scope)).accessHeatmap).toEqual([])
+    expect((await getAccessHeatmap(scope)).cells).toEqual([])
   })
 
   it('não quebra nem devolve NaN com base vazia', async () => {
     const overview = await getPeopleOverview(scope)
     expect(overview.activePeople).toBe(0)
     expect(overview.adoptionRate).toBe(0)
-    expect(overview.uniqueUsers7d).toBe(0)
+    expect(overview.uniqueUsersInRange).toBe(0)
     expect(overview.byRole).toEqual([])
     expect(overview.accessSeries.every((p) => p.accesses === 0)).toBe(true)
   })
@@ -327,7 +300,7 @@ describe('getEngagementOverview', () => {
       ],
     })
 
-    const { mood } = await getEngagementOverview({ ...scope, range: '7d' })
+    const { mood } = await getEngagementOverview({ ...scope, window: { range: '7d' } })
 
     expect(mood.trend).toHaveLength(7)
     expect(mood.trend.find((p) => p.day === '2026-06-23')).toEqual({
@@ -416,5 +389,169 @@ describe('getEngagementOverview', () => {
       { path: '/mural', label: 'Feed Corporativo', accesses: 1, uniqueUsers: 1 },
     ])
     expect(engagement.muralReach.uniqueViewers).toBe(1)
+  })
+})
+
+describe('getInovaOverview — acessos ao Guia AI First (Comunidade INOVA)', () => {
+  it('conta acessos e únicos só das páginas do Guia, ignorando o resto do produto', async () => {
+    const ana = await mkUser('Ana')
+    const bruno = await mkUser('Bruno')
+    await mkAccess(ana.id, '/comunidade-inova/guia', noonAt('2026-06-22'))
+    await mkAccess(bruno.id, '/comunidade-inova/guia', noonAt('2026-06-22'))
+    await mkAccess(bruno.id, '/comunidade-inova/guia/prompts', noonAt('2026-06-23'))
+    // Fora do Guia: hub da Comunidade INOVA e mural — não deve contar aqui.
+    await mkAccess(ana.id, '/comunidade-inova/projetos', noonAt('2026-06-23'))
+    await mkAccess(ana.id, '/mural', noonAt('2026-06-23'))
+
+    const inova = await getInovaOverview(scope)
+
+    expect(inova.totalAccesses).toBe(3)
+    expect(inova.uniqueUsers).toBe(2)
+    expect(inova.topPage).toEqual({
+      path: '/comunidade-inova/guia',
+      label: 'Guia: Início',
+      accesses: 2,
+      uniqueUsers: 2,
+    })
+    expect(inova.byPage).toEqual([
+      { path: '/comunidade-inova/guia', label: 'Guia: Início', accesses: 2, uniqueUsers: 2 },
+      { path: '/comunidade-inova/guia/prompts', label: 'Guia: Prompts', accesses: 1, uniqueUsers: 1 },
+    ])
+  })
+
+  it('lista o log recente com quem acessou, mais recente primeiro', async () => {
+    const ana = await mkUser('Ana')
+    await mkAccess(ana.id, '/comunidade-inova/guia/situacoes', noonAt('2026-06-22'))
+    await mkAccess(ana.id, '/comunidade-inova/guia/maturidade', noonAt('2026-06-23'))
+
+    const inova = await getInovaOverview(scope)
+
+    expect(inova.recentLogsTotal).toBe(2)
+    expect(inova.recentLogs).toHaveLength(2)
+    expect(inova.recentLogs[0]).toMatchObject({
+      userName: 'Ana',
+      path: '/comunidade-inova/guia/maturidade',
+      label: 'Guia: Maturidade',
+    })
+    expect(inova.recentLogs[1]).toMatchObject({
+      userName: 'Ana',
+      path: '/comunidade-inova/guia/situacoes',
+      label: 'Guia: Situações',
+    })
+    expect(inova.recentLogs[0].userEmail).toBe(ana.email)
+  })
+
+  it('recorta pelo setor informado, como as demais abas', async () => {
+    const gente = await mkSector('sector-gente', 'Gente e Gestão')
+    const gina = await mkUser('Gina', { sectorId: gente.id })
+    const dev = await mkUser('Dev')
+    await mkAccess(gina.id, '/comunidade-inova/guia', noonAt('2026-06-22'))
+    await mkAccess(dev.id, '/comunidade-inova/guia', noonAt('2026-06-22'))
+
+    const inova = await getInovaOverview({ ...scope, sectorId: gente.id })
+
+    expect(inova.totalAccesses).toBe(1)
+    expect(inova.uniqueUsers).toBe(1)
+    expect(inova.recentLogs.map((row) => row.userName)).toEqual(['Gina'])
+  })
+
+  it('sem nenhum acesso no recorte, devolve zeros e topPage nulo', async () => {
+    const inova = await getInovaOverview(scope)
+
+    expect(inova.totalAccesses).toBe(0)
+    expect(inova.uniqueUsers).toBe(0)
+    expect(inova.topPage).toBeNull()
+    expect(inova.byPage).toEqual([])
+    expect(inova.recentLogs).toEqual([])
+    expect(inova.recentLogsTotal).toBe(0)
+  })
+})
+
+describe('getAccessHeatmap — tempo médio derivado (Documento 3, seção 4.2)', () => {
+  it('agrupa acessos consecutivos em sessão e mede do primeiro ao último', async () => {
+    const ana = await mkUser('Ana')
+    // Uma sessão de 20 minutos: os saltos são de 10 min, abaixo do corte de 30.
+    await mkAccess(ana.id, '/', new Date('2026-06-24T12:00:00.000Z'))
+    await mkAccess(ana.id, '/mural', new Date('2026-06-24T12:10:00.000Z'))
+    await mkAccess(ana.id, '/perfil', new Date('2026-06-24T12:20:00.000Z'))
+
+    const heatmap = await getAccessHeatmap({ ...scope, window: { range: '7d' } })
+
+    expect(heatmap.sessions).toBe(1)
+    expect(heatmap.avgSessionMinutes).toBe(20)
+  })
+
+  it('intervalo maior que 30 minutos abre sessão nova', async () => {
+    const ana = await mkUser('Ana')
+    await mkAccess(ana.id, '/', new Date('2026-06-24T12:00:00.000Z'))
+    await mkAccess(ana.id, '/mural', new Date('2026-06-24T12:10:00.000Z'))
+    // 45 min depois: sessão nova, de 10 minutos.
+    await mkAccess(ana.id, '/', new Date('2026-06-24T12:55:00.000Z'))
+    await mkAccess(ana.id, '/perfil', new Date('2026-06-24T13:05:00.000Z'))
+
+    const heatmap = await getAccessHeatmap({ ...scope, window: { range: '7d' } })
+
+    expect(heatmap.sessions).toBe(2)
+    expect(heatmap.avgSessionMinutes).toBe(10)
+  })
+
+  it('sessões de pessoas diferentes nunca se fundem', async () => {
+    const ana = await mkUser('Ana')
+    const bruno = await mkUser('Bruno')
+    await mkAccess(ana.id, '/', new Date('2026-06-24T12:00:00.000Z'))
+    await mkAccess(bruno.id, '/', new Date('2026-06-24T12:05:00.000Z'))
+    await mkAccess(ana.id, '/mural', new Date('2026-06-24T12:10:00.000Z'))
+
+    const heatmap = await getAccessHeatmap({ ...scope, window: { range: '7d' } })
+
+    expect(heatmap.sessions).toBe(2)
+  })
+
+  it('acesso único vale zero — é o piso conhecido da estimativa', async () => {
+    const ana = await mkUser('Ana')
+    await mkAccess(ana.id, '/', new Date('2026-06-24T12:00:00.000Z'))
+
+    const heatmap = await getAccessHeatmap({ ...scope, window: { range: '7d' } })
+
+    expect(heatmap.sessions).toBe(1)
+    expect(heatmap.avgSessionMinutes).toBe(0)
+  })
+
+  it('sem acesso nenhum devolve null, e não zero', async () => {
+    await mkUser('Ana')
+    const heatmap = await getAccessHeatmap(scope)
+    // Null diz "não há o que medir"; zero diria "as pessoas ficam 0 minuto".
+    expect(heatmap.avgSessionMinutes).toBeNull()
+    expect(heatmap.sessions).toBe(0)
+  })
+})
+
+describe('resolveWindow — janela personalizável (Documento 3, seção 4.1)', () => {
+  const now = new Date('2026-06-25T12:00:00.000Z')
+
+  it('atalho "hoje" é um dia só, e "ano" vai de 1º de janeiro até hoje', () => {
+    expect(resolveWindow({ range: 'hoje' }, now).days).toEqual(['2026-06-25'])
+    const ano = resolveWindow({ range: 'ano' }, now).days
+    expect(ano[0]).toBe('2026-01-01')
+    expect(ano.at(-1)).toBe('2026-06-25')
+  })
+
+  it('janela personalizada usa as duas pontas informadas, inclusivas', () => {
+    const window = resolveWindow({ range: 'custom', from: '2026-06-20', to: '2026-06-22' }, now)
+    expect(window.days).toEqual(['2026-06-20', '2026-06-21', '2026-06-22'])
+  })
+
+  it('recusa intervalo invertido e janela acima do teto', () => {
+    expect(() => resolveWindow({ range: 'custom', from: '2026-06-22', to: '2026-06-20' }, now)).toThrow(
+      /data inicial não pode ser depois/i,
+    )
+    // Sem teto, um `from` antigo montaria milhares de pontos de série.
+    expect(() => resolveWindow({ range: 'custom', from: '2020-01-01', to: '2026-06-25' }, now)).toThrow(
+      /no máximo 366 dias/i,
+    )
+  })
+
+  it('custom sem as duas pontas é erro tratado, não janela silenciosa', () => {
+    expect(() => resolveWindow({ range: 'custom', from: '2026-06-20' }, now)).toThrow(/data inicial e a final/i)
   })
 })

@@ -197,7 +197,8 @@ describe('rotas de PDI', () => {
     expect(res.json().settings).toEqual({
       leaderApprovalRequired: true,
       impulseUpUrl: null,
-      inovaCommunityUrl: null,
+      inovaModuleEnabled: false,
+      inovaTeamsWebhookUrl: null,
     })
     await app.close()
   })
@@ -218,7 +219,8 @@ describe('rotas de PDI', () => {
       headers: auth(adminLogin.json().accessToken),
       payload: {
         impulseUpUrl: 'https://eu-medico-residente.impulseup.com/',
-        inovaCommunityUrl: 'https://inovacomunidadeemr.lovable.app/auth',
+        inovaModuleEnabled: true,
+        inovaTeamsWebhookUrl: 'https://teams.microsoft.com/l/chat/19:abc/conversations',
         leaderApprovalRequired: false,
       },
     })
@@ -228,7 +230,10 @@ describe('rotas de PDI', () => {
     expect(seen.json().settings).toEqual({
       leaderApprovalRequired: false,
       impulseUpUrl: 'https://eu-medico-residente.impulseup.com/',
-      inovaCommunityUrl: 'https://inovacomunidadeemr.lovable.app/auth',
+      inovaModuleEnabled: true,
+      // Webhook do Teams que recebe aviso de criação/edição de projeto do
+      // INOVA: é configuração, e não constante — cada empresa cadastra o seu.
+      inovaTeamsWebhookUrl: 'https://teams.microsoft.com/l/chat/19:abc/conversations',
     })
 
     // Colaborador não configura.

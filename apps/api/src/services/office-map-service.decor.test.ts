@@ -352,6 +352,22 @@ describe('reconciliação de salas no save de decoração', () => {
   })
 })
 
+describe('salas na republicação estrutural', () => {
+  it('mantém sem limite a sala cujo limite o admin removeu, mesmo com capacidade no documento', async () => {
+    const comCapacidade = { ...roomObj('sala-1', 0) } as Extract<MapObjectV1, { type: 'meeting-room' }>
+    comCapacidade.properties = { ...comCapacidade.properties, capacity: 8 }
+    const { mapId, draftRevision, userId } = await seedActiveMap([comCapacidade])
+    const [room] = await listActiveOfficeRooms(DEFAULT_COMPANY_ID)
+    expect(room.capacity).toBe(8)
+    await updateOfficeRoom(room.id, { capacity: null }, userId, DEFAULT_COMPANY_ID)
+
+    await publishOfficeMap(mapId, draftRevision, userId, true, DEFAULT_COMPANY_ID)
+
+    const [depois] = await listActiveOfficeRooms(DEFAULT_COMPANY_ID)
+    expect(depois.capacity).toBeNull()
+  })
+})
+
 describe('poda de publicações no publish estrutural', () => {
   async function publishAgain(mapId: string, draftRevision: number, userId: string, activate: boolean) {
     return publishOfficeMap(mapId, draftRevision, userId, activate, DEFAULT_COMPANY_ID)

@@ -6,7 +6,10 @@ import type {
   OfficeRoomAudioEntry,
   OfficeRoomAudioTrack,
 } from "./office-audio-share";
-import type { OfficeBall, OfficeBallKick, OfficeBallPower } from "./office-ball";
+import type { OfficeBall, OfficeBallPower } from "./office-ball";
+import type { BodyInput } from "./body-move";
+import type { PaintSplat } from "./office-paintball";
+import type { BodyShot } from "./body-paintball";
 import type { OfficeDeskReminderSummaryDTO } from "./office-map";
 
 /** Lado do tile em pixels. O mapa inteiro é medido nesta unidade. */
@@ -73,6 +76,28 @@ export const WALKABLE_TILES: ReadonlySet<string> = new Set([".", "S"]);
 export interface TilePosition {
   x: number;
   y: number;
+}
+
+/**
+ * O TILE em que um ponto em pixel cai.
+ *
+ * Existe porque `OfficeOccupant.x/y` viraram pixel com o movimento livre, e
+ * sala, mesa, radar e alcance de voz continuam sendo conceitos de tile — como
+ * devem ser: uma sala tem borda de tile, não de pixel.
+ *
+ * Um helper só, e no shared, porque o compilador NÃO distingue as duas unidades
+ * (as duas são `number`): a única defesa contra confundi-las é haver um lugar
+ * evidente para converter, e ele aparecer no call site.
+ *
+ * `tileSize` é OBRIGATÓRIO, e já foi opcional (`= TILE_SIZE`). O default era
+ * uma segunda unidade escondida: quatro chamadas — radar, grade de câmeras,
+ * reações e assinatura de áudio — omitiram o argumento e passaram a medir o
+ * mapa da empresa com a régua do mapa legado. Num mapa de 48 o raio de voz
+ * encolhia a dois terços, e não havia erro de tipo em lugar nenhum. Passar
+ * `document.map.tileWidth` custa o mesmo e diz de que mapa se está falando.
+ */
+export function tileOfPixel(point: { x: number; y: number }, tileSize: number): TilePosition {
+  return { x: Math.floor(point.x / tileSize), y: Math.floor(point.y / tileSize) };
 }
 
 /** Tiles `S`, calculados uma vez no load do módulo. */
@@ -213,18 +238,51 @@ export function findPath(from: TilePosition, to: TilePosition): Direction[] | nu
  * inatividade). Vive só na sessão do escritório — reseta pra `online` a
  * cada entrada, nunca persiste no banco.
  */
-export type OfficeUserStatus = "online" | "away" | "brb";
+export type OfficeUserStatus = "online" | "away" | "brb" | "busy";
 
-export const OFFICE_USER_STATUSES: readonly OfficeUserStatus[] = ["online", "away", "brb"];
+export const OFFICE_USER_STATUSES: readonly OfficeUserStatus[] = ["online", "away", "brb", "busy"];
 
 export function isOfficeUserStatus(value: unknown): value is OfficeUserStatus {
   return (OFFICE_USER_STATUSES as readonly unknown[]).includes(value);
+}
+
+/**
+ * `busy` ("Ocupado") é o único status que corta áudio por conta própria, nos
+ * DOIS sentidos: quem está ocupado não ouve ninguém e não é ouvido por
+ * ninguém, dentro ou fora de sala. Os demais status só afetam o áudio por
+ * proximidade, no espaço aberto (ver `applyProximity`, no cliente).
+ */
+export function isOfficeAudioIsolated(status: OfficeUserStatus | undefined): boolean {
+  return status === "busy";
+}
+
+/**
+ * Quem manda numa sala de reunião: é quem pode tirar alguém da chamada
+ * (`remove-from-room`). Não é cargo do produto nem papel de usuário — é do
+ * momento, e o servidor recalcula sozinho.
+ *
+ * A regra, em ordem: se a sala contém uma mesa reivindicada e o dono dela está
+ * lá dentro, a sala é dele. Senão, é de quem entrou primeiro; quando essa
+ * pessoa sai, passa para a seguinte, na ordem de entrada. Sala vazia não tem
+ * manager (e some de `room-managers-changed`).
+ *
+ * `byDeskOwner` distingue os dois casos para a interface poder explicar por que
+ * aquela pessoa manda ali.
+ */
+export interface OfficeRoomManager {
+  roomId: string;
+  userId: string;
+  byDeskOwner: boolean;
 }
 
 /** Veículo efêmero derivado de um asset de kart publicado no mapa. */
 export interface OfficeKart {
   /** Id do `tile-object` que ancora a posição inicial no editor. */
   id: string;
+  /**
+   * Posição em PIXEL, como a das pessoas. Estacionado, é o centro do tile em
+   * que o editor o publicou; com piloto, é onde o piloto está.
+   */
   x: number;
   y: number;
   dir: Direction;
@@ -241,9 +299,27 @@ export interface OfficeOccupant {
   isGuest?: boolean;
   /** Alias opcional exibido apenas no rótulo do personagem no mapa. */
   characterName?: string | null;
+  /**
+   * Posição em PIXEL, e float — não em tile.
+   *
+   * Mudou junto com o movimento livre
+   * (`2026-08-25-movimento-livre-no-escritorio-design.md`). Quem precisa do
+   * tile deriva: `Math.floor(x / tileWidth)`. Sala, mesa, spawn e alcance de
+   * voz continuam raciocinando em tile; o que deixou de existir é o passo
+   * discreto.
+   */
   x: number;
   y: number;
+  /** Pose do sprite. O LPC tem quatro — continua discreta, ao contrário da posição. */
   dir: Direction;
+  /**
+   * Rumo do kart, em radianos. Só de quem está MONTADO; ausente a pé.
+   *
+   * Faz parte da presença porque é o estado INICIAL de quem chega: sem ele, o
+   * kart de quem acabou de entrar apareceria apontado para a direita até o
+   * primeiro snapshot.
+   */
+  heading?: number;
   photoUrl?: string | null;
   avatarStyle?: AvatarStyleKey | null;
   /** Seed do personagem — quem nunca customizou ganha o padrão derivado dela (defaultCharacterFromSeed). */
@@ -256,16 +332,56 @@ export interface OfficeOccupant {
   status?: OfficeUserStatus;
   /** Id do kart dirigido agora; ausente enquanto está a pé. */
   ridingKartId?: string;
+  /**
+   * Marcador de paintball equipado. Ausente = desarmado, que é o normal — é o
+   * que impede o escritório de virar campo de tiro por acidente e o que deixa
+   * ver pelo sprite quem está jogando. Efêmero como o resto da presença: não
+   * é guarda-roupa e não encosta em `avatarOptions`.
+   */
+  paintMarker?: boolean;
+}
+
+/** Uma pessoa dentro de um snapshot do escritório. */
+export interface OfficeSnapshotPlayer {
+  userId: string;
+  /** Pixel, como em `OfficeOccupant`. */
+  x: number;
+  y: number;
+  dir: Direction;
+  /**
+   * Último `seq` desta pessoa que o servidor já processou. É por ele que o dono
+   * da predição sabe quais inputs ainda precisa reexecutar — e é o que torna a
+   * reconciliação possível.
+   */
+  seq: number;
+  /** Correndo agora — a animação das pernas acompanha. */
+  sprint?: boolean;
+  /**
+   * Rumo do kart, em radianos. Só de quem está MONTADO.
+   *
+   * Curto (`h`, e não `heading`) porque isto viaja por pessoa, vinte vezes por
+   * segundo — mesma razão de `seq` e `dir` serem curtos. É o mesmo campo que a
+   * corrida usa, e pelo mesmo motivo: sem ele a reconciliação do dono
+   * reexecutaria os pendentes a partir de um kart apontado para outro lado.
+   */
+  h?: number;
+  /** Velocidade do kart, em px/s (negativa = ré). Só de quem está montado. */
+  v?: number;
 }
 
 export type OfficeClientMessage =
   /**
-   * `seq` identifica ESTE passo. O cliente prevê o movimento antes do
-   * round-trip; quando o servidor recusa, o `sync` devolve o mesmo `seq` para
-   * a predição correspondente ser desfeita — sem ele, uma recusa na posição
-   * atual é indistinguível do eco de uma parede que o cliente já previu.
+   * Intenção de movimento, nunca posição: cliente que manda posição é cliente
+   * que teleporta. O servidor integra com `stepBody`, a MESMA função que a
+   * predição do cliente roda — é o que impede os dois de divergirem por
+   * construção.
+   *
+   * Substituiu o `move` de grade, que mandava uma DIREÇÃO por passo e vinha com
+   * `seq` para o `sync` poder desfazer a predição de um passo. Aqui isso é o
+   * caso normal, não a exceção: o snapshot traz posição autoritativa e o último
+   * `seq` processado, e a reconciliação reancora e reexecuta o resto.
    */
-  | { type: "move"; dir: MoveDirection; sprint?: boolean; seq?: number }
+  | { type: "input"; input: BodyInput }
   /** Saída intencional do escritório: remove a presença imediatamente, sem período de reconexão. */
   | { type: "leave-office" }
   | { type: "call"; targetUserId: string }
@@ -290,7 +406,15 @@ export type OfficeClientMessage =
    * onde a pessoa está e para onde encara — senão cada cliente mandaria a bola
    * para onde quisesse.
    */
-  | { type: "kick-ball"; power: OfficeBallPower; sprint?: boolean }
+  | { type: "kick-ball"; power: OfficeBallPower; sprint?: boolean; charge?: number }
+  /** Equipar (`active: true`) ou guardar o marcador de paintball. */
+  | { type: "set-paint-marker"; active: boolean }
+  /**
+   * Atirar (V). Como o chute, só o GESTO vem do cliente: direção é o facing
+   * autoritativo, alcance é constante e o alvo é quem estiver na linha — senão
+   * um cliente adulterado escolheria em quem acerta. Desarmado, não faz nada.
+   */
+  | { type: "fire-paintball" }
   /** Iniciar ou encerrar edição — notifica outros de presença de edição. */
   | { type: "set-editing"; editing: boolean }
   /**
@@ -300,6 +424,17 @@ export type OfficeClientMessage =
    * ocupante liga, desliga e responde aos pedidos.
    */
   | { type: "set-room-lock"; locked: boolean }
+  /**
+   * Tirar alguém da reunião onde o remetente ESTÁ — como `set-room-lock`, o
+   * servidor deriva a sala da posição e o cliente só manda quem. Ao contrário
+   * da tranca, esta ação NÃO é de qualquer ocupante: só do manager da sala
+   * (ver `OfficeRoomManager`) ou de um ADMIN.
+   *
+   * Remove da CHAMADA, não do escritório: o personagem continua no mapa, onde
+   * estava. Para voltar à conversa, precisa sair da área da sala e entrar de
+   * novo.
+   */
+  | { type: "remove-from-room"; userId: string }
   /**
    * Tocar um vídeo do YouTube (só o áudio importa) para a sala onde o
    * remetente ESTÁ — como `set-room-lock`, o servidor deriva a sala da
@@ -443,6 +578,21 @@ export type OfficeServerMessage =
   | {
       type: "welcome";
       youId: string;
+      /**
+       * Último `seq` SEU que o servidor já processou — de onde a predição deve
+       * retomar a numeração.
+       *
+       * Existe porque a presença do escritório SOBREVIVE a uma queda (há período
+       * de graça): reconectar reaproveita a mesma entrada, com o contador alto,
+       * enquanto o cliente cria um preditor novo começando do zero. Sem isto,
+       * todo input do cliente novo chega com `seq` menor que o já processado e é
+       * descartado como atrasado — a pessoa anda até cair a conexão e nunca mais
+       * sai do lugar.
+       *
+       * A arena não precisa: lá a presença é efêmera e sem período de graça, e a
+       * entrada renasce zerada.
+       */
+      seq?: number;
       occupants: OfficeOccupant[];
       publicationId?: string;
       confettiUserIds?: string[];
@@ -454,19 +604,44 @@ export type OfficeServerMessage =
        * avançada — quem entra/reconecta cai no ponto certo da faixa.
        */
       roomAudio?: OfficeRoomAudioEntry[];
+      /** Quem manda em cada sala ocupada no instante do snapshot. */
+      roomManagers?: OfficeRoomManager[];
       /** Veículos dinâmicos derivados dos assets publicados no mapa. */
       karts?: OfficeKart[];
       /** Bolas chutáveis, na posição em que estão AGORA (não na de origem). */
       balls?: OfficeBall[];
+      /**
+       * Marcas de tinta ainda vivas, com o `ttlMs` já descontado do tempo
+       * decorrido — quem entra no meio da vida de uma marca recebe o que
+       * sobrou dela, e não o prazo cheio.
+       */
+      paintSplats?: PaintSplat[];
     }
   | { type: "joined"; occupant: OfficeOccupant }
   | { type: "left"; userId: string }
-  | { type: "moved"; userId: string; x: number; y: number; dir: Direction; sprint?: boolean }
   /**
-   * Move recusado (parede/borda/kart/sala trancada): posição autoritativa para
-   * o cliente re-ancorar. `seq` é o do move recusado — ver `move`.
+   * Estado autoritativo de quem está no escritório. Substitutivo, nunca
+   * incremental: um pacote perdido não pode deixar o cliente permanentemente
+   * errado.
+   *
+   * Substituiu o `moved` por evento, e a troca paga a si mesma em escala: por
+   * evento, com M andando e N conectados, eram `M × 20 × N` mensagens por
+   * segundo; por snapshot são `N × 20`, independente de quantos se mexem.
+   *
+   * O que ela piora é o escritório PARADO, que antes custava zero. Por isso o
+   * servidor **não emite** snapshot quando nada mudou desde o último — o que
+   * devolve o custo zero da sala vazia sem abrir mão do modelo.
    */
-  | { type: "sync"; x: number; y: number; dir: Direction; seq?: number }
+  | {
+      type: "snapshot";
+      players: OfficeSnapshotPlayer[];
+      /**
+       * Bolas em movimento. Só vão quando alguma está rolando — bola parada é
+       * estado que o último snapshot já disse, e mandá-la sempre desfaria a
+       * supressão que devolve o custo zero da sala parada.
+       */
+      balls?: OfficeBall[];
+    }
   /** Alguém está te chamando — mostrado em todas as abas do alvo. */
   | { type: "incoming-call"; from: { userId: string; name: string } }
   /** Resposta a uma chamada que VOCÊ fez. */
@@ -480,6 +655,15 @@ export type OfficeServerMessage =
       text: string;
       kind: OfficeNearbyMessageKind;
     }
+  /**
+   * O pensamento de alguém saiu do ar — a pessoa se movimentou.
+   *
+   * Existe porque quem apaga o balão é o servidor, e o snapshot só carrega
+   * posição: no modelo de grade o eco `moved` servia de aviso, e o movimento
+   * livre o aposentou. Sem esta mensagem o balão de pensamento fica na tela
+   * dos outros para sempre, mesmo com a pessoa já sem pensamento nenhum.
+   */
+  | { type: "thought-cleared"; userId: string }
   /** O avatar de alguém mudou — os clientes recompõem o personagem ao vivo. */
   | {
       type: "avatar-updated";
@@ -540,9 +724,35 @@ export type OfficeServerMessage =
    * (estava entalada), e ainda assim o gesto é transmitido — quem está perto
    * ouve a batida.
    */
-  | { type: "ball-kicked"; userId: string; kick: OfficeBallKick }
+  /**
+   * Alguém chutou (ou tocou). Vem além da bola do snapshot porque é EVENTO: é
+   * ele que toca o som e dá ao cliente a velocidade nova NA HORA, sem esperar
+   * até 50ms pelo próximo snapshot.
+   *
+   * Substituiu o `kick` com a trajetória inteira resolvida: no contínuo não há
+   * trajetória a mandar — há velocidade, e os dois lados integram a mesma
+   * física a partir dela.
+   */
+  | { type: "ball-kicked"; userId: string; ball: OfficeBall; power: OfficeBallPower }
   /** Snapshot substitutivo após uma publicação adicionar/remover bolas. */
   | { type: "balls-updated"; balls: OfficeBall[] }
+  /** Alguém equipou ou guardou o marcador de paintball. */
+  | { type: "paint-marker"; userId: string; active: boolean }
+  /**
+   * Alguém atirou. `shot.path` é a trajetória INTEIRA já resolvida pelo
+   * servidor (ver `firePaintball`): o cliente anima o voo e não simula nada.
+   * `shot.splat` traz a marca quando o tiro achou alguém — é o mesmo objeto
+   * que aparece no `welcome` de quem entrar depois, enquanto ela durar.
+   */
+  /**
+   * Alguém atirou. O disparo já vem resolvido (`fireBodyShot`): o cliente anima
+   * o projétil e gruda a marca, sem simular nada.
+   *
+   * Passou a ser o disparo CONTÍNUO da arena — de/para em pixel, em vez de uma
+   * lista de tiles. A mira continua sendo o facing autoritativo: o escritório
+   * não tem mouse apontando.
+   */
+  | { type: "paintball-shot"; shot: BodyShot }
   /** Uma mesa foi reivindicada — todo mundo atualiza o indicador de ocupação. */
   | { type: "desk-claimed"; deskId: string; externalKey: string; user: { id: string; name: string } }
   /** Uma mesa foi liberada (pelo dono ou por um admin). */
@@ -575,6 +785,18 @@ export type OfficeServerMessage =
    * sozinha porque a sala esvaziou.
    */
   | { type: "room-lock-changed"; roomId: string; locked: boolean; byUserId: string | null }
+  /**
+   * Quem manda em cada sala agora. Broadcast pro escritório inteiro, como
+   * `room-lock-changed`: quem está fora já precisa saber quem vai receber o
+   * pedido dele, e quem entra depois não depende de um evento novo. Salas sem
+   * ninguém não aparecem no mapa.
+   */
+  | { type: "room-managers-changed"; managers: OfficeRoomManager[] }
+  /**
+   * Alguém foi tirado da chamada de uma sala — para quem está na sala e para
+   * quem foi removido. Não mexe no mapa: o personagem continua onde estava.
+   */
+  | { type: "removed-from-room"; roomId: string; userId: string; byUserId: string; byName: string }
   /**
    * O áudio compartilhado de uma sala começou (`track`) ou acabou (`null`).
    * Broadcast pro escritório inteiro, como `room-lock-changed`: assim quem

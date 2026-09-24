@@ -13,6 +13,11 @@ vi.mock('../lib/api', async (importOriginal) => {
 })
 const mockApiFetch = apiFetch as unknown as Mock
 
+// O card consulta quem está logado para decidir se mostra o botão de parabéns
+// (a mesma regra do `FeedbackComposer`): sem ADMIN e sem si mesmo.
+const mockAuth = vi.hoisted(() => ({ user: { id: 'viewer', role: 'LEGEND' } as { id: string; role: string } | null }))
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: mockAuth.user }) }))
+
 function wrap(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -68,13 +73,18 @@ describe('WorkAnniversariesCard', () => {
     )
   })
 
-  it('leva pro perfil da pessoa ao clicar em "Deixe um feedback"', async () => {
+  // Igual ao card de aniversário: só o botão de festa, apontando para o mural.
+  it('leva ao mural de aniversário do perfil ao clicar no botão de festa', async () => {
     mockApiFetch.mockResolvedValue(response([anniversary('u1', 'Diego Barreto', 3, 0, '2026-07-30')]))
 
     wrap(<WorkAnniversariesCard />)
 
     expect(await screen.findByText('Diego Barreto')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /deixe um feedback/i })).toHaveAttribute('href', '/perfil/u1')
+    expect(screen.getByRole('link', { name: /dê os parabéns a Diego Barreto/i })).toHaveAttribute(
+      'href',
+      '/perfil/u1?parabens=1',
+    )
+    expect(screen.queryByRole('link', { name: /deixe um feedback/i })).not.toBeInTheDocument()
   })
 
   it('mostra todo mundo das próximas datas, sem cortar por pessoa', async () => {

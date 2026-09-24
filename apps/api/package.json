@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && tsup",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "test:changed": "vitest run --changed",
     "test:watch": "vitest",
     "db:seed": "tsx prisma/seed.ts"
   },

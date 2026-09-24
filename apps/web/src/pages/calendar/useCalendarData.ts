@@ -1,10 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
-import type { CalendarEventsResponse, CalendarEventOccurrenceDTO, CalendarEventTypeDTO } from '@legends/shared'
+import type {
+  CalendarCampaignPostDTO,
+  CalendarEventsResponse,
+  CalendarEventOccurrenceDTO,
+  CalendarEventTypeDTO,
+} from '@legends/shared'
 import { apiFetch } from '../../lib/api'
 import { viewRange, type CalendarView } from './calendar-events'
 
 const NO_OCCURRENCES: CalendarEventOccurrenceDTO[] = []
 const NO_TYPES: CalendarEventTypeDTO[] = []
+// Constante no módulo, como as vizinhas: `?? []` no retorno criaria um array
+// novo a cada render, e o `useMemo` da tela depende da IDENTIDADE dele.
+const NO_CAMPAIGN_POSTS: CalendarCampaignPostDTO[] = []
 
 /**
  * A única fonte do calendário: os eventos cadastrados que a pessoa alcança na
@@ -19,6 +27,8 @@ const NO_TYPES: CalendarEventTypeDTO[] = []
 export function useCalendarData(args: { view: CalendarView; cursor: string }): {
   occurrences: CalendarEventOccurrenceDTO[]
   types: CalendarEventTypeDTO[]
+  /** Calendário editorial na mesma janela; vazio para quem não é G&G. */
+  campaignPosts: CalendarCampaignPostDTO[]
   isLoading: boolean
   isError: boolean
 } {
@@ -34,6 +44,7 @@ export function useCalendarData(args: { view: CalendarView; cursor: string }): {
   return {
     occurrences: query.data?.occurrences ?? NO_OCCURRENCES,
     types: query.data?.types ?? NO_TYPES,
+    campaignPosts: query.data?.campaignPosts ?? NO_CAMPAIGN_POSTS,
     isLoading: query.isLoading,
     isError: query.isError,
   }

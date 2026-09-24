@@ -47,6 +47,16 @@ class _IO {
 }
 globalThis.IntersectionObserver = (globalThis.IntersectionObserver ?? _IO) as typeof IntersectionObserver
 
+// jsdom não implementa ResizeObserver; stub para evitar crash nos testes. Sem ele o
+// ArenaPlayground estourava dentro do efeito assíncrono que monta a cena — rejeição
+// sem dono, que o Vitest conta como erro e cobra no código de saída.
+class _RO {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+globalThis.ResizeObserver = (globalThis.ResizeObserver ?? _RO) as typeof ResizeObserver
+
 // jsdom não implementa PointerEvent; stub baseado em MouseEvent pra fireEvent.pointerDown/Move/Up
 // preservarem pointerId/clientX/clientY (ver @testing-library/dom/dist/events.js: cai pro Event
 // genérico sem isso, que descarta essas propriedades).

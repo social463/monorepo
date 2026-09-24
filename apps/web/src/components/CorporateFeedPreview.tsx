@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { useCorporateMuralFeed } from '../lib/use-corporate-mural'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
+import { NewBadge } from './NewBadge'
 
 /** Quantos comunicados aparecem na prévia da Home. */
 const PREVIEW = 3
@@ -34,7 +35,7 @@ export function CorporateFeedPreview() {
   return (
     <section
       data-testid="corporate-feed-preview"
-      className="rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="min-w-0 rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       <div className="mb-md flex items-center justify-between gap-md">
         <h2 className="flex items-center gap-sm font-headline text-body-lg font-semibold text-on-surface">
@@ -58,7 +59,11 @@ export function CorporateFeedPreview() {
             const miniatura =
               post.image?.url ?? post.attachments.find((att) => att.kind === 'IMAGE')?.url ?? null
             return (
-              <li key={post.id}>
+              <li key={post.id} className="relative">
+                {/* Quem já leu o comunicado é o próprio servidor que diz
+                    (`CorporatePostRead`, gravado ao abrir o post) — a Home não
+                    inventa nem guarda estado. */}
+                {!post.viewerRead && <NewBadge />}
                 <Link
                   to={`/mural-corporativo#${post.id}`}
                   className={`flex flex-col gap-sm rounded-xl border p-md transition-colors hover:border-primary/40 ${
@@ -69,7 +74,7 @@ export function CorporateFeedPreview() {
                     <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
                       <Avatar user={post.author} />
                     </div>
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-1 pr-12">
                       <p className="flex items-center gap-sm truncate font-label text-label-sm text-on-surface-variant">
                         {post.author.name}
                         {post.pinnedAt && (

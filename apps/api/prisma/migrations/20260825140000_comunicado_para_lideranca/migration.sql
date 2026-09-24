@@ -1,0 +1,11 @@
+-- Comunicado dirigido à liderança no Feed Corporativo.
+--
+-- Escopo novo de público-alvo: alcança quem tem papel de liderança (LEAD,
+-- MANAGER, HEAD) — o mesmo `LEADER_ROLES` que define a "visão de líder" no
+-- resto do produto. É a liderança INTEIRA da empresa, sem cruzamento com setor.
+--
+-- Sem backfill: o escopo é novo, nenhum comunicado existente vira LEADERS.
+--
+-- `ADD VALUE` dentro de transação é aceito desde o Postgres 12, contanto que o
+-- valor não seja usado no mesmo bloco — e não é.
+ALTER TYPE "CorporatePostAudience" ADD VALUE IF NOT EXISTS 'LEADERS';

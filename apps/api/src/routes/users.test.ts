@@ -104,6 +104,73 @@ describe('GET /users', () => {
   })
 })
 
+describe('GET /users/company', () => {
+  it('por padrão é a lista de destinatários de feedback: sem você mesmo, sem admins', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await registerAndToken(app, 'karla@empresa.com')
+    await prisma.user.create({ data: { name: 'Colega', email: 'colega-company@empresa.com', passwordHash: 'x' } })
+    await prisma.user.create({ data: { name: 'Admin', email: 'admin-company@empresa.com', passwordHash: 'x', role: 'ADMIN' } })
+
+    const res = await app.inject({ method: 'GET', url: '/users/company', headers: { authorization: `Bearer ${token}` } })
+    expect(res.statusCode).toBe(200)
+    const emails = res.json().users.map((u: { email: string }) => u.email)
+    expect(emails).toContain('colega-company@empresa.com')
+    expect(emails).not.toContain('karla@empresa.com')
+    expect(emails).not.toContain('admin-company@empresa.com')
+    await app.close()
+  })
+
+  it('?scope=all traz você mesmo e os admins — quem cadastra projeto precisa se achar', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await registerAndToken(app, 'karla@empresa.com')
+    await prisma.user.create({ data: { name: 'Admin', email: 'admin-company-all@empresa.com', passwordHash: 'x', role: 'ADMIN' } })
+    await prisma.user.create({
+      data: { name: 'Desligada', email: 'inativa-company@empresa.com', passwordHash: 'x', active: false },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/users/company?scope=all',
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.statusCode).toBe(200)
+    const emails = res.json().users.map((u: { email: string }) => u.email)
+    expect(emails).toContain('karla@empresa.com')
+    expect(emails).toContain('admin-company-all@empresa.com')
+    // Inativo continua fora: o que ?scope=all derruba é regra de feedback, não o cadastro.
+    expect(emails).not.toContain('inativa-company@empresa.com')
+    await app.close()
+  })
+
+  it('THIRD_PARTY: nem com ?scope=all sai do próprio setor', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await prisma.user.create({
+      data: { name: 'Admin', email: 'admin-company-tp@empresa.com', passwordHash: 'x', role: 'ADMIN' },
+    })
+    const sectorB = await createSector({ name: 'Setor Company TP', enabledFeatures: [], roles: [] }, admin.id, DEFAULT_COMPANY_ID)
+    await prisma.user.create({
+      data: { name: 'De Outro Setor', email: 'outro-setor-company@empresa.com', passwordHash: 'x', sectorId: sectorB.id },
+    })
+    const thirdParty = await prisma.user.create({
+      data: { name: 'Terceirizado', email: 'terceirizado-company@empresa.com', passwordHash: 'x', role: 'THIRD_PARTY' },
+    })
+    const token = signAccessToken(app, thirdParty, [])
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/users/company?scope=all',
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.statusCode).toBe(200)
+    const emails = res.json().users.map((u: { email: string }) => u.email)
+    expect(emails).not.toContain('outro-setor-company@empresa.com')
+    await app.close()
+  })
+})
+
 describe('GET /users/showcase', () => {
   it('lista os devs com o total de feedbacks recebidos e os selos, do maior para o menor', async () => {
     const app = buildApp()

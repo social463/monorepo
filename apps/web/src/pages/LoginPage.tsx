@@ -9,10 +9,18 @@ import { useBrandContext } from "../brand/BrandContext";
 const inputCls =
   "rounded-md border border-outline-variant/60 bg-surface-container-highest px-3 py-2 font-body text-body-md text-on-surface outline-none transition-all focus:border-primary focus:ring-2 focus:ring-primary/30";
 
+/**
+ * Os pilares do portal (Documento 4, seção 2). Emoji, e não ícone do Material:
+ * é o que a copy oficial da G&G pede, e o emoji carrega a cor que o ícone
+ * monocromático não tem.
+ *
+ * A G&G falou em "estes 4 pilares" e mandou três, mais o "E muito mais!" —
+ * enquanto o quarto não chega, é o texto menor que fecha a lista.
+ */
 const HIGHLIGHTS = [
-  { icon: "how_to_vote", label: "Reconheça seus pares" },
-  { icon: "workspace_premium", label: "Conquiste selos" },
-  { icon: "diversity_3", label: "Celebre as lendas do time" },
+  { emoji: "📣", label: "Fique por dentro de todas as novidades" },
+  { emoji: "🤝", label: "Envie reconhecimentos e seja reconhecido" },
+  { emoji: "📊", label: "Acumule EMR Coins, Pontos e Selos" },
 ];
 
 export function LoginPage() {
@@ -152,30 +160,39 @@ export function LoginPage() {
         <div className="relative z-10 flex h-full flex-col items-start justify-center gap-md px-xl py-xl lg:gap-xl lg:py-0">
           <div>
             <p className="font-label text-label-md uppercase tracking-[0.2em] text-primary">
-              Feedback entre pares
+              Portal EMR
             </p>
             <h2 className="mt-2 max-w-md font-headline text-headline-md text-on-surface lg:text-headline-xl">
-              Quem constrói merece virar lenda.
+              Conecte-se com a nossa cultura, engaje e evolua.
             </h2>
             <p className="mt-md max-w-md text-body-md text-on-surface-variant lg:text-body-lg">
-              Feedback entre pares para valorizar quem impulsiona nossos
-              sistemas todos os dias.
+              Sua central de informações e cultura na EMR.
             </p>
           </div>
 
-          <ul className="flex flex-col gap-sm lg:gap-md">
-            {HIGHLIGHTS.map((item) => (
-              <li
-                key={item.icon}
-                className="flex items-center gap-md text-on-surface"
-              >
-                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-container-highest text-primary">
-                  <Icon name={item.icon} className="text-[20px]" />
-                </span>
-                <span className="font-body text-body-md">{item.label}</span>
-              </li>
-            ))}
-          </ul>
+          <div className="flex flex-col gap-sm">
+            <ul className="flex flex-col gap-sm lg:gap-md">
+              {HIGHLIGHTS.map((item) => (
+                <li
+                  key={item.emoji}
+                  className="flex items-center gap-md text-on-surface"
+                >
+                  {/* O texto do pilar já diz tudo; anunciar "megafone" antes
+                      dele só atrasa quem usa leitor de tela. */}
+                  <span
+                    aria-hidden
+                    className="flex h-9 w-9 items-center justify-center rounded-full bg-surface-container-highest text-[20px]"
+                  >
+                    {item.emoji}
+                  </span>
+                  <span className="font-body text-body-md">{item.label}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="pl-[3.25rem] text-body-sm text-on-surface-variant">
+              E muito mais!
+            </p>
+          </div>
         </div>
       </aside>
     </main>

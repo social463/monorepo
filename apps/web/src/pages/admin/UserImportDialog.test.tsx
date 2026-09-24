@@ -17,19 +17,23 @@ const mockApiFetchBlob = apiFetchBlob as unknown as Mock
 const previewOk: UserImportPreviewDTO = {
   fileHash: 'a'.repeat(64),
   totalRows: 2,
-  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, SKIP: 0, ERROR: 0 },
+  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, DEACTIVATE: 0, SKIP: 0, ERROR: 0 },
   rows: [
     { line: 2, name: 'Ana', email: 'ana@x.com', action: 'CREATE', sectorName: 'Dados', squadName: 'Insights', changes: [], issues: [] },
     { line: 3, name: 'Bia', email: 'bia@x.com', action: 'UPDATE', sectorName: 'Dados', squadName: null, changes: ['Cargo: "" → "QA"'], issues: [] },
   ],
-  plan: { sectorsToCreate: [{ name: 'Dados', roles: ['LEGEND'] }], squadsToCreate: [{ name: 'Insights', sectorName: 'Dados' }] },
+  plan: {
+    sectorsToCreate: [{ name: 'Dados', roles: ['LEGEND'] }],
+    squadsToCreate: [{ name: 'Insights', sectorName: 'Dados' }],
+    squadsToMove: [{ name: 'Receita', fromSectorName: 'Comercial', toSectorName: 'RevOps' }],
+  },
   blocked: false,
   warnings: ['"Situação" foi ignorada: a importação nunca desliga nem reativa ninguém.'],
 }
 
 const previewComErro: UserImportPreviewDTO = {
   ...previewOk,
-  counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, SKIP: 0, ERROR: 1 },
+  counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, DEACTIVATE: 0, SKIP: 0, ERROR: 1 },
   rows: [
     {
       line: 4,
@@ -46,6 +50,15 @@ const previewComErro: UserImportPreviewDTO = {
   warnings: [],
 }
 
+/** Erro no fim do arquivo, para provar que ele sobe para o topo da tabela. */
+const previewMisto: UserImportPreviewDTO = {
+  ...previewOk,
+  totalRows: 3,
+  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, DEACTIVATE: 0, SKIP: 0, ERROR: 1 },
+  rows: [...previewOk.rows, ...previewComErro.rows],
+  blocked: true,
+}
+
 const resultado: UserImportResultDTO = {
   created: 1,
   updated: 0,
@@ -53,7 +66,10 @@ const resultado: UserImportResultDTO = {
   skipped: 0,
   sectorsCreated: ['Dados'],
   squadsCreated: [],
+  squadsMoved: [],
   credentials: [{ name: 'Ana', email: 'ana@x.com', password: 'Xk7pw2Qm9rTv' }],
+  photosImported: 0,
+  photoWarnings: [],
 }
 
 function renderDialog(onClose = vi.fn()) {
@@ -104,7 +120,8 @@ describe('UserImportDialog', () => {
     expect(mockApiFetch).toHaveBeenCalledWith('/admin/users/import/preview', expect.objectContaining({ method: 'POST' }))
     expect(screen.getByText('A pré-visualização não grava nada.')).toBeInTheDocument()
     expect(screen.getByText(/Situação" foi ignorada/)).toBeInTheDocument()
-    expect(screen.getByText(/Setores: Dados/)).toBeInTheDocument()
+    expect(screen.getByText(/Setores criados: Dados/)).toBeInTheDocument()
+    expect(screen.getByText(/Receita \(Comercial → RevOps\)/)).toBeInTheDocument()
   })
 
   it('mostra linha, coluna e motivo de cada erro e trava a confirmação', async () => {
@@ -115,6 +132,32 @@ describe('UserImportDialog', () => {
     await waitFor(() => expect(screen.getByText(/E-mail: E-mail inválido\./)).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Confirmar importação' })).toBeDisabled()
     expect(screen.getByText(/Corrija as linhas com erro/)).toBeInTheDocument()
+  })
+
+  it('lista as linhas com erro no topo da tabela e deixa baixá-las', async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => 'blob:erros')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+
+    mockApiFetch.mockResolvedValue(previewMisto)
+    renderDialog()
+    await subirArquivo()
+
+    await waitFor(() => expect(screen.getByText(/1 linha com erro/)).toBeInTheDocument())
+    // A linha 4 é a última do arquivo e a primeira da tabela.
+    const linhas = screen.getAllByRole('row').slice(1)
+    expect(linhas[0]).toHaveTextContent('Caio')
+
+    await userEvent.click(screen.getByRole('button', { name: /Baixar erros/ }))
+    const blob = createObjectURL.mock.calls[createObjectURL.mock.calls.length - 1][0]
+    const texto = await new Promise<string>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.readAsText(blob)
+    })
+    expect(texto).toContain('"Linha","Nome","E-mail","Coluna","Erro"')
+    expect(texto).toContain('"4","Caio","caio","E-mail","E-mail inválido."')
+    vi.unstubAllGlobals()
   })
 
   it('confirma reenviando o mesmo arquivo e o hash da pré-visualização', async () => {
@@ -169,6 +212,22 @@ describe('UserImportDialog', () => {
     expect(texto).toContain('"Nome","E-mail","Senha"')
     expect(texto).toContain('Xk7pw2Qm9rTv')
     vi.unstubAllGlobals()
+  })
+
+  it('diz quantas fotos entraram e lista as que falharam', async () => {
+    renderDialog()
+    await subirArquivo()
+    await waitFor(() => expect(screen.getByText(/1 a criar/)).toBeInTheDocument())
+
+    mockApiFetch.mockResolvedValueOnce({
+      ...resultado,
+      photosImported: 2,
+      photoWarnings: ['Linha 4 (Bia): a foto não foi importada — o link respondeu 404.'],
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirmar importação' }))
+
+    await waitFor(() => expect(screen.getByText('2 fotos importadas da planilha.')).toBeInTheDocument())
+    expect(screen.getByText(/Linha 4 \(Bia\)/)).toBeInTheDocument()
   })
 
   it('mostra a mensagem da API quando a planilha é recusada', async () => {

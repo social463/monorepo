@@ -2,6 +2,8 @@ import { z } from 'zod'
 import {
   CAMPAIGN_AUDIENCE_LABELS,
   CAMPAIGN_BODY_MAX_LENGTH,
+  CAMPAIGN_BODY_TARGET_MAX,
+  CAMPAIGN_BODY_TARGET_MIN,
   CAMPAIGN_TITLE_MAX_LENGTH,
   CAMPAIGN_VISUAL_HINT_MAX_LENGTH,
   type CampaignAudience,
@@ -16,6 +18,14 @@ export interface CampaignPromptInput {
   notes?: string | null
   /** Grade de `buildScheduleSlots` — o modelo recebe as datas prontas. */
   slots: Date[]
+  /**
+   * Modelo padrão da empresa (Documento 4, seção 13.4). Quando presente, entra
+   * ANTES das regras de formato: é instrução de estrutura e tom, e as regras
+   * abaixo dele são as que não se negociam (limite de caracteres, contagem,
+   * formato da resposta). Ausente = a pessoa desligou o modelo para gerar algo
+   * fora do padrão.
+   */
+  template?: string | null
 }
 
 const dataFormatter = new Intl.DateTimeFormat('pt-BR', {
@@ -31,11 +41,20 @@ const dataFormatter = new Intl.DateTimeFormat('pt-BR', {
  * Monta o prompt da campanha. Função pura (testável sem rede), no padrão de
  * `buildCongratsPrompt`. As datas entram como contexto para o modelo adequar o
  * texto ao dia — mas ele não devolve data nenhuma: quem carimba é o parser.
+ *
+ * **As REGRAS não podem contradizer o modelo da empresa.** Elas vêm depois dele
+ * e se declaram inegociáveis, então o modelo de linguagem obedece a elas: com
+ * "sem markdown, sem emojis" aqui embaixo, a fórmula da Brevidade Inteligente
+ * pedia negrito e emoji lá em cima e não recebia nenhum dos dois — o comunicado
+ * saía chapado. Hoje a formatação permitida é justamente o subset que
+ * `markdownToRichDoc` traduz para o Feed.
  */
 export function buildCampaignPrompt(input: CampaignPromptInput): string {
   const agenda = input.slots
     .map((slot, index) => `${index + 1}. ${dataFormatter.format(slot)}`)
     .join('\n')
+
+  const modelo = input.template?.trim()
 
   return [
     `Você é o time de comunicação interna da empresa ${input.companyName}, escrevendo em português do Brasil.`,
@@ -43,16 +62,26 @@ export function buildCampaignPrompt(input: CampaignPromptInput): string {
     `Público-alvo: ${CAMPAIGN_AUDIENCE_LABELS[input.audience]}.`,
     input.notes?.trim() ? `Observações do solicitante: ${input.notes.trim()}` : null,
     ``,
+    ...(modelo ? [`MODELO PADRÃO DE COMUNICADO`, modelo, ``] : []),
     `Cada comunicado será publicado em uma destas datas, nesta ordem:`,
     agenda,
     ``,
     `REGRAS`,
     `- Um comunicado por data, na mesma ordem da lista.`,
-    `- O corpo tem no máximo ${CAMPAIGN_BODY_MAX_LENGTH} caracteres. Este limite é rígido.`,
-    `- O título tem no máximo ${CAMPAIGN_TITLE_MAX_LENGTH} caracteres e é interno (não aparece no post).`,
+    `- Desenvolva o comunicado inteiro: cada seção do modelo com conteúdo de verdade,`,
+    `  entre ${CAMPAIGN_BODY_TARGET_MIN} e ${CAMPAIGN_BODY_TARGET_MAX} caracteres de corpo. Não resuma até virar tópico solto:`,
+    `  uma frase por seção é raso demais para um comunicado interno.`,
+    `- Nunca passe de ${CAMPAIGN_BODY_MAX_LENGTH} caracteres no corpo — aí sim é limite rígido.`,
+    `- O título é o do post, aparece para quem lê, e tem no máximo ${CAMPAIGN_TITLE_MAX_LENGTH} caracteres.`,
+    `  O corpo começa pelo texto: não repita o título como primeira linha nem como subtítulo.`,
     `- A campanha deve progredir: abertura, desenvolvimento e encerramento. Não repita o mesmo texto.`,
     `- Não invente número, data, nome de pessoa, benefício ou política que não esteja no tema.`,
-    `- Tom caloroso e profissional. Sem markdown, sem emojis, sem aspas.`,
+    `- Português do Brasil com ortografia e ACENTUAÇÃO corretas ("saúde", "precisão",`,
+    `  "parabéns"). Nunca escreva sem acento para poupar espaço.`,
+    `- Tom caloroso e profissional. Sem aspas ao redor do texto.`,
+    `- Formatação permitida no corpo, e só ela: **negrito**, *itálico*, "## " para`,
+    `  subtítulo, "- " para item de lista, "1. " para item numerado. Emoji com`,
+    `  parcimônia, quando o modelo pedir. Nada de tabela, imagem ou HTML.`,
     ``,
     `FORMATO DA RESPOSTA`,
     `Responda APENAS com um array JSON, sem texto antes ou depois, com exatamente ${input.slots.length} objeto(s):`,

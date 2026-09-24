@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify'
 import {
+  type BodyInput,
   OFFICE_CHARACTER_NAME_MAX_LENGTH,
   OFFICE_GUEST_CHARACTER_PRESETS,
   OFFICE_GUEST_NAME_MAX_LENGTH,
   isDirection,
-  isMoveDirection,
   isOfficeBallPower,
   isOfficeUserStatus,
   type OfficeClientMessage,
@@ -12,6 +12,7 @@ import {
 } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { getOfficeHub, type OfficeUser } from '../lib/office-hub'
+import { removeLivekitParticipant } from '../lib/livekit-admin'
 import { sanitizeAvatarOptions, sanitizeAvatarStyle } from '../lib/serialize'
 import { getActiveOfficeMap } from '../services/office-map-service'
 import { isOfficeGuestPayload } from '../services/office-guest-service'
@@ -31,6 +32,30 @@ interface OfficeRequest {
  */
 export const OFFICE_HEARTBEAT_INTERVAL_MS = 30_000
 
+/**
+ * Shape do input vindo do fio — nada aqui confia no cliente. Mesma checagem da
+ * arena, e pelo mesmo motivo: número inválido atravessando a simulação vira
+ * `NaN` na posição, e daí em diante o personagem some do mapa para todo mundo.
+ */
+function isBodyInput(value: unknown): value is BodyInput {
+  if (typeof value !== 'object' || value === null) return false
+  const input = value as Record<string, unknown>
+  return (
+    Number.isFinite(input.seq) &&
+    Number.isFinite(input.dx) &&
+    Number.isFinite(input.dy) &&
+    Number.isFinite(input.dtMs)
+  )
+}
+
+/** Normaliza o que veio do fio antes de entrar na simulação. */
+function sanitizeBodyInput(input: BodyInput): BodyInput {
+  // `sprint` vira booleano de verdade: `stepBody` só olha se é verdadeiro, e
+  // aceitar uma string truthy funcionaria, mas deixaria lixo do cliente
+  // atravessando a simulação.
+  return { seq: input.seq, dx: input.dx, dy: input.dy, dtMs: input.dtMs, sprint: input.sprint === true }
+}
+
 export async function officeWsRoutes(app: FastifyInstance) {
   app.get(
     '/office/ws',
@@ -40,6 +65,7 @@ export async function officeWsRoutes(app: FastifyInstance) {
         const token = (request.query as { token?: string }).token ?? ''
         let userId: string
         let companyId: string
+        let isAdmin = false
         try {
           const payload = app.jwt.verify(token) as {
             sub: string
@@ -74,6 +100,7 @@ export async function officeWsRoutes(app: FastifyInstance) {
           } else if (payload.role !== 'ADMIN' && !(payload.features ?? []).includes('escritorio')) {
             return reply.code(403).send({ message: 'Acesso não liberado para este usuário' })
           }
+          isAdmin = payload.role === 'ADMIN'
         } catch {
           return reply.code(401).send({ message: 'Não autorizado' })
         }
@@ -97,6 +124,7 @@ export async function officeWsRoutes(app: FastifyInstance) {
 
         ;(request as OfficeRequest)._officeUser = {
           id: user.id,
+          isAdmin,
           officeCharacterName: user.officeCharacterName ?? null,
           avatarSeed: user.avatarSeed ?? null,
           avatarOptions: sanitizeAvatarOptions(user.avatarOptions),
@@ -137,14 +165,8 @@ export async function officeWsRoutes(app: FastifyInstance) {
         } catch {
           return
         }
-        if (msg.type === 'move' && isMoveDirection(msg.dir)) {
-          hub.move(
-            ws,
-            user.id,
-            msg.dir,
-            msg.sprint === true,
-            typeof msg.seq === 'number' ? msg.seq : undefined,
-          )
+        if (msg.type === 'input' && isBodyInput(msg.input)) {
+          hub.applyInput(ws, user.id, sanitizeBodyInput(msg.input))
         } else if (msg.type === 'leave-office') {
           hub.leaveNow(ws, user.id)
           ws.close()
@@ -170,7 +192,13 @@ export async function officeWsRoutes(app: FastifyInstance) {
         } else if (msg.type === 'ride-kart') {
           hub.rideKart(ws, user.id)
         } else if (msg.type === 'kick-ball' && isOfficeBallPower(msg.power)) {
-          hub.kickBall(ws, user.id, msg.power, msg.sprint === true)
+          const charge = typeof msg.charge === 'number' ? msg.charge : undefined
+          hub.kickBall(ws, user.id, msg.power, msg.sprint === true, charge)
+        } else if (msg.type === 'set-paint-marker' && typeof msg.active === 'boolean') {
+          hub.setPaintMarker(ws, user.id, msg.active)
+        } else if (msg.type === 'fire-paintball') {
+          // Sem payload de propósito: direção, alcance e alvo são do servidor.
+          hub.firePaintball(ws, user.id)
         } else if (msg.type === 'set-status' && isOfficeUserStatus(msg.status)) {
           hub.setStatus(ws, user.id, msg.status)
         } else if (msg.type === 'set-character-name' && typeof msg.name === 'string') {
@@ -184,6 +212,13 @@ export async function officeWsRoutes(app: FastifyInstance) {
           hub.setEditing(ws, user.id, msg.editing)
         } else if (msg.type === 'set-room-lock' && typeof msg.locked === 'boolean') {
           hub.setRoomLock(ws, user.id, msg.locked)
+        } else if (msg.type === 'remove-from-room' && typeof msg.userId === 'string') {
+          const removed = hub.removeFromRoom(ws, user.id, msg.userId, { isAdmin: user.isAdmin })
+          // Tirar do estado do hub barra a VOLTA (o token é negado enquanto a
+          // pessoa não sair da área); o que corta o áudio de quem já está
+          // conectado é o LiveKit. Best-effort e sem await: a resposta ao
+          // cliente não espera a API de administração.
+          if (removed?.mediaRoom) void removeLivekitParticipant(removed.mediaRoom, msg.userId)
         } else if (msg.type === 'start-room-audio' && typeof msg.videoId === 'string') {
           // O link/id é validado no hub (`parseYouTubeVideoId`) — aqui só o shape.
           hub.startRoomAudio(ws, user.id, msg.videoId, typeof msg.playlistId === 'string' ? msg.playlistId : null)

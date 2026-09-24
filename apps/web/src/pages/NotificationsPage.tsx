@@ -16,10 +16,14 @@ function iconFor(type: string): string {
       return "chat";
     case "FEEDBACK_REACTION":
       return "add_reaction";
+    case "FEEDBACK_COMMENT":
+      return "chat_bubble";
     case "BADGE_EARNED":
       return "workspace_premium";
     case "HIGHLIGHT_PUBLISHED":
       return "trophy";
+    case "BIRTHDAY_GREETING_RECEIVED":
+      return "cake";
     case "DEVELOPMENT_THURSDAY_EVENT":
       return "school";
     case "MEETING_INVITED":

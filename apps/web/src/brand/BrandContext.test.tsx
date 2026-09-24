@@ -53,12 +53,45 @@ describe('applyBranding', () => {
     expect(root.style.getPropertyValue('--brand-surface')).toBe('12 20 27')
   })
 
-  it('injeta os 35 tokens', () => {
+  it('injeta os 35 tokens de cor mais as duas famílias de fonte', () => {
     applyBranding(marcaEmpresa)
     const declaradas = Array.from(document.documentElement.style).filter((prop) =>
       prop.startsWith('--brand-'),
     )
-    expect(declaradas).toHaveLength(35)
+    // 35 cores + `--brand-font-headline` e `--brand-font-body`: a tipografia é
+    // token de marca desde a identidade EMR 2026 (Documento 3, seção 10).
+    expect(declaradas.filter((p) => !p.startsWith('--brand-font-'))).toHaveLength(35)
+    expect(declaradas).toContain('--brand-font-headline')
+    expect(declaradas).toContain('--brand-font-body')
+  })
+
+  it('a fonte da marca NÃO sequestra o stylesheet do Material Symbols', () => {
+    // Regressão: `upsertLink('stylesheet', …)` casava com o PRIMEIRO
+    // `link[rel="stylesheet"]` do head — o do Material Symbols — e trocava o
+    // href dele pelo da fonte da marca. Resultado: todo ícone do app virava o
+    // texto da ligadura ("how_to_vote" no lugar do desenho).
+    const icones = document.createElement('link')
+    icones.rel = 'stylesheet'
+    icones.href = 'https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined'
+    document.head.appendChild(icones)
+
+    applyBranding(marcaEmpresa)
+
+    expect(icones.href).toContain('Material+Symbols+Outlined')
+    const daMarca = document.head.querySelector<HTMLLinkElement>('link#brand-font')
+    expect(daMarca?.href).toContain('family=Outfit')
+  })
+
+  it('a fonte do produto não carrega arquivo extra; a da empresa carrega', () => {
+    // O produto usa Geist/Inter, que já vêm no `index.html`.
+    applyBranding(PRODUTO)
+    expect(document.head.querySelector('link#brand-font')).toBeNull()
+
+    // A EMR usa Outfit: aí sim a família é baixada, sob demanda.
+    applyBranding(marcaEmpresa)
+    const link = document.head.querySelector<HTMLLinkElement>('link#brand-font')
+    expect(link?.href).toContain('family=Outfit')
+    expect(document.documentElement.style.getPropertyValue('--brand-font-headline')).toContain('Outfit')
   })
 
   it('tema claro tira a classe dark e ajusta o color-scheme', () => {

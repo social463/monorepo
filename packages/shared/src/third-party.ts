@@ -23,7 +23,20 @@ export const COLLABORATOR_FEATURE_KEYS = [
   'assistente',
   'galeria',
   'um-a-um',
+  'metas',
 ] as const
+
+/**
+ * Features de colaborador que terceirizado não recebe, nem pela allowlist
+ * individual: a API recusa THIRD_PARTY de qualquer jeito (metas são dado
+ * interno da empresa). Ficam fora do convite para não prometer um acesso que
+ * não existe.
+ */
+export const INTERNAL_ONLY_FEATURE_KEYS = ['metas'] as const satisfies readonly (typeof COLLABORATOR_FEATURE_KEYS)[number][]
+
+export const THIRD_PARTY_FEATURE_KEYS = COLLABORATOR_FEATURE_KEYS.filter(
+  (key) => !(INTERNAL_ONLY_FEATURE_KEYS as readonly string[]).includes(key),
+)
 
 /**
  * Features de **bloco administrativo**: não liberam nada para o colaborador.
@@ -68,6 +81,7 @@ export const FEATURE_LABELS: Record<FeatureKey, string> = {
   assistente: 'Assistente de RH',
   galeria: 'Galeria de eventos',
   'um-a-um': '1:1',
+  metas: 'Metas e OKRs',
   // Verbo na frente de propósito: deixa claro que é permissão, e evita colidir
   // com o nome do setor homônimo no card da tela de Setores.
   'gente-gestao': 'Administrar Gente e Gestão',

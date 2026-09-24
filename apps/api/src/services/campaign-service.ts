@@ -1,20 +1,27 @@
 import { Prisma, type CampaignPost } from '@prisma/client'
 import type {
+  AttachedImage,
+  CampaignCalendarContextDTO,
   CampaignDraftDTO,
   ConfirmCampaignRequest,
   CreateCampaignPostRequest,
   GenerateCampaignRequest,
   UpdateCampaignPostRequest,
 } from '@legends/shared'
+import { canPublishCorporatePostDirectly, markdownToRichDoc } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { buildScheduleSlots } from '../lib/campaign-schedule'
 import { buildCampaignPrompt, parseCampaignDrafts } from '../lib/campaign-prompt'
 import { requestAgentCompletion, type AgentCompletionFn } from '../lib/agent-client'
 import { resolveAiCredentials } from './ai-settings-service'
+import { resolveCampaignPromptTemplate } from './campaign-settings-service'
 import { CampaignError } from '../lib/campaign-error'
 import { findUserInCompany, scopedPrisma } from '../lib/tenant-scope'
 import { recordAuditLog } from './audit-log-service'
-import { createPost } from './corporate-mural-service'
+import { campaignPostImage } from '../lib/serialize'
+import { announceCorporatePostPublished, createPost } from './corporate-mural-service'
+import { listOccurrences, type CalendarViewer } from './calendar-event-service'
+import { getCelebrations } from './celebration-service'
 
 export interface CampaignActor {
   id: string
@@ -33,6 +40,18 @@ export const postInclude = {
 export type CampaignPostWithRelations = CampaignPost & {
   campaign: { id: string; theme: string } | null
   responsible: { id: string; name: string } | null
+}
+
+/**
+ * As três colunas de arte viajam juntas ou não viajam: `null` explícito apaga a
+ * peça, `undefined` não mexe. Sem o par explícito, tirar a imagem de um item
+ * deixaria largura e altura órfãs apontando para uma URL que não existe mais.
+ */
+function imageColumns(image: AttachedImage | null | undefined) {
+  if (image === undefined) return {}
+  return image
+    ? { imageUrl: image.url, imageWidth: image.width, imageHeight: image.height }
+    : { imageUrl: null, imageWidth: null, imageHeight: null }
 }
 
 /**
@@ -73,6 +92,11 @@ export async function generateCampaignPreview(
 
   const credentials = await resolveAiCredentials(actor.companyId)
   const company = await prisma.company.findUnique({ where: { id: actor.companyId } })
+  // O modelo padrão vem ligado (Documento 4, seção 13.4); `applyTemplate: false`
+  // é a saída para gerar algo fora do padrão, sem apagar a configuração.
+  const template = (input.applyTemplate ?? true)
+    ? await resolveCampaignPromptTemplate(actor.companyId)
+    : null
 
   const prompt = buildCampaignPrompt({
     companyName: company?.name ?? 'a empresa',
@@ -80,6 +104,7 @@ export async function generateCampaignPreview(
     audience: input.audience,
     notes: input.notes,
     slots,
+    template,
   })
 
   const raw = await complete({
@@ -140,10 +165,12 @@ export async function confirmCampaign(
             title: post.title,
             body: post.body,
             visualHint: post.visualHint ?? null,
+            ...imageColumns(post.image ?? null),
             scheduledFor: new Date(post.scheduledFor),
             channel: post.channel,
             audience: input.audience,
             responsibleId: post.responsibleId ?? null,
+            createdById: actor.id,
           },
           include: postInclude,
         }),
@@ -164,6 +191,32 @@ export async function confirmCampaign(
   })
 }
 
+/**
+ * Contexto do calendário organizacional (eventos, aniversários e tempo de
+ * casa) na janela pedida — leitura pura, sem gravar nada: mesmo princípio de
+ * `listCalendarCampaignPosts` (calendar-event-service) na direção oposta.
+ *
+ * `range.from` é sempre o primeiro dia do mês exibido (a tela só navega por
+ * mês inteiro), e é dele que sai o `monthRef` de `getCelebrations` — os
+ * aniversários/tempo de casa são sempre do MÊS da janela, não recalculados
+ * dia a dia.
+ */
+export async function getCampaignCalendarContext(
+  viewer: CalendarViewer,
+  range: { from: string; to: string },
+): Promise<CampaignCalendarContextDTO> {
+  const monthRef = range.from.slice(0, 7)
+  const [occurrences, celebrations] = await Promise.all([
+    listOccurrences({ ...viewer, from: range.from, to: range.to }),
+    getCelebrations(viewer.userId, new Date(), monthRef),
+  ])
+  return {
+    occurrences,
+    birthdays: celebrations.birthdays.month,
+    workAnniversaries: celebrations.workAnniversaries.month,
+  }
+}
+
 /** Itens da janela pedida — é o que alimenta a grade de mês do calendário. */
 export function listCampaignPosts(
   actor: CampaignActor,
@@ -173,6 +226,26 @@ export function listCampaignPosts(
     where: { scheduledFor: { gte: range.from, lte: range.to } },
     include: postInclude,
     orderBy: { scheduledFor: 'asc' },
+  })
+}
+
+/**
+ * As campanhas que INTERSECTAM a janela — não as que começam dentro dela.
+ *
+ * Uma campanha de 25/08 a 10/09 tem de aparecer na grade de setembro, e
+ * `startsAt` dela cai em agosto: filtrar por `startsAt` na janela sumiria com
+ * justamente a faixa que atravessa a virada do mês, que é o caso que a faixa
+ * existe para mostrar. A condição é a de sobreposição de intervalos — começa
+ * antes do fim da janela E termina depois do começo dela.
+ */
+export function listCampaignBands(
+  actor: CampaignActor,
+  range: { from: Date; to: Date },
+): Promise<{ id: string; theme: string; startsAt: Date; endsAt: Date }[]> {
+  return scopedPrisma(actor.companyId).campaign.findMany({
+    where: { startsAt: { lte: range.to }, endsAt: { gte: range.from } },
+    select: { id: true, theme: true, startsAt: true, endsAt: true },
+    orderBy: { startsAt: 'asc' },
   })
 }
 
@@ -194,10 +267,12 @@ export async function createCampaignPost(
         title: input.title,
         body: input.body,
         visualHint: input.visualHint ?? null,
+        ...imageColumns(input.image ?? null),
         scheduledFor: new Date(input.scheduledFor),
         channel: input.channel,
         audience: input.audience,
         responsibleId: input.responsibleId ?? null,
+        createdById: actor.id,
       },
       include: postInclude,
     })
@@ -240,6 +315,7 @@ export async function updateCampaignPost(
   if (input.title !== undefined) data.title = input.title
   if (input.body !== undefined) data.body = input.body
   if (input.visualHint !== undefined) data.visualHint = input.visualHint ?? null
+  Object.assign(data, imageColumns(input.image))
   if (input.scheduledFor !== undefined) data.scheduledFor = new Date(input.scheduledFor)
   if (input.channel !== undefined) data.channel = input.channel
   if (input.audience !== undefined) data.audience = input.audience
@@ -300,9 +376,22 @@ export async function publishCampaignPost(
       400,
     )
   }
+  return runCampaignPublish(actor, before)
+}
 
+/**
+ * O miolo da publicação, compartilhado pelo botão "Publicar agora" e pelo tick
+ * do agendamento. São o mesmo ato — a única diferença é quem é o autor — e duas
+ * cópias divergiriam no primeiro ajuste, exatamente como diz o comentário de
+ * `announceCorporatePostPublished`.
+ */
+async function runCampaignPublish(
+  actor: CampaignActor,
+  before: CampaignPostWithRelations,
+): Promise<CampaignPostWithRelations> {
+  const id = before.id
   const db = scopedPrisma(actor.companyId)
-  return db.$transaction(async (tx) => {
+  const { after, muralPost } = await db.$transaction(async (tx) => {
     // Reivindica a linha antes de criar o post: se outra transação concorrente
     // já ganhou (ou o item foi cancelado entre o pré-voo e aqui), `count` vem
     // 0 e nada é criado no Mural.
@@ -316,7 +405,19 @@ export async function publishCampaignPost(
 
     const post = await createPost({
       authorId: actor.id,
-      content: before.body,
+      // O corpo vai como DOCUMENTO, não como texto puro: o comunicado nasce de
+      // um modelo de linguagem e traz negrito, subtítulo e lista, que em
+      // `content` apareceriam com os asteriscos à mostra. `createPost` deriva o
+      // texto puro do documento sozinho (`assertPostBody`).
+      body: markdownToRichDoc(before.body),
+      // O título deixou de ser rótulo interno da grade e é o do post: a fórmula
+      // do comunicado abre justamente por ele, e escondê-lo gastava a linha de
+      // maior impacto num campo que ninguém lia.
+      title: before.title,
+      // A arte do item vira a imagem do comunicado. `createPost` valida o host
+      // contra o bucket configurado (`assertImageHost`), então URL de fora não
+      // entra nem por aqui.
+      ...(campaignPostImage(before) ? { image: campaignPostImage(before)! } : {}),
       companyId: actor.companyId,
       tx: tx as unknown as Prisma.TransactionClient,
     })
@@ -335,7 +436,116 @@ export async function publishCampaignPost(
       companyId: actor.companyId,
       tx: tx as unknown as Prisma.TransactionClient,
     })
-    return after
+    return { after, muralPost: post }
+  })
+
+  // Depois do commit, e best-effort: o comunicado já está no ar, e falha de
+  // notificação não pode desfazer publicação. Antes disto o item do calendário
+  // ia para o Mural mudo — sem sininho e sem card no Teams —, o que o
+  // scheduler dos agendados do feed já tratava como comunicado que não é
+  // comunicado. Vale para os dois caminhos: o botão e o tick.
+  await announceCorporatePostPublished(muralPost, actor.companyId, {
+    error: (err) => console.error(`[campanhas] notificação do comunicado ${id}`, err),
+  })
+
+  return after
+}
+
+/**
+ * Publica um item vencido em nome de quem o agendou. É o caminho do tick — o
+ * `actor` do botão não existe aqui.
+ *
+ * O autor precisa poder publicar direto no Mural: com um autor sem essa
+ * permissão, `createPost` criaria um post PENDENTE (fila de aprovação) enquanto
+ * o item já teria virado PUBLICADO no calendário — comunicado marcado como no
+ * ar que ninguém vê. Por isso quem não passa na checagem é recusado aqui, e o
+ * item fica para o "Publicar agora".
+ */
+export async function publishScheduledCampaignPost(
+  post: CampaignPostWithRelations,
+): Promise<CampaignPostWithRelations> {
+  if (!post.createdById) {
+    throw new CampaignError('Comunicado sem autor para a publicação automática.', 409)
+  }
+  const author = await findUserInCompany(post.companyId, post.createdById)
+  if (!author || !author.active || !canPublishCorporatePostDirectly(author.role, author.adminAccess)) {
+    throw new CampaignError('Quem agendou não pode mais publicar no Mural.', 409)
+  }
+  return runCampaignPublish({ id: author.id, companyId: post.companyId }, post)
+}
+
+/**
+ * Janela de atraso que o tick ainda publica.
+ *
+ * Existe porque a publicação automática chegou depois do calendário: no dia em
+ * que ela sobe, todo item que ficou para trás — mês passado, campanha que
+ * ninguém publicou — está vencido, e sem esta janela o primeiro tick despejaria
+ * todos de uma vez no Mural. Vinte e quatro horas cobrem restart, deploy e API
+ * fora do ar por uma noite; o que é mais velho que isso é planejamento
+ * abandonado, e continua no calendário como "Agendado", à espera do
+ * "Publicar agora" — visível, não perdido.
+ */
+export const CAMPAIGN_AUTOPUBLISH_GRACE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Itens vencidos que o tick deve publicar: agendados, do canal que publica
+ * sozinho, com a hora já passada e dentro da janela de atraso. Cancelado e
+ * publicado ficam de fora pelo próprio `status`.
+ *
+ * `prisma` cru, sem `scopedPrisma`: o tick é do processo, não de uma empresa —
+ * ele varre todos os tenants, e cada item carrega o `companyId` que a
+ * publicação usa dali em diante. Mesmo padrão do tick dos agendados do feed.
+ */
+export function listDueCampaignPosts(now: Date): Promise<CampaignPostWithRelations[]> {
+  return prisma.campaignPost.findMany({
+    where: {
+      status: 'SCHEDULED',
+      channel: 'MURAL',
+      scheduledFor: {
+        lte: now,
+        gte: new Date(now.getTime() - CAMPAIGN_AUTOPUBLISH_GRACE_MS),
+      },
+    },
+    include: postInclude,
+    orderBy: { scheduledFor: 'asc' },
+  })
+}
+
+/**
+ * Apaga o item de vez — o que `cancelCampaignPost` deliberadamente não faz.
+ *
+ * Os dois existem porque respondem a coisas diferentes. Cancelar é registro: "a
+ * campanha ia ter este comunicado e desistimos", e é o que mantém o histórico
+ * editorial do mês legível. Excluir é para o que nunca deveria ter entrado —
+ * teste, engano, item duplicado — e que, riscado no calendário, só polui a
+ * grade de quem for planejar o mês seguinte.
+ *
+ * Publicado não se exclui: o comunicado está no Mural, e apagar só o item do
+ * calendário perderia o registro editorial de algo que a empresa inteira viu. O
+ * caminho é excluir o post no Mural, que já derruba o item junto (ver o
+ * comentário de `deletePost`, em `corporate-mural-service.ts`).
+ */
+export async function deleteCampaignPost(actor: CampaignActor, id: string): Promise<void> {
+  const before = await findPostOrThrow(actor, id)
+  if (before.status === 'PUBLISHED') {
+    throw new CampaignError(
+      'Comunicado já publicado não pode ser excluído aqui. Exclua o post no Mural — o item do calendário sai junto.',
+      409,
+    )
+  }
+
+  const db = scopedPrisma(actor.companyId)
+  await db.$transaction(async (tx) => {
+    await tx.campaignPost.delete({ where: { id } })
+    await recordAuditLog({
+      actorId: actor.id,
+      entityType: 'CampaignPost',
+      entityId: id,
+      action: 'DELETE',
+      before,
+      companyId: actor.companyId,
+      tx: tx as unknown as Prisma.TransactionClient,
+    })
   })
 }
 

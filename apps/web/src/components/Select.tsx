@@ -1,8 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Icon } from './Icon'
 import { foldText } from '../lib/text'
 
-export type SelectOption = { value: string; label: string }
+/**
+ * `disabled` marca a opção que existe mas não pode ser escolhida AGORA — o
+ * atalho "Hoje" na aba Clima, cujo recorte a API recusa. Some do teclado e do
+ * clique, mas continua visível: escondê-la faria a opção sumir sem explicação
+ * de uma aba para a outra.
+ */
+export type SelectOption = { value: string; label: string; disabled?: boolean }
 
 interface SelectProps {
   options: SelectOption[]
@@ -13,6 +19,18 @@ interface SelectProps {
   searchable?: boolean
   disabled?: boolean
   className?: string
+}
+
+/**
+ * Próximo índice navegável a partir de `from`, na direção `step`. Pular a opção
+ * desabilitada no teclado é o que impede o cursor de encalhar nela — parar em
+ * cima de algo que o Enter ignora parece travamento.
+ */
+function nextEnabled(options: SelectOption[], from: number, step: number): number {
+  for (let i = from + step; i >= 0 && i < options.length; i += step) {
+    if (!options[i]?.disabled) return i
+  }
+  return from
 }
 
 const triggerCls =
@@ -29,6 +47,11 @@ export function Select({
   className = '',
 }: SelectProps) {
   const [open, setOpen] = useState(false)
+  // Painel ancorado à direita do gatilho quando abrir à esquerda estouraria a
+  // janela. Medido, e não decidido por classe fixa: o mesmo Select aparece no
+  // canto direito do cabeçalho (Período/Setor) e no meio de formulários.
+  const [alignRight, setAlignRight] = useState(false)
+  const panelRef = useRef<HTMLDivElement>(null)
   const [query, setQuery] = useState('')
   const [highlight, setHighlight] = useState(0)
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -68,7 +91,24 @@ export function Select({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // O painel cresce até caber a opção mais longa, então pode passar da borda da
+  // janela — aí ele vira para a esquerda. Antes da pintura (`useLayoutEffect`)
+  // para o usuário não ver o salto, e sempre a partir do alinhamento à esquerda,
+  // senão a medição do quadro seguinte leria a posição já corrigida e ficaria
+  // presa nela.
+  useLayoutEffect(() => {
+    if (!open) {
+      setAlignRight(false)
+      return
+    }
+    const panel = panelRef.current
+    if (!panel) return
+    const rect = panel.getBoundingClientRect()
+    if (rect.right > window.innerWidth - 8) setAlignRight(true)
+  }, [open])
+
   function choose(option: SelectOption) {
+    if (option.disabled) return
     onChange(option.value)
     setOpen(false)
   }
@@ -88,10 +128,10 @@ export function Select({
       triggerRef.current?.focus()
     } else if (event.key === 'ArrowDown') {
       event.preventDefault()
-      setHighlight((h) => Math.min(h + 1, filtered.length - 1))
+      setHighlight((h) => nextEnabled(filtered, h, 1))
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
-      setHighlight((h) => Math.max(h - 1, 0))
+      setHighlight((h) => nextEnabled(filtered, h, -1))
     } else if (event.key === 'Enter') {
       event.preventDefault()
       const opt = filtered[highlight]
@@ -128,7 +168,18 @@ export function Select({
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-md border border-outline-variant/60 bg-surface-container-high shadow-lg">
+        <div
+          ref={panelRef}
+          // `min-w-full w-max`: nunca mais estreito que o gatilho, e largo o
+          // bastante para a opção inteira. Preso à largura do gatilho, "Últimos
+          // 7 dias" quebrava em duas linhas e ainda ficava atrás da barra de
+          // rolagem. O teto (`max-w-xs`, 20rem) evita que um setor de nome longo
+          // vire um painel do tamanho da tela; quem cuida da borda da janela é o
+          // `alignRight`.
+          className={`absolute top-full z-20 mt-1 w-max min-w-full max-w-xs overflow-hidden rounded-md border border-outline-variant/60 bg-surface-container-high shadow-lg ${
+            alignRight ? 'right-0' : 'left-0'
+          }`}
+        >
           {canSearch && (
             <input
               ref={searchRef}
@@ -142,7 +193,10 @@ export function Select({
               className="w-full border-b border-outline-variant/40 bg-transparent px-3 py-2 text-body-sm text-on-surface outline-none placeholder:text-on-surface-variant"
             />
           )}
-          <ul role="listbox" id={listId} className="max-h-64 overflow-y-auto py-1">
+          {/* `overflow-x-hidden` explícito: com overflow-y em `auto` e o eixo x
+              em `visible`, o CSS promove o x para `auto` — era daí que vinha a
+              barra de rolagem horizontal no rodapé do painel. */}
+          <ul role="listbox" id={listId} className="max-h-64 overflow-y-auto overflow-x-hidden py-1">
             {filtered.length === 0 ? (
               <li className="px-3 py-2 text-body-sm text-on-surface-variant">Nenhum resultado</li>
             ) : (
@@ -155,7 +209,8 @@ export function Select({
                     id={`${listId}-opt-${index}`}
                     role="option"
                     aria-selected={isSelected}
-                    onMouseEnter={() => setHighlight(index)}
+                    aria-disabled={option.disabled || undefined}
+                    onMouseEnter={() => !option.disabled && setHighlight(index)}
                     onClick={() => choose(option)}
                     ref={
                       isHighlighted
@@ -164,8 +219,12 @@ export function Select({
                           }
                         : undefined
                     }
-                    className={`flex cursor-pointer items-center gap-sm px-3 py-2 text-body-sm ${
-                      isHighlighted ? 'bg-primary/10 text-primary' : 'text-on-surface'
+                    className={`flex items-center gap-sm px-3 py-2 text-body-sm ${
+                      option.disabled
+                        // Token mais apagado, não opacidade: alfa em cor de
+                        // texto reprova contraste no tema claro (brand-alpha).
+                        ? 'cursor-not-allowed text-outline'
+                        : `cursor-pointer ${isHighlighted ? 'bg-primary/10 text-primary' : 'text-on-surface'}`
                     }`}
                   >
                     <Icon name="check" className={`text-[16px] ${isSelected ? 'opacity-100' : 'opacity-0'}`} />

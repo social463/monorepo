@@ -10,6 +10,7 @@ import {
   MIN_FEEDBACK_FIELD_LENGTH,
   FEEDBACK_CATEGORIES,
   FEEDBACK_CATEGORY_LABELS,
+  FEEDBACK_MESSAGE_MAX_LENGTH,
   CUSTOM_CATEGORY_MAX_LENGTH,
   MAX_RECOGNITION_CATEGORIES_PER_FEEDBACK,
 } from '@legends/shared'
@@ -43,7 +44,25 @@ function readGuidePreference(): boolean {
  * A conversa entre os dois cards é a query `['feedbacks', targetId]`: criar
  * invalida esse prefixo e a lista recarrega sozinha, mesmo em outro componente.
  */
-export function FeedbackComposer({ targetId, className = '' }: { targetId: string; className?: string }) {
+/**
+ * Quem pode escrever feedback para quem. Exportado porque o card de
+ * aniversariantes da Home precisa da MESMA regra para decidir se mostra o botão
+ * de parabéns — sem isso, o botão abriria um diálogo que não renderiza nada.
+ */
+export function canWriteFeedbackTo(
+  user: { id?: string; role?: string } | null | undefined,
+  targetId: string,
+): boolean {
+  return Boolean(user) && user?.role !== 'ADMIN' && user?.id !== targetId
+}
+
+export function FeedbackComposer({
+  targetId,
+  className = '',
+}: {
+  targetId: string
+  className?: string
+}) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
@@ -53,7 +72,7 @@ export function FeedbackComposer({ targetId, className = '' }: { targetId: strin
   const [error, setError] = useState<string | null>(null)
   const [guideOn, setGuideOn] = useState(readGuidePreference)
 
-  const canWrite = Boolean(user) && user?.role !== 'ADMIN' && user?.id !== targetId
+  const canWrite = canWriteFeedbackTo(user, targetId)
 
   const categoriesQuery = useQuery({
     queryKey: ['categories'],
@@ -208,10 +227,13 @@ export function FeedbackComposer({ targetId, className = '' }: { targetId: strin
       <textarea
         className="min-h-[120px] rounded-md border border-outline-variant/60 bg-surface-container-highest px-sm py-2 text-body-sm text-on-surface outline-none focus:border-primary"
         value={message}
-        onChange={(e) => setMessage(e.target.value)}
+        onChange={(e) => setMessage(e.target.value.slice(0, FEEDBACK_MESSAGE_MAX_LENGTH))}
         placeholder="Escreva um feedback específico e construtivo…"
         aria-label="Seu feedback"
       />
+      <span className="text-right font-label text-label-sm text-on-surface-variant">
+        {message.length}/{FEEDBACK_MESSAGE_MAX_LENGTH}
+      </span>
 
       {error && (
         <p role="alert" className="flex items-center gap-sm text-body-sm text-error">

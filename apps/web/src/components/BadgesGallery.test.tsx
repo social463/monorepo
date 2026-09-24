@@ -22,8 +22,8 @@ function setupFetch() {
     if (path === '/badges') {
       return Promise.resolve({
         badges: [
-          { id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 em colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', requirement: 'Receba 5 votos em Colaboração', progress: { current: 5, target: 5 } },
-          { id: 'b2', slug: 'reconhecido', name: 'Reconhecido', description: '10 no total', kind: 'IMPACT', iconKey: 'star', threshold: 10, categorySlug: null, requirement: 'Receba 10 votos no total', progress: { current: 4, target: 10 } },
+          { id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 em colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, requirement: 'Receba 5 votos em Colaboração', progress: { current: 5, target: 5 } },
+          { id: 'b2', slug: 'reconhecido', name: 'Reconhecido', description: '10 no total', kind: 'IMPACT', iconKey: 'star', threshold: 10, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, requirement: 'Receba 10 votos no total', progress: { current: 4, target: 10 } },
         ],
       })
     }
@@ -33,14 +33,18 @@ function setupFetch() {
           {
             id: 'ub1',
             awardedAt: '2026-06-01T00:00:00.000Z',
-            badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 em colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao' },
+            badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 em colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null },
           },
         ],
       })
     }
+    if (path === '/me/badge-claims') return Promise.resolve({ claims: claims })
     return Promise.reject(new Error(`unexpected ${path}`))
   })
 }
+
+/** Reivindicações que o mock devolve — cada teste ajusta antes de renderizar. */
+let claims: unknown[] = []
 
 function renderGallery() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -56,6 +60,7 @@ function renderGallery() {
 describe('BadgesGallery', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    claims = []
     setupFetch()
   })
 
@@ -96,8 +101,8 @@ describe('BadgesGallery', () => {
       if (path === '/badges') {
         return Promise.resolve({
           badges: [
-            { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'x', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', requirement: 'r', progress: null },
-            { id: 'b2', slug: 'reconhecido', name: 'Reconhecido', description: 'y', kind: 'IMPACT', iconKey: 'star', threshold: 10, categorySlug: null, requirement: 'r', progress: null },
+            { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'x', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, requirement: 'r', progress: null },
+            { id: 'b2', slug: 'reconhecido', name: 'Reconhecido', description: 'y', kind: 'IMPACT', iconKey: 'star', threshold: 10, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, requirement: 'r', progress: null },
           ],
         })
       }
@@ -110,5 +115,96 @@ describe('BadgesGallery', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Categoria' }))
     expect(screen.getByText('Conector do Time')).toBeInTheDocument()
     expect(screen.queryByText('Reconhecido')).toBeNull()
+  })
+})
+
+/**
+ * Documento 4, seção 11.2: nem todo selo é contável pelo sistema, e o único
+ * caminho para um selo de comportamento era pedir no Teams.
+ */
+describe('BadgesGallery — reivindicação', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    claims = []
+    setupFetch()
+  })
+
+  it('oferece "Reivindicar" só no selo que a pessoa ainda não tem', async () => {
+    renderGallery()
+
+    await screen.findByText('Conector do Time')
+    // "Conector do Time" está conquistado; "Reconhecido" não.
+    expect(screen.getAllByRole('button', { name: 'Reivindicar' })).toHaveLength(1)
+  })
+
+  it('solicitação em análise ocupa o lugar do botão', async () => {
+    claims = [
+      {
+        id: 'c1',
+        badge: { id: 'b2', slug: 'reconhecido', name: 'Reconhecido' },
+        user: { id: 'u1', name: 'Ana' },
+        story: 'Fiz.',
+        attachmentUrl: null,
+        attachmentKind: null,
+        link: null,
+        status: 'PENDING',
+        rejectionReason: null,
+        reviewedBy: null,
+        reviewedAt: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    renderGallery()
+
+    expect(await screen.findByText(/Solicitação em análise/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reivindicar' })).toBeNull()
+  })
+
+  it('recusada volta a oferecer o botão, com o motivo à vista', async () => {
+    claims = [
+      {
+        id: 'c1',
+        badge: { id: 'b2', slug: 'reconhecido', name: 'Reconhecido' },
+        user: { id: 'u1', name: 'Ana' },
+        story: 'Fiz.',
+        attachmentUrl: null,
+        attachmentKind: null,
+        link: null,
+        status: 'REJECTED',
+        rejectionReason: 'Falta comprovação.',
+        reviewedBy: null,
+        reviewedAt: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    renderGallery()
+
+    expect(await screen.findByText(/Falta comprovação\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reivindicar de novo' })).toBeInTheDocument()
+  })
+
+  it('abre o modal com os textos oficiais', async () => {
+    renderGallery()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Reivindicar' }))
+
+    const modal = screen.getByRole('dialog')
+    expect(modal).toHaveAccessibleName('Reivindicar "Reconhecido"')
+    expect(
+      screen.getByText(
+        'Conte como você conquistou este emblema. Sua solicitação será analisada pelo time de Gente e Gestão.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByPlaceholderText('Explique sua conquista: projeto, comportamento, resultado…'),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Anexo — print, foto ou certificado (imagem ou PDF)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Ou cole um link (opcional)')).toBeInTheDocument()
+
+    // Relato é obrigatório: sem ele o envio fica travado.
+    const enviar = screen.getByRole('button', { name: 'Enviar solicitação' })
+    expect(enviar).toBeDisabled()
+    await userEvent.type(screen.getByLabelText('Relato da conquista'), 'Liderei a virada.')
+    expect(enviar).toBeEnabled()
   })
 })

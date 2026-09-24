@@ -10,7 +10,15 @@ import {
   OFFICE_ANNOTATION_BATCH_MS,
   OFFICE_NEARBY_MESSAGE_MAX_LENGTH,
   ROOM_AUDIO_START_COOLDOWN_MS,
+  PAINTBALL_COOLDOWN_MS,
+  PAINTBALL_MAX_SPLATS,
+  PAINTBALL_RANGE,
+  BODY_SHOT_RANGE,
+  PAINT_SPLAT_TTL_MS,
+  paintballColorFor,
   isWalkable,
+  BODY_SPEED,
+  type BodyInput,
   type OfficeServerMessage,
   type Direction,
   type ActiveOfficeMapDTO,
@@ -64,11 +72,44 @@ function shortestPath(from: { x: number; y: number }, to: { x: number; y: number
   throw new Error(`sem caminho andável de ${JSON.stringify(from)} até ${JSON.stringify(to)}`)
 }
 
-/** Anda uma pessoa até o tile alvo, um passo por vez — mesma API que o cliente usaria. */
+/** O centro, em PIXEL, de um tile — onde kart estacionado e spawn caem. */
+function tileCenter(tile: { x: number; y: number }): { x: number; y: number } {
+  return { x: tile.x * 32 + 16, y: tile.y * 32 + 16 }
+}
+
+/**
+ * Dirige o kart para a FRENTE por alguns ticks.
+ *
+ * De kart, `dy` deixou de ser direção e virou acelerador/freio — é a mesma
+ * pilotagem da corrida. `__walkForTest`, que fala em direções, não serve aqui:
+ * mandar 'down' com um kart é pisar no freio.
+ */
+function drive(hub: OfficeHub, socket: OfficeSocket, userId: string, ticks: number): void {
+  for (let i = 0; i < ticks; i += 1) {
+    hub.applyInput(socket, userId, { seq: 1000 + i, dx: 0, dy: -1, dtMs: 33 })
+    hub.__tickForTest(33)
+  }
+}
+
+/** O TILE que uma posição em pixel ocupa — o occupant fala pixel desde o movimento livre. */
+function tileOf(point: { x: number; y: number }): { x: number; y: number } {
+  return { x: Math.floor(point.x / 32), y: Math.floor(point.y / 32) }
+}
+
+/**
+ * Anda uma pessoa até o tile alvo, um tile por vez — atravessando portas de
+ * verdade, que é o que dispara a cascata de sala.
+ *
+ * **Não força a chegada.** Uma versão anterior deste helper teleportava para o
+ * alvo quando o caminho não completava, e isso anulava em silêncio justamente os
+ * testes que importam: os de RECUSA. Quem é barrado numa sala trancada tem de
+ * parar na porta, e um helper que "conserta" isso faz o teste passar provando o
+ * contrário do que ele afirma.
+ */
 function walkTo(hub: OfficeHub, socket: OfficeSocket, userId: string, target: { x: number; y: number }): void {
   const occupant = hub.occupants().find((o) => o.userId === userId)!
-  for (const dir of shortestPath({ x: occupant.x, y: occupant.y }, target)) {
-    hub.move(socket, userId, dir)
+  for (const dir of shortestPath(tileOf(occupant), target)) {
+    hub.__walkForTest(socket, userId, dir)
   }
 }
 
@@ -78,6 +119,8 @@ const ROOM1_INSIDE = { x: 20, y: 12 }
 const ROOM1_OUTSIDE = { x: 11, y: 12 }
 /** Tile andável logo antes da sala: um passo pra direita já é dentro dela. */
 const ROOM1_DOOR = { x: 16, y: 12 }
+/** Um pixel dentro do primeiro tile da sala 1 — de raspão, sem comitar o tile. */
+const ROOM1_INSIDE_EDGE_X = 17 * 32 + 1
 
 const ana = { id: 'ana', name: 'Ana', photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null }
 const bruno = { id: 'bruno', name: 'Bruno', photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null }
@@ -151,6 +194,10 @@ function runtimeWithKarts(
 let hub: OfficeHub
 
 beforeEach(() => {
+  // Descarta o hub do caso anterior ANTES de criar o novo: desde o movimento
+  // livre ele tem um `setInterval`, e um hub abandonado com o laço vivo
+  // continua simulando gente que já saiu — atravessando para o caso seguinte.
+  hub?.reset()
   hub = new OfficeHub()
   hub.configure(legacyOfficeRuntimeFixture())
 })
@@ -165,7 +212,7 @@ describe('join', () => {
 
     const [occupant] = hub.occupants()
     expect(occupant.userId).toBe('ana')
-    expect(OFFICE_SPAWN_TILES).toContainEqual({ x: occupant.x, y: occupant.y })
+    expect(OFFICE_SPAWN_TILES).toContainEqual(tileOf(occupant))
   })
 
   it('avisa quem já estava lá, e o welcome de quem chega já traz os outros', () => {
@@ -221,166 +268,195 @@ describe('join', () => {
   })
 })
 
-describe('move', () => {
-  it('anda para um tile livre e faz broadcast', () => {
+describe('movimento livre', () => {
+  const TILE = 32
+  const tileOf = (o: { x: number; y: number }) => ({
+    x: Math.floor(o.x / TILE),
+    y: Math.floor(o.y / TILE),
+  })
+
+  it('anda para onde o input aponta, e o snapshot leva a posição', () => {
     const a = fakeSocket()
     const b = fakeSocket()
     hub.join(a.socket, ana)
     hub.join(b.socket, bruno)
-    const before = hub.occupants().find((o) => o.userId === 'ana')!
-    // escolhe uma direção que sabemos ser livre a partir do spawn
-    const dir = isWalkable(before.x, before.y - 1) ? 'up' : 'down'
-    const expectedY = dir === 'up' ? before.y - 1 : before.y + 1
+    const antes = hub.occupants().find((o) => o.userId === 'ana')!
+    const tile = tileOf(antes)
+    const dir = isWalkable(tile.x, tile.y - 1) ? 'up' : 'down'
 
-    hub.move(a.socket, 'ana', dir)
+    hub.__walkForTest(a.socket, 'ana', dir)
 
-    const after = hub.occupants().find((o) => o.userId === 'ana')!
-    expect(after).toMatchObject({ x: before.x, y: expectedY, dir })
-    expect(b.sent).toContainEqual({ type: 'moved', userId: 'ana', x: before.x, y: expectedY, dir, sprint: false })
+    const depois = hub.occupants().find((o) => o.userId === 'ana')!
+    // Um tile de deslocamento, agora medido em PIXEL: a posição é contínua, e
+    // exigir o centro exato do tile seria exigir de volta a grade.
+    expect(Math.abs(depois.y - antes.y)).toBeCloseTo(TILE, 5)
+    expect(depois.x).toBeCloseTo(antes.x, 5)
+    expect(depois.dir).toBe(dir)
+
+    const snapshot = b.sent.filter((m) => m.type === 'snapshot').at(-1) as
+      | { players: Array<{ userId: string; x: number; y: number; dir: string; seq: number }> }
+      | undefined
+    expect(snapshot?.players.find((p) => p.userId === 'ana')).toMatchObject({
+      x: depois.x,
+      y: depois.y,
+      dir,
+    })
   })
 
-  it('não atravessa parede: não move e devolve sync só para quem tentou', () => {
-    vi.useFakeTimers()
-    try {
-      const a = fakeSocket()
-      const b = fakeSocket()
-      hub.join(a.socket, ana)
-      hub.join(b.socket, bruno)
-      const before = hub.occupants().find((o) => o.userId === 'ana')!
+  it('não atravessa parede — desliza e para nela', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    const antes = hub.occupants().find((o) => o.userId === 'ana')!
 
-      // Anda para a esquerda até bater na parede da borda. O relógio avança entre
-      // os passos para o rate limit repor tokens — quem está sob teste aqui é a
-      // colisão, não o limite (um passo bloqueado também gasta token).
-      for (let i = 0; i < 40; i += 1) {
-        hub.move(a.socket, 'ana', 'left')
-        vi.advanceTimersByTime(200)
-      }
+    for (let i = 0; i < 40; i += 1) hub.__walkForTest(a.socket, 'ana', 'left')
 
-      const after = hub.occupants().find((o) => o.userId === 'ana')!
-      expect(after.y).toBe(before.y)
-      expect(after.x).toBeGreaterThan(0)
-      // encostou mesmo na parede: o tile seguinte à esquerda é sólido
-      expect(isWalkable(after.x - 1, after.y)).toBe(false)
-      expect(a.sent).toContainEqual({ type: 'sync', x: after.x, y: after.y, dir: 'left' })
-      // o sync é privado: ninguém mais recebe
-      expect(b.sent.some((m) => m.type === 'sync')).toBe(false)
-    } finally {
-      vi.useRealTimers()
-    }
+    const depois = hub.occupants().find((o) => o.userId === 'ana')!
+    expect(depois.y).toBeCloseTo(antes.y, 5)
+    expect(depois.x).toBeGreaterThan(0)
+    // Encostou de fato: o tile à esquerda do corpo é sólido.
+    expect(isWalkable(tileOf(depois).x - 1, tileOf(depois).y)).toBe(false)
   })
 
-  it('ignora move de socket desconhecido', () => {
-    const ghost = fakeSocket()
-    hub.move(ghost.socket, 'ana', 'up')
+  it('ignora input de socket desconhecido', () => {
+    const fantasma = fakeSocket()
+    hub.applyInput(fantasma.socket, 'ana', { seq: 1, dx: 1, dy: 0, dtMs: 33 })
     expect(hub.occupants()).toHaveLength(0)
-    expect(ghost.sent).toHaveLength(0)
+    expect(fantasma.sent).toHaveLength(0)
   })
 
-  it('descarta o excesso quando alguém spamma move (rate limit)', () => {
-    vi.useFakeTimers()
-    try {
-      const a = fakeSocket()
-      hub.join(a.socket, ana)
-      const spawn = hub.occupants()[0]
-      // 100 tentativas no mesmo instante: no máximo o burst passa
-      for (let i = 0; i < 100; i += 1) {
-        hub.move(a.socket, 'ana', 'up')
-        hub.move(a.socket, 'ana', 'down')
-      }
-      const moves = a.sent.filter((m) => m.type === 'moved')
-      expect(moves.length).toBeLessThanOrEqual(20)
-      expect(moves.length).toBeGreaterThan(0)
-      // e o personagem continua num tile válido
-      const after = hub.occupants()[0]
-      expect(isWalkable(after.x, after.y)).toBe(true)
-      expect(after.x).toBe(spawn.x)
-    } finally {
-      vi.useRealTimers()
+  it('ignora input fora de ordem — passo velho não volta no tempo', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.__walkForTest(a.socket, 'ana', 'right')
+    const depoisDoPasso = hub.occupants()[0].x
+
+    // `seq` 1 já foi processado várias vezes; um pacote atrasado com seq baixo
+    // não pode reabrir o passado.
+    hub.applyInput(a.socket, 'ana', { seq: 1, dx: -1, dy: 0, dtMs: 50 })
+    expect(hub.occupants()[0].x).toBe(depoisDoPasso)
+  })
+
+  it('não dá para comprar velocidade inflando o próprio dtMs', () => {
+    // A proteção que substituiu o token bucket do `move` de grade. O `dtMs` vem
+    // do CLIENTE; o servidor credita tempo pelo relógio DELE e debita por input
+    // aplicado, então quem manda mais tempo do que viveu vê o excedente ficar
+    // para o tick seguinte — não anda mais que os outros.
+    const honesto = fakeSocket()
+    const trapaceiro = fakeSocket()
+    hub.join(honesto.socket, ana)
+    hub.join(trapaceiro.socket, bruno)
+    const partidaA = hub.occupants().find((o) => o.userId === 'ana')!.x
+    const partidaB = hub.occupants().find((o) => o.userId === 'bruno')!.x
+
+    // Mesmo tick de simulação para os dois; o trapaceiro pede 20× mais tempo.
+    for (let seq = 1; seq <= 10; seq += 1) {
+      hub.applyInput(honesto.socket, 'ana', { seq, dx: 1, dy: 0, dtMs: 33 })
+      hub.applyInput(trapaceiro.socket, 'bruno', { seq, dx: 1, dy: 0, dtMs: 660 })
+      hub.__tickForTest(33)
     }
+
+    const andouHonesto = Math.abs(hub.occupants().find((o) => o.userId === 'ana')!.x - partidaA)
+    const andouTrapaceiro = Math.abs(hub.occupants().find((o) => o.userId === 'bruno')!.x - partidaB)
+    // Alguma folga existe de propósito (o banco tolera jitter), mas não 20×.
+    expect(andouTrapaceiro).toBeLessThan(andouHonesto * 3)
   })
 
-  it('duas abas da mesma pessoa dividem um único orçamento de movimento (sem multiplicar o rate limit)', () => {
-    vi.useFakeTimers()
-    try {
-      const tab1 = fakeSocket()
-      const tab2 = fakeSocket()
-      hub.join(tab1.socket, ana)
-      hub.join(tab2.socket, ana)
+  it('a fila de pendentes tem teto — enfileirar não vira estoque de movimento', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    const partida = hub.occupants()[0].x
 
-      // Alterna entre as duas abas do MESMO usuário. Se o bucket fosse por
-      // socket (bug), cada aba teria seu próprio orçamento de 20 e o total
-      // aceito passaria de 20 (até 40). Com o bucket por userId, o total
-      // aceito não pode passar do burst (20), não importa por qual aba.
-      for (let i = 0; i < 100; i += 1) {
-        hub.move(tab1.socket, 'ana', 'up')
-        hub.move(tab2.socket, 'ana', 'down')
-      }
-
-      // O broadcast de 'moved' vai para todos os sockets do occupant —
-      // então tab1 recebe TODOS os moves aceitos, vindos de qualquer aba.
-      const moves = tab1.sent.filter((m) => m.type === 'moved')
-      expect(moves.length).toBeLessThanOrEqual(20)
-      expect(moves.length).toBeGreaterThan(0)
-    } finally {
-      vi.useRealTimers()
+    // Muito mais input do que cabe, tudo no mesmo instante.
+    for (let seq = 1; seq <= 200; seq += 1) {
+      hub.applyInput(a.socket, 'ana', { seq, dx: 1, dy: 0, dtMs: 50 })
     }
+    hub.__tickForTest(50)
+
+    // Um tick só credita um tick de tempo: o resto fica na fila (e a fila tem
+    // teto), então o deslocamento é o de um passo, não o de duzentos.
+    const andou = Math.abs(hub.occupants()[0].x - partida)
+    expect(andou).toBeLessThan(TILE * 2)
   })
 
-  it('propaga sprint:true no broadcast quando o passo veio com sprint', () => {
+  it('duas abas da mesma pessoa movem UM corpo só', () => {
+    const tab1 = fakeSocket()
+    const tab2 = fakeSocket()
+    hub.join(tab1.socket, ana)
+    hub.join(tab2.socket, ana)
+    const partida = hub.occupants()[0].x
+
+    // Alternando as abas: se cada uma tivesse orçamento próprio, o corpo andaria
+    // o dobro. O banco de tempo é do USUÁRIO, não do socket.
+    for (let seq = 1; seq <= 20; seq += 2) {
+      hub.applyInput(tab1.socket, 'ana', { seq, dx: 1, dy: 0, dtMs: 33 })
+      hub.applyInput(tab2.socket, 'ana', { seq: seq + 1, dx: 1, dy: 0, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
+
+    const andou = Math.abs(hub.occupants()[0].x - partida)
+    const sozinho = (BODY_SPEED * 10 * 33) / 1000
+    expect(andou).toBeLessThan(sozinho * 1.5)
+  })
+
+  it('sprint viaja no snapshot — é o que faz as pernas acompanharem', () => {
     const a = fakeSocket()
     const b = fakeSocket()
     hub.join(a.socket, ana)
     hub.join(b.socket, bruno)
-    const before = hub.occupants().find((o) => o.userId === 'ana')!
-    const dir = isWalkable(before.x, before.y - 1) ? 'up' : 'down'
+    const tile = tileOf(hub.occupants().find((o) => o.userId === 'ana')!)
+    const dir = isWalkable(tile.x, tile.y - 1) ? 'up' : 'down'
 
-    hub.move(a.socket, 'ana', dir, true)
+    hub.__walkForTest(a.socket, 'ana', dir, true)
 
-    expect(b.sent).toContainEqual(
-      expect.objectContaining({ type: 'moved', userId: 'ana', sprint: true }),
-    )
+    const snapshot = b.sent.filter((m) => m.type === 'snapshot').at(-1) as
+      | { players: Array<{ userId: string; sprint?: boolean }> }
+      | undefined
+    expect(snapshot?.players.find((p) => p.userId === 'ana')?.sprint).toBe(true)
   })
 
-  it('passo sem sprint propaga sprint:false explícito no broadcast', () => {
+  it('reconectar não congela o personagem para sempre', () => {
+    // O escritório GUARDA a presença por 45s, então reconectar reaproveita a
+    // mesma entrada — com o `lastSeq` alto. O cliente, esse, cria um preditor
+    // novo começando do zero. Sem o servidor dizer de onde retomar, todo input
+    // do cliente novo chega com `seq <= lastSeq` e é descartado como atrasado:
+    // a pessoa anda até cair a conexão e não sai mais do lugar, sem nada na
+    // tela explicando por quê.
     const a = fakeSocket()
-    const b = fakeSocket()
     hub.join(a.socket, ana)
-    hub.join(b.socket, bruno)
-    const before = hub.occupants().find((o) => o.userId === 'ana')!
-    const dir = isWalkable(before.x, before.y - 1) ? 'up' : 'down'
+    for (let seq = 1; seq <= 10; seq += 1) {
+      hub.applyInput(a.socket, 'ana', { seq, dx: 1, dy: 0, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
 
-    hub.move(a.socket, 'ana', dir)
+    hub.leave(a.socket, 'ana') // caiu, dentro do período de graça
+    const b = fakeSocket()
+    hub.join(b.socket, ana)
 
-    expect(b.sent).toContainEqual(
-      expect.objectContaining({ type: 'moved', userId: 'ana', sprint: false }),
-    )
+    // O `welcome` diz de onde retomar a numeração.
+    const welcome = b.sent.find((m) => m.type === 'welcome') as { seq?: number }
+    expect(welcome.seq).toBeGreaterThanOrEqual(10)
+
+    // E, retomando dali, o personagem volta a andar.
+    const partida = hub.occupantOf('ana')!.x
+    for (let i = 1; i <= 10; i += 1) {
+      hub.applyInput(b.socket, 'ana', { seq: welcome.seq! + i, dx: 1, dy: 0, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
+    expect(hub.occupantOf('ana')!.x).toBeGreaterThan(partida)
   })
 
-  it('corrida sustentada (passos a cada ~80ms) não esbarra no rate limit', () => {
-    vi.useFakeTimers()
-    try {
-      const a = fakeSocket()
-      hub.join(a.socket, ana)
-      const spawn = hub.occupants()[0]
-      // Alterna entre um passo e o oposto (volta pro spawn, sempre andável
-      // por definição) — mesma técnica defensiva do teste de colisão acima:
-      // escolhe uma direção livre a partir do spawn em vez de assumir 'up'.
-      const [forward, backward]: [Direction, Direction] = isWalkable(spawn.x, spawn.y - 1)
-        ? ['up', 'down']
-        : ['down', 'up']
-      // 30 passos a 80ms de intervalo = ~2.4s de corrida sustentada — bem
-      // acima do necessário pra provar que não é só o burst inicial segurando.
-      for (let i = 0; i < 30; i += 1) {
-        hub.move(a.socket, 'ana', i % 2 === 0 ? forward : backward, true)
-        vi.advanceTimersByTime(80)
-      }
-      const accepted = a.sent.filter((m) => m.type === 'moved').length
-      // Sustentado (12.5 passos/s efetivos) contra um teto de 20/s: nenhum
-      // passo deveria ser descartado pelo rate limit.
-      expect(accepted).toBe(30)
-    } finally {
-      vi.useRealTimers()
-    }
+  it('escritório parado não emite snapshot', () => {
+    // A supressão não é otimização: é o que devolve o custo zero da sala parada.
+    // Sem ela, trinta pessoas de pé custariam 600 pacotes por segundo para não
+    // dizer nada.
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.__walkForTest(a.socket, 'ana', 'right')
+    const depoisDeAndar = a.sent.filter((m) => m.type === 'snapshot').length
+
+    for (let i = 0; i < 20; i += 1) hub.__tickForTest(25)
+
+    expect(a.sent.filter((m) => m.type === 'snapshot')).toHaveLength(depoisDeAndar)
   })
 })
 
@@ -407,7 +483,7 @@ describe('face', () => {
       hub.join(a.socket, ana)
       const before = hub.occupants().find((o) => o.userId === 'ana')!
       for (let i = 0; i < 40; i += 1) {
-        hub.move(a.socket, 'ana', 'left')
+        hub.__walkForTest(a.socket, 'ana', 'left')
         vi.advanceTimersByTime(200)
       }
       const atWall = hub.occupants().find((o) => o.userId === 'ana')!
@@ -662,7 +738,7 @@ describe('leave', () => {
       hub.join(tab2.socket, ana)
 
       const occupant = hub.occupantOf('ana')
-      expect(OFFICE_SPAWN_TILES).toContainEqual({ x: occupant!.x, y: occupant!.y })
+      expect(OFFICE_SPAWN_TILES).toContainEqual(tileOf(occupant!))
     } finally {
       vi.useRealTimers()
     }
@@ -781,7 +857,7 @@ describe('setStatus', () => {
     ]
     const exit = exits.find(([, p]) => isWalkable(p.x, p.y))
     if (!exit) throw new Error('nenhum vizinho andável da zona privada para sair')
-    hub.move(socket, userId, exit[0])
+    hub.__walkForTest(socket, userId, exit[0])
   }
 
   // O passo que sai da sala é, ele próprio, sinal de atividade: sair andando
@@ -988,7 +1064,7 @@ describe('kart (#22253)', () => {
 
     hub.configure(runtimeWithKarts([{ id: 'kart-1', x: 5, y: 5 }], 1), false, true)
 
-    expect(hub.karts()).toEqual([{ id: 'kart-1', x: 5, y: 5, dir: 'up' }])
+    expect(hub.karts()).toEqual([{ id: 'kart-1', ...tileCenter({ x: 5, y: 5 }), dir: 'up' }])
   })
 
   it('preserva o piloto quando o decorRevision avança', () => {
@@ -1009,7 +1085,7 @@ describe('kart (#22253)', () => {
     expect(a.sent).toContainEqual(
       expect.objectContaining({
         type: 'welcome',
-        karts: [{ id: 'kart-1', x: 2, y: 1, dir: 'up' }],
+        karts: [{ id: 'kart-1', ...tileCenter({ x: 2, y: 1 }), dir: 'up' }],
       }),
     )
   })
@@ -1025,27 +1101,31 @@ describe('kart (#22253)', () => {
       type: 'kart-ride',
       userId: 'ana',
       active: true,
-      kart: { id: 'kart-1', x: 1, y: 1, dir: 'down', riderUserId: 'ana' },
+      kart: { id: 'kart-1', ...tileCenter({ x: 1, y: 1 }), dir: 'down', riderUserId: 'ana' },
     })
     expect(hub.occupantOf('ana')?.ridingKartId).toBe('kart-1')
 
-    hub.move(a.socket, 'ana', 'down')
+    // Dirige para a frente (o kart nasce apontado para onde a pessoa encara) e
+    // estaciona: o veículo fica ONDE O PILOTO PAROU, não num tile redondo.
+    drive(hub, a.socket, 'ana', 20)
+    const parouEm = hub.occupantOf('ana')!
     hub.rideKart(a.socket, 'ana')
+
     expect(b.sent).toContainEqual({
       type: 'kart-ride',
       userId: 'ana',
       active: false,
-      kart: { id: 'kart-1', x: 1, y: 2, dir: 'down' },
+      kart: { id: 'kart-1', x: parouEm.x, y: parouEm.y, dir: parouEm.dir },
     })
     expect(hub.occupantOf('ana')?.ridingKartId).toBeUndefined()
-    expect(hub.karts()).toEqual([{ id: 'kart-1', x: 1, y: 2, dir: 'down' }])
+    expect(hub.karts()).toEqual([{ id: 'kart-1', x: parouEm.x, y: parouEm.y, dir: parouEm.dir }])
   })
 
   it('quem entra depois recebe piloto e posição atual do veículo', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
     hub.rideKart(a.socket, 'ana')
-    hub.move(a.socket, 'ana', 'down')
+    hub.__walkForTest(a.socket, 'ana', 'down')
 
     const c = fakeSocket()
     hub.join(c.socket, carla)
@@ -1056,8 +1136,11 @@ describe('kart (#22253)', () => {
     expect(welcome.occupants.find((occupant) => occupant.userId === 'ana')).toMatchObject({
       ridingKartId: 'kart-1',
     })
+    // O kart montado acompanha o piloto em PIXEL, então a posição dele é a de
+    // Ana — não o centro de um tile.
+    const ana2 = hub.occupantOf('ana')!
     expect(welcome.karts).toEqual([
-      expect.objectContaining({ id: 'kart-1', x: 1, y: 2, riderUserId: 'ana' }),
+      expect.objectContaining({ id: 'kart-1', x: ana2.x, y: ana2.y, riderUserId: 'ana' }),
     ])
   })
 
@@ -1098,12 +1181,22 @@ describe('kart (#22253)', () => {
     const b = fakeSocket()
     hub.join(a.socket, ana)
     hub.join(b.socket, bruno)
+    // Cada um ao lado do SEU kart. Posicionar explicitamente porque o spawn é
+    // do servidor e pode pôr os dois perto do mesmo veículo — o que o teste
+    // afirma é que dois karts servem duas pessoas, não onde as pessoas nascem.
+    hub.__placeAtTileForTest('ana', 2, 1)
+    hub.__placeAtTileForTest('bruno', 1, 2)
 
     hub.rideKart(a.socket, 'ana')
     hub.rideKart(b.socket, 'bruno')
 
-    expect(hub.occupantOf('ana')?.ridingKartId).toBe('kart-a')
-    expect(hub.occupantOf('bruno')?.ridingKartId).toBe('kart-b')
+    // Qual dos dois cada um pega depende de onde estão (a escolha é pelo mais
+    // PRÓXIMO); o que importa é que os dois montam, em karts diferentes.
+    const deAna = hub.occupantOf('ana')?.ridingKartId
+    const deBruno = hub.occupantOf('bruno')?.ridingKartId
+    expect(deAna).toBeDefined()
+    expect(deBruno).toBeDefined()
+    expect(deAna).not.toBe(deBruno)
     expect(hub.karts().map((kart) => kart.riderUserId).sort()).toEqual(['ana', 'bruno'])
   })
 
@@ -1123,44 +1216,103 @@ describe('kart (#22253)', () => {
       type: 'kart-ride',
       userId: 'ana',
       active: false,
-      kart: { id: 'kart-1', x: 1, y: 1, dir: 'down' },
+      kart: { id: 'kart-1', ...tileCenter({ x: 1, y: 1 }), dir: 'down' },
     })
     expect(a.sent).toContainEqual({ type: 'karts-updated', karts: [] })
   })
 
-  it('kart estacionado bloqueia o próprio tile', () => {
+  it('de kart, o passo é o MESMO da corrida: acelera, ganha inércia e esterça', () => {
+    // Antes o kart era só "andar mais rápido" (`STEP_MS / 3`). Depois do
+    // movimento livre ele passou a ser a pilotagem da arena — e sem isso montar
+    // não fazia diferença nenhuma, porque o tick tratava todo mundo como
+    // pedestre.
     const a = fakeSocket()
     hub.join(a.socket, ana)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.rideKart(a.socket, 'ana')
+    expect(hub.occupantOf('ana')?.ridingKartId).toBeDefined()
 
-    hub.move(a.socket, 'ana', 'right')
+    // Acelerador a fundo.
+    for (let seq = 1; seq <= 30; seq += 1) {
+      hub.applyInput(a.socket, 'ana', { seq, dx: 0, dy: -1, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
+    const acelerado = hub.__speedForTest('ana')
+    expect(acelerado).toBeGreaterThan(BODY_SPEED)
 
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 1, dir: 'right' })
-    expect(a.sent).toContainEqual({ type: 'sync', x: 1, y: 1, dir: 'right' })
+    // Solta: a velocidade CAI, mas não zera no ato — é isso que é inércia, e é
+    // o que separa dirigir de andar.
+    hub.applyInput(a.socket, 'ana', { seq: 100, dx: 0, dy: 0, dtMs: 33 })
+    hub.__tickForTest(33)
+    const soltou = hub.__speedForTest('ana')
+    expect(soltou).toBeLessThan(acelerado)
+    expect(soltou).toBeGreaterThan(0)
   })
 
-  it('sync do passo recusado devolve o seq enviado no move', () => {
-    // O cliente prevê o passo antes do round-trip; sem o seq, um `sync` na
-    // mesma posição é indistinguível de um eco de parede já previsto, e a
-    // predição recusada fica pendurada (divergência que vira teleporte).
+  it('kart parado não gira no lugar — o esterço só morde andando', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
-    a.sent.length = 0
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.rideKart(a.socket, 'ana')
+    const rumo = hub.occupantOf('ana')?.heading
 
-    hub.move(a.socket, 'ana', 'right', false, 42)
+    for (let seq = 1; seq <= 20; seq += 1) {
+      hub.applyInput(a.socket, 'ana', { seq, dx: 1, dy: 0, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
 
-    expect(a.sent).toContainEqual({ type: 'sync', x: 1, y: 1, dir: 'right', seq: 42 })
+    expect(hub.occupantOf('ana')?.heading).toBe(rumo)
   })
 
-  it('ignora montaria de socket cujo dono não bate com o userId (anti-spoof)', () => {
+  it('desmontar devolve o corpo ao passo de pedestre', () => {
     const a = fakeSocket()
-    const b = fakeSocket()
     hub.join(a.socket, ana)
-    hub.join(b.socket, bruno)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.rideKart(a.socket, 'ana')
+    for (let seq = 1; seq <= 20; seq += 1) {
+      hub.applyInput(a.socket, 'ana', { seq, dx: 0, dy: -1, dtMs: 33 })
+      hub.__tickForTest(33)
+    }
+    hub.rideKart(a.socket, 'ana') // estaciona
 
-    a.sent.length = 0
-    b.sent.length = 0
-    hub.rideKart(a.socket, 'bruno')
-    expect(b.sent.some((m) => m.type === 'kart-ride')).toBe(false)
+    // Sem zerar, o corpo herdaria a velocidade do veículo e sairia deslizando a
+    // pé — e o rumo velho faria o kart seguinte nascer apontado para o lado.
+    expect(hub.__speedForTest('ana')).toBe(0)
+    expect(hub.occupantOf('ana')?.heading).toBeUndefined()
+  })
+
+  it('desmontar não prende o piloto em cima do kart', () => {
+    // O kart estaciona EXATAMENTE onde o piloto estava, e ele é um bloqueio: as
+    // duas caixas se sobrepõem. Sem tratar isso, todo passo depois de descer é
+    // recusado e a pessoa fica presa em cima do próprio veículo, sem nada na
+    // tela explicando por quê.
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.rideKart(a.socket, 'ana')
+    drive(hub, a.socket, 'ana', 20)
+    hub.rideKart(a.socket, 'ana') // estaciona embaixo de si
+
+    const preso = hub.occupantOf('ana')!
+    for (let i = 0; i < 6; i += 1) hub.__walkForTest(a.socket, 'ana', 'right')
+
+    expect(hub.occupantOf('ana')!.x).toBeGreaterThan(preso.x)
+  })
+
+  it('kart estacionado bloqueia o caminho', () => {
+    // O kart não está na grade de colisão: ela é rasterizada do documento
+    // publicado e memoizada, e um kart que alguém acabou de estacionar não
+    // entra nela. Quem o trata é `stepBodyAmongBlockers`, com a caixa dele.
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    const antes = hub.occupantOf('ana')!
+
+    // O kart da fixture está no tile à direita de Ana.
+    for (let i = 0; i < 3; i += 1) hub.__walkForTest(a.socket, 'ana', 'right')
+
+    const depois = hub.occupantOf('ana')!
+    expect(tileOf(depois)).toEqual(tileOf(antes))
+    expect(depois.dir).toBe('right')
   })
 
   it('estaciona o kart ao sair do escritório de vez', () => {
@@ -1171,18 +1323,20 @@ describe('kart (#22253)', () => {
       hub.join(a.socket, ana)
       hub.join(b.socket, bruno)
       hub.rideKart(a.socket, 'ana')
-      hub.move(a.socket, 'ana', 'down')
+      drive(hub, a.socket, 'ana', 20)
+      const parouEm = hub.occupantOf('ana')!
       b.sent.length = 0
       hub.leave(a.socket, 'ana')
       vi.advanceTimersByTime(RECONNECT_GRACE_MS + 1000)
 
+      // Estaciona ONDE O PILOTO ESTAVA — não devolve o veículo ao tile do editor.
       expect(b.sent).toContainEqual({
         type: 'kart-ride',
         userId: 'ana',
         active: false,
-        kart: { id: 'kart-1', x: 1, y: 2, dir: 'down' },
+        kart: { id: 'kart-1', x: parouEm.x, y: parouEm.y, dir: parouEm.dir },
       })
-      expect(hub.karts()).toEqual([{ id: 'kart-1', x: 1, y: 2, dir: 'down' }])
+      expect(hub.karts()).toEqual([{ id: 'kart-1', x: parouEm.x, y: parouEm.y, dir: parouEm.dir }])
     } finally {
       vi.useRealTimers()
     }
@@ -1976,6 +2130,34 @@ describe('raiseHand', () => {
   })
 })
 
+describe('pensamento', () => {
+  it('andar apaga o pensamento e AVISA todo mundo — o snapshot só carrega posição', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    const b = fakeSocket()
+    hub.join(b.socket, bruno)
+
+    hub.nearbyMessage(a.socket, 'ana', 'pensando', 'thought')
+    expect(hub.occupantOf('ana')?.thoughtText).toBe('pensando')
+
+    hub.__walkForTest(a.socket, 'ana', 'left')
+
+    expect(hub.occupantOf('ana')?.thoughtText).toBeUndefined()
+    for (const sent of [a.sent, b.sent]) {
+      expect(sent.filter((m) => m.type === 'thought-cleared' && m.userId === 'ana')).toHaveLength(1)
+    }
+  })
+
+  it('quem anda sem pensamento nenhum não gera aviso — seria um por tick', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+
+    hub.__walkForTest(a.socket, 'ana', 'left')
+
+    expect(a.sent.some((m) => m.type === 'thought-cleared')).toBe(false)
+  })
+})
+
 describe('high-five', () => {
   it('registra a última reação com o emoji enviado', () => {
     const a = fakeSocket()
@@ -2041,12 +2223,10 @@ describe('high-five', () => {
       hub.join(a.socket, ana)
       hub.join(b.socket, bruno)
 
-      const target = hub.occupantOf('ana') as { x: number; y: number }
+      // Em TILE: o high-five é vizinhança, não distância em pixel.
+      const target = tileOf(hub.occupantOf('ana') as { x: number; y: number })
       // Leva bruno até o tile à direita de ana.
-      const from = hub.occupantOf('bruno') as { x: number; y: number }
-      for (const dir of shortestPath(from, { x: target.x + 1, y: target.y })) {
-        hub.move(b.socket, 'bruno', dir)
-      }
+      walkTo(hub, b.socket, 'bruno', { x: target.x + 1, y: target.y })
       hub.face(a.socket, 'ana', 'right')
       hub.face(b.socket, 'bruno', 'left')
 
@@ -2056,12 +2236,14 @@ describe('high-five', () => {
       // em silêncio e os testes negativos abaixo passariam vazios por
       // acidente — esta asserção também é rede pro rate limit (`takeToken`),
       // cujo modo de falha hoje é silencioso.
-      expect(hub.occupantOf('bruno')).toMatchObject({ x: target.x + 1, y: target.y, dir: 'left' })
+      expect(tileOf(hub.occupantOf('bruno')!)).toEqual({ x: target.x + 1, y: target.y })
+      expect(hub.occupantOf('bruno')).toMatchObject({ dir: 'left' })
       // Mesma rede pra ana: `face()` retorna void e desiste calado se
       // `takeToken` falhar, e o `dir` default do join() é 'down' — sem esta
       // asserção, um face() de ana que falhasse silenciosamente deixaria os
       // testes puramente negativos passando vazios por acidente.
-      expect(hub.occupantOf('ana')).toMatchObject({ x: target.x, y: target.y, dir: 'right' })
+      expect(tileOf(hub.occupantOf('ana')!)).toEqual(target)
+      expect(hub.occupantOf('ana')).toMatchObject({ dir: 'right' })
 
       a.sent.length = 0
       b.sent.length = 0
@@ -2146,17 +2328,15 @@ describe('high-five', () => {
       hub.join(a.socket, ana)
       hub.join(b.socket, bruno)
 
-      const start = hub.occupantOf('ana') as { x: number; y: number }
+      const start = tileOf(hub.occupantOf('ana')!)
       // Bruno vai para dois tiles à direita de ana — perto, mas ainda não adjacente.
-      const brunoFrom = hub.occupantOf('bruno') as { x: number; y: number }
-      for (const dir of shortestPath(brunoFrom, { x: start.x + 2, y: start.y })) {
-        hub.move(b.socket, 'bruno', dir)
-      }
+      walkTo(hub, b.socket, 'bruno', { x: start.x + 2, y: start.y })
       hub.face(b.socket, 'bruno', 'left')
       // Pós-condição: garante que bruno realmente parou dois tiles à direita
       // de ana e virado pra ela — mesmo espírito da asserção em facePair(),
       // senão o move() de ana no fim do teste passaria vazio por acidente.
-      expect(hub.occupantOf('bruno')).toMatchObject({ x: start.x + 2, y: start.y, dir: 'left' })
+      expect(tileOf(hub.occupantOf('bruno')!)).toEqual({ x: start.x + 2, y: start.y })
+      expect(hub.occupantOf('bruno')).toMatchObject({ dir: 'left' })
 
       hub.nearbyMessage(b.socket, 'bruno', '👋', 'reaction')
       hub.nearbyMessage(a.socket, 'ana', '👋', 'reaction')
@@ -2165,7 +2345,7 @@ describe('high-five', () => {
 
       // Ana ANDA (não vira) até ficar adjacente e de frente pra bruno — quem
       // decide o encontro aqui é só o move(), sem face() nem reação nova.
-      hub.move(a.socket, 'ana', 'right')
+      hub.__walkForTest(a.socket, 'ana', 'right')
 
       expect(highFives(a.sent)).toHaveLength(1)
     })
@@ -2244,7 +2424,7 @@ describe('high-five', () => {
       hub.join(c.socket, carla)
 
       // Linha horizontal: ana | bruno | carla, nessa ordem.
-      const base = hub.occupantOf('ana') as { x: number; y: number }
+      const base = tileOf(hub.occupantOf('ana')!)
       walkTo(hub, b.socket, 'bruno', { x: base.x + 1, y: base.y })
       walkTo(hub, c.socket, 'carla', { x: base.x + 2, y: base.y })
       // Ana e carla encaram o do meio; o do meio só pode encarar UM lado (ana).
@@ -2254,9 +2434,12 @@ describe('high-five', () => {
 
       // Rede contra passar vazio: se alguém parou no tile errado ou um face()
       // morreu no rate limit, os asserts abaixo dariam 1 high-five por acidente.
-      expect(hub.occupantOf('ana')).toMatchObject({ x: base.x, y: base.y, dir: 'right' })
-      expect(hub.occupantOf('bruno')).toMatchObject({ x: base.x + 1, y: base.y, dir: 'left' })
-      expect(hub.occupantOf('carla')).toMatchObject({ x: base.x + 2, y: base.y, dir: 'left' })
+      expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: base.x, y: base.y })
+      expect(hub.occupantOf('ana')).toMatchObject({ dir: 'right' })
+      expect(tileOf(hub.occupantOf('bruno')!)).toEqual({ x: base.x + 1, y: base.y })
+      expect(hub.occupantOf('bruno')).toMatchObject({ dir: 'left' })
+      expect(tileOf(hub.occupantOf('carla')!)).toEqual({ x: base.x + 2, y: base.y })
+      expect(hub.occupantOf('carla')).toMatchObject({ dir: 'left' })
 
       a.sent.length = 0
       b.sent.length = 0
@@ -2291,7 +2474,7 @@ describe('high-five', () => {
       hub.join(b.socket, bruno)
       hub.join(c.socket, carla)
 
-      const base = hub.occupantOf('ana') as { x: number; y: number }
+      const base = tileOf(hub.occupantOf('ana')!)
       const front = { x: base.x + 1, y: base.y }
       walkTo(hub, b.socket, 'bruno', front)
       walkTo(hub, c.socket, 'carla', front)
@@ -2300,9 +2483,12 @@ describe('high-five', () => {
       hub.face(c.socket, 'carla', 'left')
 
       // Pré-condição do teste: os dois realmente empilhados no tile da frente.
-      expect(hub.occupantOf('bruno')).toMatchObject({ ...front, dir: 'left' })
-      expect(hub.occupantOf('carla')).toMatchObject({ ...front, dir: 'left' })
-      expect(hub.occupantOf('ana')).toMatchObject({ x: base.x, y: base.y, dir: 'right' })
+      expect(tileOf(hub.occupantOf('bruno')!)).toEqual(front)
+      expect(tileOf(hub.occupantOf('carla')!)).toEqual(front)
+      expect(hub.occupantOf('bruno')).toMatchObject({ dir: 'left' })
+      expect(hub.occupantOf('carla')).toMatchObject({ dir: 'left' })
+      expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: base.x, y: base.y })
+      expect(hub.occupantOf('ana')).toMatchObject({ dir: 'right' })
 
       a.sent.length = 0
 
@@ -2364,7 +2550,7 @@ describe('trancar sala', () => {
 
   const isInRoom1 = (userId: string) => {
     const occupant = hub.occupantOf(userId)!
-    return hub.roomForPosition(occupant.x, occupant.y)?.id === ROOM1_ID
+    return hub.roomOf(occupant)?.id === ROOM1_ID
   }
 
   it('trancar avisa todo mundo e barra quem está fora, sem expulsar quem está dentro', () => {
@@ -2375,7 +2561,7 @@ describe('trancar sala', () => {
     expect(b.sent).toContainEqual({ type: 'room-lock-changed', roomId: ROOM1_ID, locked: true, byUserId: 'ana' })
     walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
     expect(isInRoom1('bruno')).toBe(false)
-    expect(hub.occupantOf('ana')).toMatchObject(ROOM1_INSIDE)
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual(ROOM1_INSIDE)
   })
 
   it('só o dono da mesa reivindicada dentro da sala pode mexer no cadeado', () => {
@@ -2422,7 +2608,7 @@ describe('trancar sala', () => {
     b.sent.length = 0
 
     // Um passo só: da porta pra dentro da sala.
-    hub.move(b.socket, 'bruno', 'right')
+    hub.__walkForTest(b.socket, 'bruno', 'right')
 
     const denied = b.sent.find((m) => m.type === 'room-entry-denied')
     expect(denied).toMatchObject({
@@ -2445,7 +2631,7 @@ describe('trancar sala', () => {
     walkTo(hub, b.socket, 'bruno', ROOM1_DOOR)
     b.sent.length = 0
 
-    hub.move(b.socket, 'bruno', 'right')
+    hub.__walkForTest(b.socket, 'bruno', 'right')
 
     expect(b.sent.find((m) => m.type === 'room-entry-denied')).toMatchObject({ reason: 'admin-locked' })
   })
@@ -2457,11 +2643,11 @@ describe('trancar sala', () => {
       hub.setRoomLock(a.socket, 'ana', true)
       b.sent.length = 0
 
-      for (let i = 0; i < 5; i += 1) hub.move(b.socket, 'bruno', 'right')
+      for (let i = 0; i < 5; i += 1) hub.__walkForTest(b.socket, 'bruno', 'right')
       expect(b.sent.filter((m) => m.type === 'room-entry-denied')).toHaveLength(1)
 
       vi.advanceTimersByTime(ENTRY_DENIED_THROTTLE_MS + 10)
-      hub.move(b.socket, 'bruno', 'right')
+      hub.__walkForTest(b.socket, 'bruno', 'right')
       expect(b.sent.filter((m) => m.type === 'room-entry-denied')).toHaveLength(2)
     } finally {
       vi.useRealTimers()
@@ -2509,7 +2695,7 @@ describe('trancar sala', () => {
     expect(a.sent).toContainEqual({ type: 'knock-cleared', roomId: ROOM1_ID, userId: 'bruno' })
 
     walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
-    expect(hub.occupantOf('bruno')).toMatchObject(ROOM1_INSIDE)
+    expect(tileOf(hub.occupantOf('bruno')!)).toEqual(ROOM1_INSIDE)
   })
 
   it('recusar não libera a entrada', () => {
@@ -2630,7 +2816,41 @@ describe('trancar sala', () => {
 
     expect(b.sent).toContainEqual({ type: 'room-lock-changed', roomId: ROOM1_ID, locked: false, byUserId: null })
     walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
-    expect(hub.occupantOf('bruno')).toMatchObject(ROOM1_INSIDE)
+    expect(tileOf(hub.occupantOf('bruno')!)).toEqual(ROOM1_INSIDE)
+  })
+
+  /**
+   * Regressão do card da mesa trancada sozinha: trancar é aceito pela posição
+   * em pixel, mas a travessia de sala é detectada pelo tile COMITADO, que tem
+   * histerese. Quem trancava de raspão (centro dentro do tile da sala, sem ter
+   * comitado) deixava uma tranca que saída nenhuma desfazia — a sala ficava
+   * fechada e vazia, e nem o dono da mesa voltava para dentro.
+   */
+  it('tranca feita de raspão na divisa também some quando a sala esvazia', () => {
+    const { a, b } = insideAndOutside()
+    walkTo(hub, a.socket, 'ana', ROOM1_DOOR)
+    // Anda até um pixel para dentro do tile da sala: menos que
+    // `TILE_COMMIT_MARGIN`, então a cascata de travessia ainda a considera do
+    // lado de fora.
+    let seq = 900
+    let restante = ((ROOM1_INSIDE_EDGE_X - hub.occupantOf('ana')!.x) / BODY_SPEED) * 1000
+    while (restante > 0.001) {
+      const dtMs = Math.min(50, restante)
+      hub.applyInput(a.socket, 'ana', { seq: (seq += 1), dx: 1, dy: 0, dtMs })
+      hub.__tickForTest(dtMs)
+      restante -= dtMs
+    }
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 17, y: 12 })
+
+    hub.setRoomLock(a.socket, 'ana', true)
+    expect(b.sent).toContainEqual({ type: 'room-lock-changed', roomId: ROOM1_ID, locked: true, byUserId: 'ana' })
+    b.sent.length = 0
+
+    walkTo(hub, a.socket, 'ana', ROOM1_OUTSIDE)
+
+    expect(b.sent).toContainEqual({ type: 'room-lock-changed', roomId: ROOM1_ID, locked: false, byUserId: null })
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    expect(tileOf(hub.occupantOf('bruno')!)).toEqual(ROOM1_INSIDE)
   })
 
   it('destrancar cancela os pedidos em aberto e revoga os passes concedidos', () => {
@@ -3252,48 +3472,62 @@ function runtimeWithWalls(walls: Array<[number, number]>): ActiveOfficeMapDTO {
   return runtime
 }
 
-describe('movimento em oito direções', () => {
+describe('movimento na diagonal', () => {
   beforeEach(() => hub.configure(runtimeWithKarts([])))
 
-  it('o passo na diagonal anda nos dois eixos e encara para o lado', () => {
+  it('anda nos dois eixos e encara para o lado', () => {
     const a = fakeSocket()
     const b = fakeSocket()
     hub.join(a.socket, ana)
     hub.join(b.socket, bruno)
+    const antes = hub.occupantOf('ana')!
     b.sent.length = 0
 
-    // Ana nasce em (1,1).
-    hub.move(a.socket, 'ana', 'down-right')
+    hub.__walkForTest(a.socket, 'ana', 'down-right')
 
+    const depois = hub.occupantOf('ana')!
+    expect(depois.x).toBeGreaterThan(antes.x)
+    expect(depois.y).toBeGreaterThan(antes.y)
     // O sprite tem quatro poses: a diagonal vira de lado, nunca de frente.
-    expect(b.sent).toContainEqual({
-      type: 'moved', userId: 'ana', x: 2, y: 2, dir: 'right', sprint: false,
-    })
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 2, y: 2, dir: 'right' })
+    expect(depois.dir).toBe('right')
+
+    // E a diagonal NÃO anda √2 mais rápido — `stepBody` normaliza o vetor, que é
+    // o que `DIAGONAL_STEP_FACTOR` fazia na grade.
+    const percorrido = Math.hypot(depois.x - antes.x, depois.y - antes.y)
+    expect(percorrido).toBeCloseTo(32, 0)
   })
 
-  // Duas peças encostadas deixam um vão diagonal por onde ninguém passa
-  // andando reto; sem esta regra, a diagonal passaria raspando pela quina.
-  it('não corta quina: diagonal com as ortogonais bloqueadas é recusada', () => {
+  it('não corta quina — e a regra virou GEOMETRIA, não um caso especial', () => {
+    // Na grade isto era uma checagem explícita: diagonal com as duas ortogonais
+    // bloqueadas era recusada, senão o personagem passava raspando entre duas
+    // quinas. No contínuo a checagem some e o resultado continua: um corpo de
+    // 14px de largura simplesmente NÃO CABE no vão diagonal entre dois tiles
+    // sólidos, e `bodyBoxBlocked` amostra os cantos e os meios de cada lado.
     const a = fakeSocket()
     hub.join(a.socket, ana)
     hub.configure(runtimeWithWalls([[2, 1], [1, 2]]), false, true)
-    a.sent.length = 0
 
-    hub.move(a.socket, 'ana', 'down-right', false, 7)
+    for (let i = 0; i < 4; i += 1) hub.__walkForTest(a.socket, 'ana', 'down-right')
 
-    expect(a.sent).toContainEqual({ type: 'sync', x: 1, y: 1, dir: 'right', seq: 7 })
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 1 })
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 1, y: 1 })
   })
 
-  it('uma ortogonal bloqueada já basta para recusar a diagonal', () => {
+  it('com UMA ortogonal bloqueada, desliza pela outra em vez de travar', () => {
+    // Mudança deliberada em relação à grade, que recusava o passo inteiro. Parar
+    // de vez ao raspar uma quina é o comportamento que faz o personagem "grudar"
+    // na parede — e é justamente o que o movimento livre existe para não fazer.
     const a = fakeSocket()
     hub.join(a.socket, ana)
     hub.configure(runtimeWithWalls([[2, 1]]), false, true)
+    const antes = hub.occupantOf('ana')!
 
-    hub.move(a.socket, 'ana', 'down-right')
+    hub.__walkForTest(a.socket, 'ana', 'down-right')
 
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 1 })
+    const depois = hub.occupantOf('ana')!
+    expect(depois.y).toBeGreaterThan(antes.y)
+    // Em x ele avança só o que couber até encostar — o corpo tem largura, então
+    // "encostar na parede" não é "parar no centro do tile".
+    expect(tileOf(depois).x).toBe(tileOf(antes).x)
   })
 
   it('sem nada no caminho, a diagonal passa', () => {
@@ -3301,9 +3535,9 @@ describe('movimento em oito direções', () => {
     hub.join(a.socket, ana)
     hub.configure(runtimeWithWalls([[5, 5]]), false, true)
 
-    hub.move(a.socket, 'ana', 'down-right')
+    hub.__walkForTest(a.socket, 'ana', 'down-right')
 
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 2, y: 2 })
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 2, y: 2 })
   })
 })
 
@@ -3311,161 +3545,191 @@ describe('bola chutável', () => {
   // Ana nasce em (1,1) encarando 'down'; a bola de origem fica logo abaixo dela.
   beforeEach(() => hub.configure(runtimeWithBalls()))
 
-  it('welcome traz as bolas publicadas', () => {
+  const bolaDe = (hubRef: OfficeHub) => hubRef.balls()[0]
+
+  it('welcome traz as bolas publicadas, em pixel e com raio', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
 
-    expect(a.sent).toContainEqual(
-      expect.objectContaining({ type: 'welcome', balls: [{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }] }),
-    )
+    const welcome = a.sent.find((m) => m.type === 'welcome') as { balls?: unknown[] }
+    expect(welcome.balls).toEqual([
+      { id: 'ball-1', ...tileCenter({ x: 1, y: 2 }), vx: 0, vy: 0, r: 16, memberIds: ['ball-1'] },
+    ])
   })
 
-  it('chute limpo manda a bola longe e reposiciona o estado no tile final', () => {
+  it('chutar dá VELOCIDADE à bola, na direção encarada', () => {
+    // Antes o hub resolvia a trajetória inteira e mandava o caminho. Agora manda
+    // velocidade, e os dois lados integram a mesma física — é o que permite
+    // interceptar a bola no meio do caminho, que a resolução instantânea
+    // impedia.
     const a = fakeSocket()
     const b = fakeSocket()
     hub.join(a.socket, ana)
     hub.join(b.socket, bruno)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(a.socket, 'ana', 'down')
 
     hub.kickBall(a.socket, 'ana', 'kick')
 
-    const kicked = b.sent.find((message) => message.type === 'ball-kicked')
-    expect(kicked).toMatchObject({
-      type: 'ball-kicked',
-      userId: 'ana',
-      kick: { ballId: 'ball-1', grazed: false, bounces: 0 },
-    })
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 7, memberIds: ['ball-1'] }])
+    const kicked = b.sent.find((m) => m.type === 'ball-kicked') as
+      | { userId: string; power: string; ball: { vx: number; vy: number } }
+      | undefined
+    expect(kicked).toMatchObject({ userId: 'ana', power: 'kick' })
+    expect(kicked!.ball.vy).toBeGreaterThan(0)
+    expect(kicked!.ball.vx).toBeCloseTo(0, 5)
   })
 
-  it('chute alto passa por cima da mobília e pousa do outro lado', () => {
+  it('a bola rola no tick e para sozinha, pelo atrito', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
-    // Parede logo abaixo da bola: o rasteiro bateria nela, o alto sobrevoa.
-    hub.configure(runtimeWithWallBelowBall(), false, true)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(a.socket, 'ana', 'down')
+    const partida = bolaDe(hub).y
 
-    hub.kickBall(a.socket, 'ana', 'lob')
+    hub.kickBall(a.socket, 'ana', 'kick')
+    for (let i = 0; i < 200; i += 1) hub.__tickForTest(25)
 
-    const kicked = a.sent.find((message) => message.type === 'ball-kicked')
-    expect(kicked).toMatchObject({ kick: { power: 'lob', bounces: 0 } })
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 6, memberIds: ['ball-1'] }])
+    const parada = bolaDe(hub)
+    expect(parada.y).toBeGreaterThan(partida)
+    expect(Math.hypot(parada.vx, parada.vy)).toBe(0)
   })
 
-  it('andar por cima da bola a conduz: cada passo empurra um tile', () => {
+  it('segurar mais tempo (carga maior) chuta mais forte', () => {
+    const saida = (charge: number) => {
+      hub.reset()
+      hub.configure(runtimeWithBalls())
+      const sock = fakeSocket()
+      hub.join(sock.socket, ana)
+      hub.__placeAtTileForTest('ana', 1, 1)
+      hub.face(sock.socket, 'ana', 'down')
+      hub.kickBall(sock.socket, 'ana', 'kick', false, charge)
+      const bola = bolaDe(hub)
+      return Math.hypot(bola.vx, bola.vy)
+    }
+    expect(saida(0)).toBeLessThan(saida(1))
+  })
+
+  it('sem carga informada, chuta na força cheia — compatível com quem não carrega', () => {
     const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(a.socket, 'ana', 'down')
+
+    hub.kickBall(a.socket, 'ana', 'kick')
+
+    const kicked = a.sent.find((m) => m.type === 'ball-kicked') as
+      | { ball: { vx: number; vy: number } }
+      | undefined
+    hub.reset()
+    hub.configure(runtimeWithBalls())
     const b = fakeSocket()
-    hub.join(a.socket, ana)
-    hub.join(b.socket, bruno)
-    b.sent.length = 0
-
-    // Ana está em (1,1) e a bola em (1,2): o passo entra na bola e a empurra.
-    hub.move(a.socket, 'ana', 'down')
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 3, memberIds: ['ball-1'] }])
-
-    // …e o passo seguinte empurra de novo, sem a bola ficar para trás.
-    hub.move(a.socket, 'ana', 'down')
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 4, memberIds: ['ball-1'] }])
-
-    const conduzidos = b.sent.filter((message) => message.type === 'ball-kicked')
-    expect(conduzidos).toHaveLength(2)
-    expect(conduzidos[0]).toMatchObject({ userId: 'ana', kick: { power: 'dribble', bounces: 0 } })
+    hub.join(b.socket, ana)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(b.socket, 'ana', 'down')
+    hub.kickBall(b.socket, 'ana', 'kick', false, 1)
+    const cargaCheia = b.sent.find((m) => m.type === 'ball-kicked') as
+      | { ball: { vx: number; vy: number } }
+      | undefined
+    expect(Math.hypot(kicked!.ball.vx, kicked!.ball.vy)).toBeCloseTo(
+      Math.hypot(cargaCheia!.ball.vx, cargaCheia!.ball.vy),
+      5,
+    )
   })
 
-  it('conduzir na diagonal empurra a bola na diagonal, não pela pose', () => {
+  it('o toque sai mais fraco que o chute', () => {
+    // Compara a VELOCIDADE de saída, não onde a bola parou: numa sala pequena o
+    // chute bate na parede e volta, e a distância final diria o contrário do que
+    // aconteceu.
+    const saida = (power: 'touch' | 'kick') => {
+      hub.reset()
+      hub.configure(runtimeWithBalls())
+      const sock = fakeSocket()
+      hub.join(sock.socket, ana)
+      hub.__placeAtTileForTest('ana', 1, 1)
+      hub.face(sock.socket, 'ana', 'down')
+      hub.kickBall(sock.socket, 'ana', power)
+      const bola = bolaDe(hub)
+      return Math.hypot(bola.vx, bola.vy)
+    }
+    expect(saida('touch')).toBeLessThan(saida('kick'))
+  })
+
+  it('andar por cima da bola a conduz — por CONTATO, não pelo passo', () => {
+    // O drible saía do `delta` do passo discreto, que deixou de existir. Agora
+    // sai do contato: quem está em cima dela, andando, a empurra.
     const a = fakeSocket()
     hub.join(a.socket, ana)
-    hub.configure(runtimeWithBalls([{ id: 'ball-1', x: 2, y: 2 }], 1), false, true)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    const partida = bolaDe(hub).y
 
-    // De (1,1) para (2,2): o passo pisa na bola e ela segue o PASSO — se
-    // seguisse a pose (que na diagonal é 'right'), quem anda de banda perderia
-    // a bola de lado no passo seguinte.
-    hub.move(a.socket, 'ana', 'down-right')
+    for (let i = 0; i < 12; i += 1) hub.__walkForTest(a.socket, 'ana', 'down')
 
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 3, y: 3, memberIds: ['ball-1'] }])
+    expect(bolaDe(hub).y).toBeGreaterThan(partida)
   })
 
   it('andar ao LADO da bola não a conduz', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
+    // Duas colunas ao lado: fora do alcance de toque, por mais que ande.
+    hub.__placeAtTileForTest('ana', 3, 1)
+    const partida = { x: bolaDe(hub).x, y: bolaDe(hub).y }
 
-    // De (1,1) para a direita: a bola em (1,2) fica na diagonal, intocada.
-    hub.move(a.socket, 'ana', 'right')
+    for (let i = 0; i < 8; i += 1) hub.__walkForTest(a.socket, 'ana', 'down')
 
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }])
-  })
-
-  it('conduzir contra a parede deixa a bola para trás', () => {
-    const a = fakeSocket()
-    hub.join(a.socket, ana)
-    hub.configure(runtimeWithWallBelowBall(), false, true)
-
-    hub.move(a.socket, 'ana', 'down')
-
-    // A bola não tinha para onde ir; Ana passou por cima dela e seguiu.
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }])
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 2 })
-  })
-
-  it('toque empurra um tile só', () => {
-    const a = fakeSocket()
-    hub.join(a.socket, ana)
-
-    hub.kickBall(a.socket, 'ana', 'touch')
-
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 3, memberIds: ['ball-1'] }])
+    expect(bolaDe(hub)).toMatchObject(partida)
   })
 
   it('quem está longe da bola não chuta nada', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
-    hub.configure(runtimeWithBalls([{ id: 'ball-1', x: 8, y: 8 }], 1), false, true)
+    hub.__placeAtTileForTest('ana', 8, 8)
     a.sent.length = 0
 
     hub.kickBall(a.socket, 'ana', 'kick')
 
-    expect(a.sent.some((message) => message.type === 'ball-kicked')).toBe(false)
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 8, y: 8, memberIds: ['ball-1'] }])
+    expect(a.sent.filter((m) => m.type === 'ball-kicked')).toHaveLength(0)
   })
 
   it('socket que não é dono do usuário não chuta pelos outros', () => {
     const a = fakeSocket()
-    const b = fakeSocket()
+    const intruso = fakeSocket()
     hub.join(a.socket, ana)
-    hub.join(b.socket, bruno)
+    const partida = { ...bolaDe(hub) }
 
-    hub.kickBall(b.socket, 'ana', 'kick')
+    hub.kickBall(intruso.socket, 'ana', 'kick')
 
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }])
+    expect(bolaDe(hub)).toMatchObject({ vx: partida.vx, vy: partida.vy })
   })
 
-  it('a bola bate em quem está no caminho e volta com menos força', () => {
+  it('o chute alto passa por cima da mobília', () => {
+    // Sem eixo Z, o que preserva a feature é o PRAZO em que a bola ignora
+    // colisão. Sem ele o chute alto viraria rasteiro e pararia na primeira mesa.
     const a = fakeSocket()
-    const b = fakeSocket()
     hub.join(a.socket, ana)
-    hub.join(b.socket, bruno)
-    // Bruno nasce no mesmo spawn da Ana e precisa chegar logo DEPOIS da bola
-    // sem pisar nela — pisar conduziria a bola junto (ver a condução).
-    for (const dir of ['right', 'down', 'down', 'left'] as const) hub.move(b.socket, 'bruno', dir)
-    expect(hub.occupantOf('bruno')).toMatchObject({ x: 1, y: 3 })
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }])
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(a.socket, 'ana', 'down')
 
-    hub.kickBall(a.socket, 'ana', 'kick')
+    hub.kickBall(a.socket, 'ana', 'lob')
 
-    const kicked = a.sent.find(
-      (message) => message.type === 'ball-kicked' && message.kick.power === 'kick',
-    )
-    expect(kicked).toMatchObject({ kick: { bounces: 1 } })
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 0, memberIds: ['ball-1'] }])
+    const kicked = a.sent.find((m) => m.type === 'ball-kicked') as
+      | { ball: { airborneMs?: number } }
+      | undefined
+    expect(kicked!.ball.airborneMs).toBeGreaterThan(0)
   })
 
   it('publicação nova devolve a bola para a posição do editor', () => {
     const a = fakeSocket()
     hub.join(a.socket, ana)
+    hub.__placeAtTileForTest('ana', 1, 1)
+    hub.face(a.socket, 'ana', 'down')
     hub.kickBall(a.socket, 'ana', 'kick')
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 1, y: 7, memberIds: ['ball-1'] }])
+    for (let i = 0; i < 40; i += 1) hub.__tickForTest(25)
+    expect(bolaDe(hub).y).not.toBeCloseTo(tileCenter({ x: 1, y: 2 }).y, 5)
 
-    hub.configure(runtimeWithBalls([{ id: 'ball-1', x: 4, y: 4 }], 1), false, true)
+    // Publicação NOVA (decorRevision avança): é o que dispara a reconciliação.
+    hub.configure(runtimeWithBalls(undefined, 1))
 
-    expect(hub.balls()).toEqual([{ id: 'ball-1', x: 4, y: 4, memberIds: ['ball-1'] }])
+    expect(bolaDe(hub)).toMatchObject(tileCenter({ x: 1, y: 2 }))
   })
 
   it('save de decoração anuncia o snapshot das bolas', () => {
@@ -3473,11 +3737,445 @@ describe('bola chutável', () => {
     hub.join(a.socket, ana)
     a.sent.length = 0
 
-    hub.broadcastMapDecorUpdated('pub-kart')
+    hub.broadcastMapDecorUpdated('pub-2')
 
-    expect(a.sent).toContainEqual({
-      type: 'balls-updated',
-      balls: [{ id: 'ball-1', x: 1, y: 2, memberIds: ['ball-1'] }],
+    expect(a.sent).toContainEqual({ type: 'balls-updated', balls: hub.balls() })
+  })
+})
+
+describe('paintball', () => {
+  // Todo mundo nasce em (1,1) encarando 'down' neste mapa vazio de 10×10.
+  beforeEach(() => hub.configure(runtimeWithWalls([])))
+
+  /** Coloca alguém `steps` tiles abaixo do spawn — na linha de tiro de quem encara 'down'. */
+  function joinBelow(user: typeof bruno | typeof carla, steps: number) {
+    const socket = fakeSocket()
+    hub.join(socket.socket, user)
+    for (let i = 0; i < steps; i += 1) hub.__walkForTest(socket.socket, user.id, 'down')
+    socket.sent.length = 0
+    return socket
+  }
+
+  it('desarmado, o tiro não sai — é o que impede o escritório de virar campo de tiro', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    a.sent.length = 0
+
+    hub.firePaintball(a.socket, 'ana')
+
+    expect(a.sent.some((message) => message.type === 'paintball-shot')).toBe(false)
+  })
+
+  it('equipar e guardar o marcador anda no occupant e é anunciado', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    b.sent.length = 0
+
+    hub.setPaintMarker(a.socket, 'ana', true)
+    expect(hub.occupantOf('ana')?.paintMarker).toBe(true)
+    expect(b.sent).toContainEqual({ type: 'paint-marker', userId: 'ana', active: true })
+
+    hub.setPaintMarker(a.socket, 'ana', false)
+    // Ausente, e não `false`: desarmado é o normal, e o occupant do welcome
+    // não carrega a chave para quem nunca equipou.
+    expect(hub.occupantOf('ana')?.paintMarker).toBeUndefined()
+    expect(b.sent).toContainEqual({ type: 'paint-marker', userId: 'ana', active: false })
+  })
+
+  it('armado, acerta quem está na linha e cria a marca', () => {
+    const b = joinBelow(bruno, 3)
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+
+    hub.firePaintball(a.socket, 'ana')
+
+    const shot = b.sent.find((message) => message.type === 'paintball-shot')
+    // O disparo vem resolvido em PIXEL (de/para), não como lista de tiles: com
+    // posição contínua, o tile de saída não diz de onde a bolinha saiu.
+    expect(shot).toMatchObject({
+      type: 'paintball-shot',
+      shot: {
+        shooterId: 'ana',
+        splat: { userId: 'bruno', byUserId: 'ana', color: paintballColorFor('ana') },
+      },
     })
+    expect(hub.paintSplatsSnapshot()).toHaveLength(1)
+  })
+
+  it('sem ninguém na linha, o tiro sai e não marca nada', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+    a.sent.length = 0
+
+    hub.firePaintball(a.socket, 'ana')
+
+    const shot = a.sent.find((message) => message.type === 'paintball-shot')
+    expect(shot).toMatchObject({ shot: { splat: null } })
+    expect(hub.paintSplatsSnapshot()).toEqual([])
+  })
+
+  it('quem está ausente não leva marca nem para o tiro de quem está atrás', () => {
+    const b = joinBelow(bruno, 2)
+    const c = joinBelow(carla, 4)
+    hub.setStatus(b.socket, 'bruno', 'away')
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+
+    hub.firePaintball(a.socket, 'ana')
+
+    expect(hub.paintSplatsSnapshot()).toMatchObject([{ userId: 'carla' }])
+    // A bolinha ATRAVESSA quem está ausente e para em quem não está: o tiro
+    // segue reto para baixo, e o `to` cai onde a carla está.
+    expect(c.sent.find((message) => message.type === 'paintball-shot')).toMatchObject({
+      shot: { splat: { userId: 'carla' } },
+    })
+  })
+
+  it('mesa no caminho para o tiro antes do alvo', () => {
+    joinBelow(bruno, 4)
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+    hub.configure(runtimeWithWalls([[1, 3]]), false, true)
+
+    hub.firePaintball(a.socket, 'ana')
+
+    expect(hub.paintSplatsSnapshot()).toEqual([])
+  })
+
+  it('a cadência é do servidor: segurar a tecla não vira metralhadora', () => {
+    vi.useFakeTimers()
+    try {
+      const b = joinBelow(bruno, 3)
+      const a = fakeSocket()
+      hub.join(a.socket, ana)
+      hub.setPaintMarker(a.socket, 'ana', true)
+      b.sent.length = 0
+
+      hub.firePaintball(a.socket, 'ana')
+      hub.firePaintball(a.socket, 'ana')
+      expect(b.sent.filter((message) => message.type === 'paintball-shot')).toHaveLength(1)
+
+      vi.advanceTimersByTime(PAINTBALL_COOLDOWN_MS + 10)
+      hub.firePaintball(a.socket, 'ana')
+      expect(b.sent.filter((message) => message.type === 'paintball-shot')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignora tiro de socket cujo dono não bate com o userId (anti-spoof)', () => {
+    const b = joinBelow(bruno, 3)
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+    hub.setPaintMarker(b.socket, 'bruno', true)
+    b.sent.length = 0
+
+    hub.firePaintball(b.socket, 'ana')
+
+    expect(b.sent.some((message) => message.type === 'paintball-shot')).toBe(false)
+  })
+
+  it('acumula até o teto de marcas, descartando a mais velha', () => {
+    vi.useFakeTimers()
+    try {
+      joinBelow(bruno, 3)
+      const a = fakeSocket()
+      hub.join(a.socket, ana)
+      hub.setPaintMarker(a.socket, 'ana', true)
+
+      for (let i = 0; i < PAINTBALL_MAX_SPLATS + 3; i += 1) {
+        hub.firePaintball(a.socket, 'ana')
+        vi.advanceTimersByTime(PAINTBALL_COOLDOWN_MS + 10)
+      }
+
+      expect(hub.paintSplatsSnapshot()).toHaveLength(PAINTBALL_MAX_SPLATS)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('welcome traz as marcas vivas com o ttl já descontado, e some com as vencidas', () => {
+    vi.useFakeTimers()
+    try {
+      joinBelow(bruno, 3)
+      const a = fakeSocket()
+      hub.join(a.socket, ana)
+      hub.setPaintMarker(a.socket, 'ana', true)
+      hub.firePaintball(a.socket, 'ana')
+
+      vi.advanceTimersByTime(5_000)
+      const chegando = fakeSocket()
+      hub.join(chegando.socket, carla)
+      const welcome = chegando.sent.find((message) => message.type === 'welcome')
+      expect(welcome).toMatchObject({
+        paintSplats: [{ userId: 'bruno', ttlMs: PAINT_SPLAT_TTL_MS - 5_000 }],
+      })
+
+      // Sem timer nenhum no hub: quem lê é quem poda.
+      vi.advanceTimersByTime(PAINT_SPLAT_TTL_MS)
+      expect(hub.paintSplatsSnapshot()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a tinta some com quem a levava', () => {
+    vi.useFakeTimers()
+    try {
+      const b = joinBelow(bruno, 3)
+      const a = fakeSocket()
+      hub.join(a.socket, ana)
+      hub.setPaintMarker(a.socket, 'ana', true)
+      hub.firePaintball(a.socket, 'ana')
+      expect(hub.paintSplatsSnapshot()).toHaveLength(1)
+
+      hub.leave(b.socket, 'bruno')
+      vi.advanceTimersByTime(RECONNECT_GRACE_MS + 10)
+
+      expect(hub.paintSplatsSnapshot()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('o alcance é constante e o cliente não escolhe nada além do gesto', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.setPaintMarker(a.socket, 'ana', true)
+    // Mapa de 10×10: encarando 'down' de (1,1), a parede da borda para antes
+    // do alcance cheio — é o cenário que limita, não o payload.
+    hub.firePaintball(a.socket, 'ana')
+
+    const shot = a.sent.find((message) => message.type === 'paintball-shot') as
+      | { shot: { from: { x: number; y: number }; to: { x: number; y: number } } }
+      | undefined
+    // Sai de onde a pessoa está, em pixel, e vai para BAIXO — a mira é o facing
+    // autoritativo, e o cliente não escolhe nada além do gesto.
+    expect(shot!.shot.from.x).toBeCloseTo(shot!.shot.to.x, 5)
+    expect(shot!.shot.to.y).toBeGreaterThan(shot!.shot.from.y)
+    // O alcance é constante: a parede da borda para o tiro antes do teto.
+    expect(shot!.shot.to.y - shot!.shot.from.y).toBeLessThanOrEqual(BODY_SHOT_RANGE)
+  })
+})
+
+describe('manager da sala e remoção da chamada (#22775)', () => {
+  let hub: OfficeHub
+
+  beforeEach(() => {
+    hub = new OfficeHub()
+    hub.configure(legacyOfficeRuntimeFixture())
+  })
+
+  /** Runtime igual ao legado, mas com uma mesa reivindicada dentro da Sala 1. */
+  function runtimeWithClaimedDesk(owner: { id: string; name: string }): ActiveOfficeMapDTO {
+    const runtime = legacyOfficeRuntimeFixture()
+    const tileSize = 32
+    runtime.document.objects.push({
+      id: 'desk-sala1',
+      layerKey: 'desks',
+      type: 'desk',
+      // Dentro do retângulo da Sala 1 (x0=17,y0=11 → x1=23,y1=12).
+      geometry: { kind: 'rectangle', x: 19 * tileSize, y: 11 * tileSize, width: tileSize, height: tileSize },
+      properties: { externalKey: 'mesa-sala1', name: 'Mesa da Sala 1' },
+    })
+    runtime.desks = [
+      { id: 'desk-sala1', name: 'Mesa da Sala 1', externalKey: 'mesa-sala1', claimedBy: { id: owner.id, name: owner.name } },
+    ]
+    return runtime
+  }
+
+  function managersFrom(sent: OfficeServerMessage[]) {
+    return sent.filter((m): m is Extract<OfficeServerMessage, { type: 'room-managers-changed' }> =>
+      m.type === 'room-managers-changed',
+    )
+  }
+
+  it('sala sem dono de mesa: manda quem entrou primeiro', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+
+    expect(hub.managerOf(ROOM1_ID)).toEqual({ roomId: ROOM1_ID, userId: 'ana', byDeskOwner: false })
+  })
+
+  it('manager sai: passa para o próximo na ordem de entrada, não para quem chegou por último', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    const c = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    hub.join(c.socket, carla)
+
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    walkTo(hub, c.socket, 'carla', ROOM1_INSIDE)
+    expect(hub.managerOf(ROOM1_ID)?.userId).toBe('ana')
+
+    walkTo(hub, a.socket, 'ana', ROOM1_OUTSIDE)
+
+    expect(hub.managerOf(ROOM1_ID)?.userId).toBe('bruno')
+  })
+
+  it('sala vazia não tem manager', () => {
+    const a = fakeSocket()
+    hub.join(a.socket, ana)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    expect(hub.managerOf(ROOM1_ID)).not.toBeNull()
+
+    walkTo(hub, a.socket, 'ana', ROOM1_OUTSIDE)
+
+    expect(hub.managerOf(ROOM1_ID)).toBeNull()
+  })
+
+  it('sala com mesa reivindicada: manda o dono da mesa, mesmo entrando depois', () => {
+    hub = new OfficeHub()
+    hub.configure(runtimeWithClaimedDesk(bruno))
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE) // chega primeiro
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE) // dono da mesa, chega depois
+
+    expect(hub.managerOf(ROOM1_ID)).toEqual({ roomId: ROOM1_ID, userId: 'bruno', byDeskOwner: true })
+  })
+
+  it('dono da mesa fora da sala: manda quem está lá dentro', () => {
+    hub = new OfficeHub()
+    hub.configure(runtimeWithClaimedDesk(bruno))
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno) // dono nunca entra
+
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+
+    expect(hub.managerOf(ROOM1_ID)).toEqual({ roomId: ROOM1_ID, userId: 'ana', byDeskOwner: false })
+  })
+
+  it('avisa o escritório quando o manager muda, e só quando muda', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    const depoisDaEntrada = managersFrom(b.sent).length
+    expect(managersFrom(b.sent).at(-1)?.managers).toEqual([
+      { roomId: ROOM1_ID, userId: 'ana', byDeskOwner: false },
+    ])
+
+    // Bruno entra: o manager continua sendo a Ana, então ninguém precisa saber.
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    expect(managersFrom(b.sent)).toHaveLength(depoisDaEntrada)
+
+    walkTo(hub, a.socket, 'ana', ROOM1_OUTSIDE)
+    expect(managersFrom(b.sent).at(-1)?.managers).toEqual([
+      { roomId: ROOM1_ID, userId: 'bruno', byDeskOwner: false },
+    ])
+  })
+
+  it('manager remove alguém: sai da chamada e continua no mapa, onde estava', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    const antes = hub.occupants().find((o) => o.userId === 'bruno')!
+
+    const removed = hub.removeFromRoom(a.socket, 'ana', 'bruno')
+
+    expect(removed).toMatchObject({ roomId: ROOM1_ID, targetUserId: 'bruno' })
+    expect(hub.isRemovedFromRoom('bruno', ROOM1_ID)).toBe(true)
+    // Continua no escritório, na MESMA posição: a remoção é só da chamada.
+    const depois = hub.occupants().find((o) => o.userId === 'bruno')!
+    expect({ x: depois.x, y: depois.y }).toEqual({ x: antes.x, y: antes.y })
+    expect(b.sent).toContainEqual(
+      expect.objectContaining({ type: 'removed-from-room', roomId: ROOM1_ID, userId: 'bruno', byUserId: 'ana' }),
+    )
+  })
+
+  it('quem não é manager não remove ninguém', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE) // Ana é a manager
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+
+    expect(hub.removeFromRoom(b.socket, 'bruno', 'ana')).toBeNull()
+    expect(hub.isRemovedFromRoom('ana', ROOM1_ID)).toBe(false)
+  })
+
+  it('ADMIN remove mesmo sem ser manager', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+
+    expect(hub.removeFromRoom(b.socket, 'bruno', 'ana', { isAdmin: true })).not.toBeNull()
+    expect(hub.isRemovedFromRoom('ana', ROOM1_ID)).toBe(true)
+  })
+
+  it('não remove quem está em outra sala nem a si mesmo', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_OUTSIDE) // fora da sala
+
+    expect(hub.removeFromRoom(a.socket, 'ana', 'bruno')).toBeNull()
+    expect(hub.removeFromRoom(a.socket, 'ana', 'ana')).toBeNull()
+  })
+
+  it('a marca só sai quando a pessoa sai da área da sala', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    hub.removeFromRoom(a.socket, 'ana', 'bruno')
+
+    // Andar DENTRO da sala não devolve a chamada.
+    hub.__walkForTest(b.socket, 'bruno', 'left')
+    expect(hub.isRemovedFromRoom('bruno', ROOM1_ID)).toBe(true)
+
+    walkTo(hub, b.socket, 'bruno', ROOM1_OUTSIDE)
+    expect(hub.isRemovedFromRoom('bruno', ROOM1_ID)).toBe(false)
+
+    // E entrar de novo vale normalmente.
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE)
+    expect(hub.isRemovedFromRoom('bruno', ROOM1_ID)).toBe(false)
+  })
+
+  it('remover não tira a pessoa da fila de manager da sala', () => {
+    const a = fakeSocket()
+    const b = fakeSocket()
+    hub.join(a.socket, ana)
+    hub.join(b.socket, bruno)
+    walkTo(hub, b.socket, 'bruno', ROOM1_INSIDE) // Bruno entra primeiro: é o manager
+    walkTo(hub, a.socket, 'ana', ROOM1_INSIDE)
+
+    hub.removeFromRoom(b.socket, 'bruno', 'ana')
+
+    // Ana continua na sala (só perdeu a chamada), então a fila não muda.
+    expect(hub.managerOf(ROOM1_ID)?.userId).toBe('bruno')
   })
 })

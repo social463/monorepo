@@ -1,14 +1,55 @@
-import { DIRECTION_DELTAS, type Direction, type TilePosition } from '@legends/shared'
+import {
+  BODY_INPUT_HZ,
+  BODY_SPEED,
+  DIRECTION_DELTAS,
+  TILE_SIZE,
+  tileOfPixel,
+  type Direction,
+  type MoveDirection,
+  type TilePosition,
+} from '@legends/shared'
 
 /**
- * Quantos passos podem ser emitidos sem NENHUMA confirmação de posição antes de
- * desistir. Passo confirmado (`moved`) zera a contagem, então isso só dispara
- * quando a caminhada realmente travou — e é o que impede o personagem de ficar
- * batendo na mesma porta pra sempre quando o servidor recusa por um motivo que
- * o cliente não consegue prever nem aprender. Com `stepTimeoutMs` de 500ms, dá
- * ~6s de insistência antes do aviso.
+ * Raio, em PIXEL, para dar um waypoint por alcançado.
+ *
+ * Tem de ser maior que o deslocamento de UMA amostra de input
+ * (`BODY_SPEED / BODY_INPUT_HZ` ≈ 7px), senão o corpo passa por cima do centro
+ * do tile entre duas amostras, nunca "chega", e fica orbitando o waypoint.
  */
-const MAX_STEPS_WITHOUT_PROGRESS = 12
+const WAYPOINT_RADIUS = Math.ceil(BODY_SPEED / BODY_INPUT_HZ) + 3
+
+/**
+ * Zona morta MÍNIMA do esterço: abaixo disso o eixo já conta como alinhado.
+ *
+ * O piso é mínimo porque a zona morta real acompanha o quanto o corpo anda por
+ * amostra (ver `deadzone`): um alvo perseguido com passo maior que a tolerância
+ * é sempre ultrapassado, e o corpo passa a tremer em volta do centro do
+ * corredor a 30Hz, corrigindo para um lado e para o outro sem nunca acertar.
+ */
+const STEER_DEADZONE = 2
+
+/** O que conta como "andou de fato" entre duas amostras (ver `stuckTicks`). */
+const PROGRESS_EPSILON = 1.5
+
+/**
+ * Quanto tempo parado, ainda com a "tecla segurada", até dar o waypoint por
+ * recusado. É o que substitui o `sync` do movimento de grade: no contínuo o
+ * servidor não avisa mais passo a passo que recusou — ele só não deixa o corpo
+ * passar, e quem anda descobre por não sair do lugar.
+ */
+const STUCK_MS = 600
+const STUCK_TICKS = Math.ceil(STUCK_MS / (1000 / BODY_INPUT_HZ))
+
+/**
+ * Quantos waypoints podem ser recusados numa mesma caminhada antes de desistir.
+ *
+ * O recálculo já tira o tile recusado do grafo, então o normal é a rota nova
+ * resolver na primeira ou segunda vez. Este teto existe para o caso em que o
+ * grafo não tem como saber (kart que acabou de estacionar, corpo que não cabe
+ * num tile cujo CENTRO está livre): sem ele, o personagem alternaria entre duas
+ * rotas ruins para sempre.
+ */
+const MAX_REFUSALS = 8
 
 export interface FollowPathRequest {
   /** `true` = terminar no próprio tile-alvo; `false` = parar adjacente. */
@@ -25,16 +66,20 @@ export interface FollowPathRequest {
 
 export interface FollowOptions {
   pathfinder?: (from: TilePosition, to: TilePosition, request: FollowPathRequest) => Direction[] | null
-  /** Envia um passo ao servidor (via bridge.emitClientMessage move). */
-  emitMove: (dir: Direction) => void
+  /**
+   * Segura (ou solta, com `null`) a "tecla" da caminhada automática.
+   *
+   * O Seguir não manda passo: no movimento contínuo não há passo, há intenção.
+   * Quem transforma isto em deslocamento é a mesma amostragem de input do
+   * teclado, na cena — um caminho só até o servidor, e ele passa pela predição.
+   */
+  steer: (dir: MoveDirection | null) => void
   /** Chegou adjacente ao alvo; `facing` é a direção para encará-lo. */
   onArrived: (facing: Direction) => void
   /** Não foi possível concluir (alvo saiu, sem caminho). */
   onFailed: (reason: 'target-left' | 'no-path') => void
-  setTimer: (cb: () => void, ms: number) => number
-  clearTimer: (id: number) => void
-  /** Tempo sem `moved` até reenviar o passo. O rate limit descarta em silêncio. */
-  stepTimeoutMs?: number
+  /** Lado do tile em pixel — a conversão pixel↔tile mora aqui dentro. */
+  tileSize?: number
 }
 
 interface Ids {
@@ -42,119 +87,178 @@ interface Ids {
   targetId: string
 }
 
+interface Point {
+  x: number
+  y: number
+}
+
+/** A mesma composição de nome que o teclado faz em `OfficeScene.pressedMove`. */
+function moveFor(dx: number, dy: number, deadzone: number): MoveDirection | null {
+  const vertical = Math.abs(dy) <= deadzone ? '' : dy < 0 ? 'up' : 'down'
+  const horizontal = Math.abs(dx) <= deadzone ? '' : dx < 0 ? 'left' : 'right'
+  if (vertical && horizontal) return `${vertical}-${horizontal}` as MoveDirection
+  return (vertical || horizontal || null) as MoveDirection | null
+}
+
 /**
- * Orquestra a caminhada automática até outro personagem. Servidor-autoritativo:
- * emite UM passo, espera o `moved` do próprio confirmar a posição esperada, e
- * só então avança. `sync` (parede) ou timeout (drop silencioso do rate limit)
- * → recalcula/reenvia. Alvo que anda → recalcula. Classe pura: relógio e timer
- * são injetados, sem Phaser nem React.
+ * Orquestra a caminhada automática (Seguir alguém, aceitar chamada, clique
+ * direito, Ctrl/Cmd+D) até uma pessoa, uma mesa ou um ponto do mapa.
+ *
+ * O CAMINHO continua sendo Dijkstra sobre a grade de tiles — o mapa é de tiles,
+ * e a grade é boa. O que mudou com o movimento livre é o que se faz com ele: em
+ * vez de emitir um passo e esperar a confirmação de cada tile, o controlador
+ * persegue os tiles do caminho como **waypoints**, esterçando o corpo para o
+ * centro do próximo (`steer`) como se estivesse segurando a tecla.
+ *
+ * Ele raciocina em PIXEL de propósito: quem decide quando virar a esquina é a
+ * posição contínua, não o tile. Posição do próprio vem da PREDIÇÃO local
+ * (`onSelfBody`, na cadência do input) e não do snapshot: a predição é o que o
+ * corpo está fazendo agora, e o snapshot chega um round-trip atrasado — esterçar
+ * por ele faria o personagem virar depois da esquina. A dos OUTROS vem do
+ * snapshot (`onOccupantMoved`), que é a única fonte que existe para eles.
+ *
+ * Classe pura: sem Phaser, sem React e sem relógio — o "tempo" é a própria
+ * cadência de `onSelfBody`, que só corre enquanto a cena corre. Caminhada que
+ * fica sem heartbeat (aba escondida, entrada travada, cena desmontada) apenas
+ * para, em vez de seguir recalculando sozinha num timer.
  */
 export class FollowController {
   private ids: Ids | null = null
-  private self: TilePosition = { x: 0, y: 0 }
-  private target: TilePosition = { x: 0, y: 0 }
-  private path: Direction[] = []
+  private self: Point = { x: 0, y: 0 }
+  private target: Point = { x: 0, y: 0 }
+  /** Tiles do caminho, em ordem — o último é onde a caminhada termina. */
+  private path: TilePosition[] = []
   private index = 0
   /** `true` = anda até o próprio tile-alvo (clique no mapa); `false` = para adjacente (seguir pessoa/mesa). */
   private exact = false
   private fallback: FollowPathRequest['fallback'] = 'none'
-  /** Tile em que o passo já emitido deveria cair — a chave para reconhecer a recusa no `sync`. */
-  private pendingStep: TilePosition | null = null
   /** Tiles recusados pelo servidor nesta caminhada (ver `FollowPathRequest.blocked`). */
   private refused: TilePosition[] = []
   private refusedKeys = new Set<string>()
-  private stepsWithoutProgress = 0
-  /** Se algum passo desta caminhada chegou a ser confirmado — ver `fallback: 'closest'`. */
+  /** Onde o corpo estava da última vez que andou de fato (ver `PROGRESS_EPSILON`). */
+  private progressAnchor: Point = { x: 0, y: 0 }
+  /** Quanto o corpo andou na última amostra — a base da zona morta (ver `deadzone`). */
+  private lastStep = 0
+  private stuckTicks = 0
+  /** Recusas desta caminhada, CONTADAS (não as distintas): é o teto de insistência. */
+  private refusals = 0
+  /** Se algum trecho desta caminhada saiu do lugar — ver `fallback: 'closest'`. */
   private progressed = false
-  private timer: number | null = null
-  private readonly stepTimeoutMs: number
+  /** Última direção entregue ao `steer`, para não repetir o mesmo pedido. */
+  private steering: MoveDirection | null = null
+  private tileSize: number
 
   constructor(private readonly opts: FollowOptions) {
-    this.stepTimeoutMs = opts.stepTimeoutMs ?? 500
+    this.tileSize = opts.tileSize ?? TILE_SIZE
   }
 
   isActive(): boolean {
     return this.ids !== null
   }
 
-  setPathfinder(pathfinder: FollowOptions['pathfinder']): void {
-    this.opts.pathfinder = pathfinder
-    if (this.ids) this.recalculateAndStep()
+  /**
+   * Pathfinder e tamanho do tile chegam juntos porque vêm do mesmo lugar: o
+   * documento do mapa, que carrega depois do primeiro render e pode ser trocado
+   * (publicação, edição) no meio de uma caminhada.
+   */
+  configure(options: { pathfinder?: FollowOptions['pathfinder']; tileSize?: number }): void {
+    this.opts.pathfinder = options.pathfinder
+    this.tileSize = options.tileSize ?? TILE_SIZE
+    if (this.ids) this.recalculate()
   }
 
+  /**
+   * Começa a caminhada. `self` e `target` são PIXEL — a unidade em que o
+   * escritório fala desde o movimento livre (`OfficeOccupant.x/y`). Quem tem um
+   * tile na mão (clique direito, mesa) manda o CENTRO dele.
+   */
   start(
     ids: Ids,
-    self: TilePosition,
-    target: TilePosition,
+    self: Point,
+    target: Point,
     options: { exact?: boolean; fallback?: FollowPathRequest['fallback'] } = {},
   ): void {
     this.ids = ids
-    this.self = { ...self }
-    this.target = { ...target }
+    this.self = { x: self.x, y: self.y }
+    this.target = { x: target.x, y: target.y }
     this.exact = options.exact ?? false
     this.fallback = options.fallback ?? 'none'
     // O que foi recusado vale por caminhada: a sala pode ter destrancado, e a
     // próxima tentativa merece o mapa inteiro de novo.
     this.refused = []
     this.refusedKeys.clear()
-    this.pendingStep = null
-    this.stepsWithoutProgress = 0
+    this.progressAnchor = { x: self.x, y: self.y }
+    this.lastStep = 0
+    this.stuckTicks = 0
+    this.refusals = 0
     this.progressed = false
-    this.recalculateAndStep()
-  }
-
-  /** Recebe TODOS os `moved`; filtra pelo self e pelo target internamente. */
-  onMoved(userId: string, x: number, y: number, _dir: Direction): void {
-    if (!this.ids) return
-    if (userId === this.ids.selfId) {
-      // Só avança "no índice" se (x,y) for exatamente o tile esperado (self atual +
-      // a direção já emitida). Uma confirmação atrasada/fora de ordem (ex.: chegou
-      // depois de um recálculo disparado pelo alvo andando nesse meio-tempo) não
-      // corresponde mais ao `path`/`index` atuais — nesse caso re-ancora o self e
-      // recalcula do zero, em vez de indexar cegamente um array que assume outra
-      // posição de partida.
-      const dir = this.path[this.index]
-      const expected = dir
-        ? { x: this.self.x + DIRECTION_DELTAS[dir].x, y: this.self.y + DIRECTION_DELTAS[dir].y }
-        : null
-      // Andou de fato: a caminhada está progredindo, então o contador de
-      // insistência volta a zero.
-      this.stepsWithoutProgress = 0
-      this.pendingStep = null
-      this.progressed = true
-      if (expected && expected.x === x && expected.y === y) {
-        this.self = { x, y }
-        this.advance()
-      } else {
-        this.self = { x, y }
-        this.recalculateAndStep()
-      }
-    } else if (userId === this.ids.targetId) {
-      this.target = { x, y }
-      this.recalculateAndStep()
-    }
+    this.recalculate()
   }
 
   /**
-   * `sync` só chega quando o servidor RECUSOU o passo (parede, kart, ou porta
-   * de sala que o cliente não tem como prever). Se a posição não mudou, o tile
-   * que o passo mirava está fechado para esta pessoa: ele sai do grafo, e o
-   * recálculo procura outro caminho em vez de devolver a mesma rota.
+   * Posição PREVISTA do próprio, na cadência do input (`BODY_INPUT_HZ`).
+   *
+   * É o coração do controlador: cada chamada mede o progresso, avança os
+   * waypoints já alcançados e reesterça. Também é o único "relógio" — é por
+   * contagem de amostras sem progresso que a recusa do servidor é descoberta.
    */
-  onSync(x: number, y: number): void {
+  onSelfBody(x: number, y: number): void {
     if (!this.ids) return
-    const step = this.pendingStep
-    if (step && this.self.x === x && this.self.y === y) this.refuse(step)
-    this.pendingStep = null
+    this.lastStep = distance(this.self, { x, y })
     this.self = { x, y }
-    this.recalculateAndStep()
+
+    if (distance(this.self, this.progressAnchor) > PROGRESS_EPSILON) {
+      this.progressAnchor = { x, y }
+      this.stuckTicks = 0
+      this.progressed = true
+    } else {
+      this.stuckTicks += 1
+    }
+
+    if (this.atTarget()) return this.arrive()
+
+    // Parado com a tecla segurada: o corpo não passa por ali. Pode ser porta de
+    // sala recusada (o servidor não avisa mais passo a passo), kart que acabou
+    // de estacionar, ou um tile que o Dijkstra deu por livre porque só olha o
+    // CENTRO e o corpo, que tem largura, não cabe. Nos três casos a resposta é a
+    // mesma: aquele waypoint sai do grafo e a rota se refaz.
+    if (this.stuckTicks >= STUCK_TICKS) {
+      const waypoint = this.path[this.index]
+      this.stuckTicks = 0
+      if (waypoint) return this.refuse(waypoint)
+      return this.recalculate()
+    }
+
+    this.advanceWaypoints()
+    if (this.index >= this.path.length) return this.recalculate()
+    this.steerToward(this.path[this.index]!)
   }
 
-  private refuse(tile: TilePosition): void {
-    const key = `${tile.x},${tile.y}`
-    if (this.refusedKeys.has(key)) return
-    this.refusedKeys.add(key)
-    this.refused.push(tile)
+  /**
+   * Snapshot: alguém andou. Só o ALVO interessa — a posição do próprio vem da
+   * predição (`onSelfBody`), que é a mesma que o corpo está desenhando.
+   *
+   * Recalcula apenas quando o alvo troca de TILE: o caminho é de tiles, e
+   * refazer Dijkstra a cada snapshot (20Hz) devolveria sempre a mesma rota.
+   */
+  onOccupantMoved(userId: string, x: number, y: number): void {
+    if (!this.ids || userId !== this.ids.targetId) return
+    const before = this.tileOf(this.target)
+    this.target = { x, y }
+    const after = this.tileOf(this.target)
+    if (before.x !== after.x || before.y !== after.y) this.recalculate()
+  }
+
+  /**
+   * O servidor recusou a entrada num tile (sala trancada, lotada, allowlist).
+   *
+   * Chega por `room-entry-denied`, que é o único aviso de recusa que sobreviveu
+   * ao movimento livre — e é PRECISO, ao contrário do detector de travamento,
+   * que precisa esperar `STUCK_MS` para concluir a mesma coisa.
+   */
+  refuseTile(tile: TilePosition): void {
+    if (!this.ids) return
+    this.refuse(tile)
   }
 
   onTargetLeft(userId: string): void {
@@ -163,65 +267,107 @@ export class FollowController {
     }
   }
 
+  /** Encerra a caminhada e SOLTA a tecla — sem isso o personagem seguiria andando. */
   cancel(): void {
-    this.stopTimer()
     this.ids = null
     this.path = []
     this.index = 0
-    this.pendingStep = null
+    this.stuckTicks = 0
+    this.steer(null)
   }
 
-  /** Avança um passo do caminho já calculado após um `moved` confirmar. */
-  private advance(): void {
-    this.stopTimer()
-    this.index += 1
-    if (this.index >= this.path.length) {
-      // Caminho terminou: se estamos adjacentes, chegou; senão recalcula.
-      if (this.atTarget()) return this.arrive()
-      return this.recalculateAndStep()
+  private refuse(tile: TilePosition): void {
+    const key = `${tile.x},${tile.y}`
+    if (!this.refusedKeys.has(key)) {
+      this.refusedKeys.add(key)
+      this.refused.push(tile)
     }
-    this.emitStep()
+    // Conta a RECUSA, não o tile distinto: quando o mapa não tem como saber que
+    // aquele tile é proibido, o recálculo devolve a mesma rota e a mesma porta
+    // seria recusada para sempre. É o teto que transforma insistência em aviso.
+    this.refusals += 1
+    if (this.refusals > MAX_REFUSALS) return this.fail('no-path')
+    this.recalculate()
   }
 
-  private recalculateAndStep(): void {
-    this.stopTimer()
+  /**
+   * Consome os waypoints que o corpo já alcançou.
+   *
+   * Alcançar é chegar perto do CENTRO, não entrar no tile: quem vira a esquina
+   * na borda raspa a quina, e o esterço diagonal a partir da borda empurraria o
+   * corpo contra ela. Andar pelo meio do corredor é o que o caminho de tiles
+   * quer dizer.
+   *
+   * A exceção é ter passado batido — o corpo já está no tile SEGUINTE do
+   * caminho. Aí insistir no centro do anterior seria mandar voltar.
+   */
+  private advanceWaypoints(): void {
+    const tile = this.tileOf(this.self)
+    while (this.index < this.path.length) {
+      const waypoint = this.path[this.index]!
+      const next = this.path[this.index + 1]
+      const reached = distance(this.self, this.centerOf(waypoint)) <= WAYPOINT_RADIUS
+      const passed = next !== undefined && tile.x === next.x && tile.y === next.y
+      if (!reached && !passed) break
+      this.index += 1
+    }
+  }
+
+  private recalculate(): void {
     if (!this.ids) return
     if (this.atTarget()) return this.arrive()
-    const path =
-      this.opts.pathfinder?.(this.self, this.target, {
+    const from = this.tileOf(this.self)
+    const directions =
+      this.opts.pathfinder?.(from, this.tileOf(this.target), {
         exact: this.exact,
         blocked: this.refused,
         fallback: this.fallback,
       }) ?? null
-    if (path === null) {
+    if (directions === null) {
       // Com `fallback: 'closest'` o pathfinder já entregou o tile alcançável
       // mais perto; quando não há mais nada mais próximo E a pessoa saiu do
       // lugar, isso é chegada (foi o mais perto que dava), não falha.
       if (this.fallback === 'closest' && this.progressed) return this.arrive()
       return this.fail('no-path')
     }
-    if (path.length === 0) return this.arrive()
-    this.path = path
+    if (directions.length === 0) return this.arrive()
+    this.path = tilesOfPath(from, directions)
     this.index = 0
-    this.emitStep()
+    // Recalcular do tile em que já se está devolve o próprio tile como partida:
+    // os waypoints alcançados saem agora, senão o esterço mandaria o corpo
+    // VOLTAR ao centro do tile de onde acabou de sair.
+    this.advanceWaypoints()
+    if (this.index >= this.path.length) return this.arrive()
+    this.steerToward(this.path[this.index]!)
   }
 
-  private emitStep(): void {
-    const dir = this.path[this.index]
-    this.stepsWithoutProgress += 1
-    if (this.stepsWithoutProgress > MAX_STEPS_WITHOUT_PROGRESS) return this.fail('no-path')
-    const delta = DIRECTION_DELTAS[dir]
-    this.pendingStep = { x: this.self.x + delta.x, y: this.self.y + delta.y }
-    this.opts.emitMove(dir)
-    this.timer = this.opts.setTimer(() => {
-      // Nenhum `moved` chegou: rate limit descartou. Recalcula do ponto atual.
-      this.recalculateAndStep()
-    }, this.stepTimeoutMs)
+  private steerToward(tile: TilePosition): void {
+    const center = this.centerOf(tile)
+    this.steer(moveFor(center.x - this.self.x, center.y - this.self.y, this.deadzone()))
+  }
+
+  /**
+   * Tolerância de alinhamento: nunca menor que o passo da última amostra.
+   *
+   * Sai medida, e não cravada, porque o passo muda — corrida (`sprint`), quadro
+   * longo, aba que voltou do background. Cravada em pixel, bastaria correr para
+   * o corpo voltar a tremer em volta do centro.
+   */
+  private deadzone(): number {
+    return Math.max(STEER_DEADZONE, this.lastStep)
+  }
+
+  private steer(dir: MoveDirection | null): void {
+    if (dir === this.steering) return
+    this.steering = dir
+    this.opts.steer(dir)
   }
 
   private atTarget(): boolean {
-    if (this.exact) return this.self.x === this.target.x && this.self.y === this.target.y
-    return Math.abs(this.self.x - this.target.x) + Math.abs(this.self.y - this.target.y) === 1
+    const self = this.tileOf(this.self)
+    const target = this.tileOf(this.target)
+    if (this.exact) return self.x === target.x && self.y === target.y
+    return Math.abs(self.x - target.x) + Math.abs(self.y - target.y) === 1
   }
 
   private arrive(): void {
@@ -231,9 +377,10 @@ export class FollowController {
   }
 
   private facingTarget(): Direction | null {
+    const self = this.tileOf(this.self)
+    const target = this.tileOf(this.target)
     for (const dir of ['up', 'down', 'left', 'right'] as const) {
-      if (this.self.x + DIRECTION_DELTAS[dir].x === this.target.x &&
-          this.self.y + DIRECTION_DELTAS[dir].y === this.target.y) {
+      if (self.x + DIRECTION_DELTAS[dir].x === target.x && self.y + DIRECTION_DELTAS[dir].y === target.y) {
         return dir
       }
     }
@@ -245,10 +392,26 @@ export class FollowController {
     this.opts.onFailed(reason)
   }
 
-  private stopTimer(): void {
-    if (this.timer !== null) {
-      this.opts.clearTimer(this.timer)
-      this.timer = null
-    }
+  private tileOf(point: Point): TilePosition {
+    return tileOfPixel(point, this.tileSize)
   }
+
+  private centerOf(tile: TilePosition): Point {
+    return { x: (tile.x + 0.5) * this.tileSize, y: (tile.y + 0.5) * this.tileSize }
+  }
+}
+
+function distance(a: Point, b: Point): number {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+/** Direções do Dijkstra → tiles absolutos, que é o que o esterço persegue. */
+function tilesOfPath(from: TilePosition, directions: readonly Direction[]): TilePosition[] {
+  const tiles: TilePosition[] = []
+  let current = from
+  for (const dir of directions) {
+    current = { x: current.x + DIRECTION_DELTAS[dir].x, y: current.y + DIRECTION_DELTAS[dir].y }
+    tiles.push(current)
+  }
+  return tiles
 }

@@ -35,7 +35,7 @@ async function makePdiBadge(threshold: number, slug = `pdi-${threshold}`) {
 /** Curso publicado com N aulas de 30 min. */
 async function makeCourse(slug: string, lessonCount = 1) {
   const course = await prisma.course.create({
-    data: { slug, title: `Curso ${slug}`, category: 'Liderança', published: true, publishedAt: new Date() },
+    data: { slug, title: `Curso ${slug}`, status: 'PUBLISHED', publishedAt: new Date() },
   })
   const courseModule = await prisma.courseModule.create({ data: { courseId: course.id, title: 'Módulo' } })
   const lessons = []

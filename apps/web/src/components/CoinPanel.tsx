@@ -1,9 +1,23 @@
 import { Link } from 'react-router-dom'
-import { COIN_CURRENCY_LABEL, COIN_EVENT_LABELS, COIN_TRANSACTION_KIND_LABELS } from '@legends/shared'
+import {
+  COIN_CURRENCY_LABEL,
+  COIN_EVENT_LABELS,
+  COIN_TRANSACTION_KIND_LABELS,
+  XP_CURRENCY_LABEL,
+} from '@legends/shared'
 import { useCoinBalance, useCoinLedger } from '../lib/use-coins'
+import { useXpBalance } from '../lib/use-xp'
 import { Icon } from './Icon'
 
 const RECENT_COUNT = 5
+
+/** "26/08/2026 às 14:30" — dia e hora do último lançamento, em pt-BR. */
+function formatarAtualizacao(iso: string): string {
+  const data = new Date(iso)
+  const dia = data.toLocaleDateString('pt-BR')
+  const hora = data.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return `${dia} às ${hora}`
+}
 
 /**
  * Painel do chip de saldo: quanto você tem, o que entrou por último e o
@@ -12,12 +26,23 @@ const RECENT_COUNT = 5
  * As regras ("+3 por registrar o humor…") saíram daqui de propósito: elas
  * moram no Manual do Game, e repeti-las no widget criava duas fontes que
  * divergiam no primeiro ajuste de valor. O widget aponta para a fonte.
+ *
+ * **Duas moedas, um painel** (Documento 4, seção 10). Pontos e EMR Coins são
+ * carteiras diferentes e ficavam em telas diferentes — o saldo de Pontos só
+ * aparecia no card de perfil. Aqui os dois vêm juntos porque a pergunta de
+ * quem abre o chip é uma só: quanto eu tenho.
  */
 export function CoinPanel({ onClose }: { onClose: () => void }) {
   const balance = useCoinBalance()
+  const xp = useXpBalance()
   // Reaproveita o cache da primeira página do extrato usada na Lojinha.
   const ledger = useCoinLedger(1)
-  const recent = (ledger.data?.entries ?? []).slice(0, RECENT_COUNT)
+  const entries = ledger.data?.entries ?? []
+  const recent = entries.slice(0, RECENT_COUNT)
+  // O extrato vem do mais recente para o mais antigo, então o primeiro é a
+  // última movimentação. Carteira sem lançamento não tem "atualizado em":
+  // data de nada não informa nada.
+  const atualizadoEm = entries[0]?.createdAt ?? null
 
   return (
     <div
@@ -39,8 +64,26 @@ export function CoinPanel({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      <p className="font-headline text-headline-md font-bold text-on-surface">{balance.data?.balance ?? 0}</p>
-      <p className="font-label text-label-sm text-on-surface-variant">saldo atual</p>
+      <div className="flex flex-wrap items-end gap-lg">
+        <div>
+          <p className="font-headline text-headline-md font-bold text-on-surface">
+            {balance.data?.balance ?? 0}
+          </p>
+          <p className="font-label text-label-sm text-on-surface-variant">{COIN_CURRENCY_LABEL}</p>
+        </div>
+        <div>
+          <p className="flex items-center gap-xs font-headline text-headline-md font-bold text-on-surface">
+            <span aria-hidden>🥇</span>
+            {xp.data?.points ?? 0}
+          </p>
+          <p className="font-label text-label-sm text-on-surface-variant">{XP_CURRENCY_LABEL}</p>
+        </div>
+      </div>
+      {atualizadoEm && (
+        <p className="mt-xs font-label text-label-sm text-on-surface-variant">
+          Atualizado em {formatarAtualizacao(atualizadoEm)}
+        </p>
+      )}
 
       <Link
         to="/manual-game"
@@ -49,7 +92,7 @@ export function CoinPanel({ onClose }: { onClose: () => void }) {
       >
         <Icon name="help_center" className="text-[20px] text-primary" />
         <span className="flex-1 font-label text-label-md text-on-surface group-hover:underline">
-          Como ganhar {COIN_CURRENCY_LABEL}
+          Como ganhar e usar suas {COIN_CURRENCY_LABEL}
         </span>
         <Icon
           name="arrow_forward"
@@ -57,7 +100,7 @@ export function CoinPanel({ onClose }: { onClose: () => void }) {
         />
       </Link>
 
-      <h3 className="mt-lg font-label text-label-md text-on-surface">Últimos lançamentos</h3>
+      <h3 className="mt-lg font-label text-label-md text-on-surface">Suas últimas atividades</h3>
       {recent.length > 0 ? (
         <ul className="mt-sm flex flex-col gap-1">
           {recent.map((entry) => (

@@ -100,3 +100,57 @@ test('sem searchable não renderiza o campo de busca', () => {
   fireEvent.click(screen.getByRole('combobox', { name: 'Selecionar membro' }))
   expect(screen.queryByLabelText('Buscar em Selecionar membro')).not.toBeInTheDocument()
 })
+
+// A opção desabilitada existe, aparece e não é escolhível — é o atalho "Hoje"
+// na aba Clima, cujo recorte a API recusa.
+test('opção desabilitada não é escolhida no clique nem no Enter', () => {
+  const { onChange } = setup({
+    options: [OPTIONS[0]!, { ...OPTIONS[1]!, disabled: true }, OPTIONS[2]!],
+  })
+  fireEvent.click(screen.getByRole('combobox', { name: 'Selecionar membro' }))
+
+  const desabilitada = screen.getByRole('option', { name: 'Diego Barreto' })
+  expect(desabilitada).toHaveAttribute('aria-disabled', 'true')
+  fireEvent.click(desabilitada)
+  expect(onChange).not.toHaveBeenCalled()
+  expect(screen.getByRole('listbox')).toBeInTheDocument()
+})
+
+test('a seta pula a opção desabilitada em vez de encalhar nela', () => {
+  const { onChange } = setup({
+    options: [OPTIONS[0]!, { ...OPTIONS[1]!, disabled: true }, OPTIONS[2]!],
+  })
+  const trigger = screen.getByRole('combobox', { name: 'Selecionar membro' })
+  fireEvent.click(trigger)
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  fireEvent.keyDown(trigger, { key: 'Enter' })
+  expect(onChange).toHaveBeenCalledWith('c')
+})
+
+// O painel ficava preso à largura do gatilho: "Últimos 7 dias" quebrava em duas
+// linhas e ia parar atrás da barra de rolagem.
+test('o painel se dimensiona pelo conteúdo, não pela largura do gatilho', () => {
+  setup()
+  fireEvent.click(screen.getByRole('combobox', { name: 'Selecionar membro' }))
+
+  const painel = screen.getByRole('listbox').closest('div')
+  expect(painel).toHaveClass('w-max', 'min-w-full')
+  // Sem isto o CSS promove o eixo x para `auto` e nasce uma barra horizontal.
+  expect(screen.getByRole('listbox')).toHaveClass('overflow-x-hidden')
+})
+
+test('encostando na borda da janela, o painel vira para a esquerda', () => {
+  const original = Element.prototype.getBoundingClientRect
+  // Painel medido além da borda direita: é a situação do filtro de Setor, no
+  // canto do cabeçalho.
+  Element.prototype.getBoundingClientRect = function () {
+    return { right: window.innerWidth + 120, left: 0, top: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect
+  }
+  try {
+    setup()
+    fireEvent.click(screen.getByRole('combobox', { name: 'Selecionar membro' }))
+    expect(screen.getByRole('listbox').closest('div')).toHaveClass('right-0')
+  } finally {
+    Element.prototype.getBoundingClientRect = original
+  }
+})

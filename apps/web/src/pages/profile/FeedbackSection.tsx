@@ -12,6 +12,7 @@ import type {
 import {
   MIN_FEEDBACK_FIELD_LENGTH,
   FEEDBACK_CATEGORY_LABELS,
+  FEEDBACK_MESSAGE_MAX_LENGTH,
   FEEDBACK_REACTIONS,
   PUBLIC_FEEDBACK_CATEGORIES,
   PROFILE_FEEDBACK_PAGE_SIZE,
@@ -20,6 +21,7 @@ import { ApiError, apiFetch } from '../../lib/api'
 import { applyToggle } from '../../lib/reaction-toggle'
 import { FEEDBACK_CATEGORY_BADGE } from '../../lib/feedback-category'
 import { SHARED_FEEDBACKS_KEY } from '../mural-feedbacks/shared-feedbacks'
+import { FeedbackComments } from '../mural-feedbacks/FeedbackComments'
 import { SelectMenu } from '../../components/SelectMenu'
 import { Icon } from '../../components/Icon'
 import { Avatar } from '../../components/Avatar'
@@ -56,6 +58,9 @@ export function FeedbackSection({
   const [error, setError] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
   const [categoryFilter, setCategoryFilter] = useState('')
+  // Quais feedbacks estão com as respostas abertas. Um conjunto, e não um id
+  // só: como no mural, abrir a conversa de um feedback não fecha a do outro.
+  const [openComments, setOpenComments] = useState<ReadonlySet<string>>(() => new Set())
   // Âncora do deep-link: some assim que o servidor responde em que página o
   // feedback caiu. Enquanto está setada, é ela — e não `offset` — que manda.
   const [anchor, setAnchor] = useState<string | null>(highlightId ?? null)
@@ -247,6 +252,14 @@ export function FeedbackSection({
     update.mutate({ id, body: { message: editMessage.trim() } })
   }
 
+  function toggleComments(id: string) {
+    setOpenComments((open) => {
+      const next = new Set(open)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+  }
+
   return (
     <div className={outerCls}>
       <div className="mb-lg flex flex-col gap-md sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
@@ -291,6 +304,7 @@ export function FeedbackSection({
             const isPublic = (PUBLIC_FEEDBACK_CATEGORIES as readonly string[]).includes(feedback.category)
             const canShare = isTarget && isPublic
             const isShared = feedback.sharedAt !== null
+            const commentsOpen = openComments.has(feedback.id)
             // Mesmos chips do card do mural — sem eles, escolher competência no
             // formulário aqui não apareceria em lugar nenhum.
             const chips = [
@@ -368,10 +382,13 @@ export function FeedbackSection({
                     <textarea
                       className="min-h-[100px] rounded-md border border-outline-variant/60 bg-surface-container-highest px-sm py-2 text-body-sm text-on-surface outline-none focus:border-primary"
                       value={editMessage}
-                      onChange={(e) => setEditMessage(e.target.value)}
+                      onChange={(e) => setEditMessage(e.target.value.slice(0, FEEDBACK_MESSAGE_MAX_LENGTH))}
                       aria-label="Editar mensagem do feedback"
                       autoFocus
                     />
+                    <span className="text-right font-label text-label-sm text-on-surface-variant">
+                      {editMessage.length}/{FEEDBACK_MESSAGE_MAX_LENGTH}
+                    </span>
                     {editError && (
                       <p role="alert" className="flex items-center gap-sm text-body-sm text-error">
                         <Icon name="error" className="text-[16px]" />
@@ -400,13 +417,30 @@ export function FeedbackSection({
                   <p className="whitespace-pre-wrap text-body-sm text-on-surface">{feedback.message}</p>
                 )}
                 <div className="mt-sm flex flex-wrap items-center justify-between gap-sm">
-                  <FeedbackReactions
-                    reactions={feedback.reactions}
-                    options={FEEDBACK_REACTIONS}
-                    onToggle={(emoji) => {
-                      if (user) toggleReaction.mutate({ feedbackId: feedback.id, emoji })
-                    }}
-                  />
+                  <div className="flex flex-wrap items-center gap-md">
+                    <FeedbackReactions
+                      reactions={feedback.reactions}
+                      options={FEEDBACK_REACTIONS}
+                      onToggle={(emoji) => {
+                        if (user) toggleReaction.mutate({ feedbackId: feedback.id, emoji })
+                      }}
+                    />
+                    {/* Responder aqui é o mesmo do mural, e no perfil vale
+                        também para o feedback privado: quem pode responder é o
+                        servidor que decide (`requireVisibleFeedback`). */}
+                    <button
+                      type="button"
+                      onClick={() => toggleComments(feedback.id)}
+                      aria-label="Responder"
+                      aria-pressed={commentsOpen}
+                      className={`flex items-center gap-xs font-label text-label-sm transition-colors hover:text-primary ${
+                        commentsOpen ? 'text-primary' : 'text-on-surface-variant'
+                      }`}
+                    >
+                      <Icon name="chat_bubble" className="text-[18px]" />
+                      {feedback.commentCount > 0 ? feedback.commentCount : 'Responder'}
+                    </button>
+                  </div>
                   {canShare && (
                     <button
                       type="button"
@@ -425,6 +459,9 @@ export function FeedbackSection({
                     </button>
                   )}
                 </div>
+                {/* `invalidate` porque o contador de respostas vive no feedback,
+                    e a lista do perfil é quem o carrega. */}
+                {commentsOpen && <FeedbackComments feedbackId={feedback.id} onChange={invalidate} />}
               </li>
             )
           })}

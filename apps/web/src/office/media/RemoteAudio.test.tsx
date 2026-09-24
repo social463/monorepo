@@ -31,14 +31,26 @@ describe('RemoteAudio', () => {
     await waitFor(() => expect(setSinkId).toHaveBeenCalledWith('out-1'))
   })
 
-  it('sem outputDeviceId (padrão do sistema), não chama setSinkId', async () => {
-    const setSinkId = vi.fn()
+  it('sem outputDeviceId, fixa a saída no padrão do sistema', async () => {
+    const setSinkId = vi.fn().mockResolvedValue(undefined)
     withFakeSetSinkId(setSinkId)
 
     render(<RemoteAudio track={fakeTrack()} />)
-    await Promise.resolve()
 
-    expect(setSinkId).not.toHaveBeenCalled()
+    await waitFor(() => expect(setSinkId).toHaveBeenCalledWith(''))
+  })
+
+  it('trocar de um dispositivo para o padrão do sistema reaplica o sink', async () => {
+    const setSinkId = vi.fn().mockResolvedValue(undefined)
+    withFakeSetSinkId(setSinkId)
+
+    const track = fakeTrack()
+    const { rerender } = render(<RemoteAudio track={track} outputDeviceId="out-1" />)
+    await waitFor(() => expect(setSinkId).toHaveBeenCalledWith('out-1'))
+
+    rerender(<RemoteAudio track={track} outputDeviceId={null} />)
+
+    await waitFor(() => expect(setSinkId).toHaveBeenCalledWith(''))
   })
 
   it('não quebra quando o navegador não suporta setSinkId', () => {

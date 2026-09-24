@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
@@ -56,6 +56,8 @@ function post(overrides: Record<string, unknown> = {}) {
     reactors: [],
     reactorCount: 0,
     commentCount: 0,
+    viewerRead: true,
+    tag: null,
     mentions: [],
     ...overrides,
   }
@@ -108,5 +110,15 @@ describe('CorporateFeedPreview', () => {
     // Miniatura ao lado do texto, e não a imagem em largura cheia como no mural.
     expect(thumb!.className).toContain('h-16')
     expect(thumb!.className).not.toContain('w-full')
+  })
+
+  it('marca "Novo" o comunicado que a pessoa ainda não abriu', async () => {
+    // Quem responde se já leu é o servidor (`CorporatePostRead`), não a Home.
+    wrap([post({ id: 'p1', viewerRead: false }), post({ id: 'p2', title: 'Já lido', viewerRead: true })])
+
+    const naoLido = await screen.findByText('Treinamento de Produtos EMR!')
+    expect(within(naoLido.closest('li')!).getByText('Novo')).toBeInTheDocument()
+    const lido = screen.getByText('Já lido')
+    expect(within(lido.closest('li')!).queryByText('Novo')).not.toBeInTheDocument()
   })
 })

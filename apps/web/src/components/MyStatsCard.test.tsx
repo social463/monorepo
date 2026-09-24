@@ -31,7 +31,7 @@ function wrap(ui: ReactNode) {
 function badge(slug: string, name: string, current: number, target: number, kind = 'IMPACT'): unknown {
   return {
     id: slug, slug, name, description: 'd', kind, iconKey: 'k',
-    threshold: target, categorySlug: null, requirement: 'r',
+    threshold: target, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, requirement: 'r',
     progress: { current, target },
   }
 }

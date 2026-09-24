@@ -5,8 +5,14 @@ import { fetchMonthVacations } from '../lib/vacations-api'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 
-/** Quantas pessoas cabem no card antes do "ver todas". */
-const PREVIEW = 4
+/**
+ * Quantas pessoas cabem no card antes do "ver todas".
+ *
+ * Três, e não quatro: a coluna da direita da Home empilha quatro blocos, e a
+ * G&G apontou que férias e ranking ocupavam espaço demais. O resto continua a um
+ * clique no "Ver todas".
+ */
+const PREVIEW = 3
 
 /** `2026-08-12` → `12/08`. Comparação e corte de string, sem `Date` nem fuso. */
 function shortDate(ymd: string): string {
@@ -37,7 +43,7 @@ export function MonthVacationsCard({ today = new Date() }: { today?: Date }) {
   return (
     <aside
       data-testid="month-vacations-card"
-      className="flex flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="flex min-w-0 flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       <h2 className="flex items-center gap-sm font-headline text-body-lg font-semibold text-on-surface">
         <Icon name="beach_access" className="text-[20px] text-primary" />
@@ -47,25 +53,30 @@ export function MonthVacationsCard({ today = new Date() }: { today?: Date }) {
       {preview.length === 0 ? (
         <p className="text-body-sm text-on-surface-variant">Ninguém de férias neste mês.</p>
       ) : (
-        <ul className="flex flex-col gap-sm">
+        <ul className="flex flex-col gap-xs">
           {preview.map((vacation) => {
             const ongoing = isOngoing(vacation, todayYmd)
             return (
-              <li key={vacation.id} className="flex items-center gap-md">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
+              // Uma linha por pessoa, e não duas: nome e período dividem a
+              // mesma linha, e "Ausente" virou um ponto — a informação é a
+              // mesma, a altura do bloco caiu pela metade.
+              <li key={vacation.id} className="flex items-center gap-sm">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
                   <Avatar user={vacation.user} />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-label text-label-md text-on-surface">{vacation.user.name}</p>
-                  <p className="truncate text-body-sm text-on-surface-variant">
-                    {shortDate(vacation.startDate)} a {shortDate(vacation.endDate)}
-                  </p>
-                </div>
                 {ongoing && (
-                  <span className="shrink-0 rounded-full bg-primary-container px-sm py-0.5 font-label text-label-sm text-on-primary-container">
-                    Ausente
-                  </span>
+                  <span
+                    aria-label="Ausente hoje"
+                    title="Ausente hoje"
+                    className="h-2 w-2 shrink-0 rounded-full bg-primary"
+                  />
                 )}
+                <p className="min-w-0 flex-1 truncate font-label text-label-md text-on-surface">
+                  {vacation.user.name}
+                </p>
+                <span className="shrink-0 text-body-sm text-on-surface-variant">
+                  {shortDate(vacation.startDate)}–{shortDate(vacation.endDate)}
+                </span>
               </li>
             )
           })}

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { vi, type Mock } from 'vitest'
@@ -55,7 +55,8 @@ describe('CollaboratorsSection', () => {
 
   it('edits a collaborator email and password (PATCH)', async () => {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     fireEvent.click(screen.getByRole('button', { name: /^editar$/i }))
     fireEvent.change(screen.getByLabelText(/e-mail do colaborador/i), { target: { value: 'novo@e.com' } })
@@ -71,7 +72,8 @@ describe('CollaboratorsSection', () => {
 
   it('keeps the password unchanged when the field is left blank', async () => {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     fireEvent.click(screen.getByRole('button', { name: /^editar$/i }))
     fireEvent.change(screen.getByLabelText(/cargo do colaborador/i), { target: { value: 'Staff SRE' } })
@@ -85,7 +87,8 @@ describe('CollaboratorsSection', () => {
 
   it('pré-preenche a data de nascimento e envia a nova no PATCH', async () => {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     fireEvent.click(screen.getByRole('button', { name: /^editar$/i }))
     const input = screen.getByLabelText(/data de nascimento do colaborador/i)
@@ -101,7 +104,8 @@ describe('CollaboratorsSection', () => {
 
   it('envia null ao limpar a data de nascimento', async () => {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     fireEvent.click(screen.getByRole('button', { name: /^editar$/i }))
     fireEvent.change(screen.getByLabelText(/data de nascimento do colaborador/i), { target: { value: '' } })
@@ -165,14 +169,15 @@ describe('CollaboratorsSection', () => {
 
   it('abre o diálogo de férias pela linha do colaborador', async () => {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     await userEvent.click(await screen.findByRole('button', { name: /^férias$/i }))
     expect(screen.getByLabelText(/início/i)).toBeInTheDocument()
   })
 })
 
-describe('CollaboratorsSection — agrupamento por setor', () => {
+describe('CollaboratorsSection — listagem tabular (Documento 3, seção 4.4)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockApiFetch.mockImplementation((path: string, options?: RequestInit) => {
@@ -198,25 +203,38 @@ describe('CollaboratorsSection — agrupamento por setor', () => {
     })
   })
 
-  it('separa os colaboradores em um acordeão por setor, recolhido por padrão', async () => {
+  it('mostra todo mundo numa linha só, sem acordeão para abrir', async () => {
     renderSection()
-    const comercialToggle = await screen.findByRole('button', { name: /comercial \(1\)/i })
-    const devToggle = screen.getByRole('button', { name: /desenvolvimento \(2\)/i })
-    expect(comercialToggle).toHaveAttribute('aria-expanded', 'false')
-    expect(devToggle).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('Ana Comercial')).not.toBeInTheDocument()
-    expect(screen.queryByText('Bruno Dev')).not.toBeInTheDocument()
 
-    fireEvent.click(devToggle)
-    expect(devToggle).toHaveAttribute('aria-expanded', 'true')
+    // Todas as pessoas visíveis de uma vez: era preciso adivinhar o setor certo
+    // antes de achar alguém.
+    expect(await screen.findByText('Ana Comercial')).toBeInTheDocument()
     expect(screen.getByText('Bruno Dev')).toBeInTheDocument()
     expect(screen.getByText('Carla Dev')).toBeInTheDocument()
-    // Comercial continua recolhido — expandir um setor não expande os outros.
-    expect(screen.queryByText('Ana Comercial')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /desenvolvimento \(2\)/i })).not.toBeInTheDocument()
+  })
 
-    fireEvent.click(devToggle)
-    expect(devToggle).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('Bruno Dev')).not.toBeInTheDocument()
+  it('traz as colunas que a G&G pediu, com o setor resolvido pelo nome', async () => {
+    renderSection()
+    await screen.findByText('Ana Comercial')
+
+    for (const coluna of ['Nome', 'Setor', 'Cargo', 'Líder', 'Tags', 'Status']) {
+      expect(screen.getByRole('columnheader', { name: coluna })).toBeInTheDocument()
+    }
+    const linha = screen.getByText('Bruno Dev').closest('tr')!
+    expect(within(linha).getByRole('cell', { name: 'Desenvolvimento' })).toBeInTheDocument()
+    expect(within(linha).getByText('Ativo')).toBeInTheDocument()
+  })
+
+  it('filtra por status sem tocar na busca', async () => {
+    renderSection()
+    await screen.findByText('Ana Comercial')
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Filtrar por status' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'Desligado' }))
+
+    expect(screen.queryByText('Ana Comercial')).not.toBeInTheDocument()
+    expect(screen.getByText('Nenhuma pessoa encontrada com esses filtros.')).toBeInTheDocument()
   })
 
   it('coloca usuário com setor desconhecido em "Sem setor"', async () => {
@@ -233,8 +251,8 @@ describe('CollaboratorsSection — agrupamento por setor', () => {
       return Promise.reject(new Error(`unexpected ${path} ${method ?? ''}`))
     })
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /sem setor \(1\)/i }))
-    expect(screen.getByText('Órfã Setor')).toBeInTheDocument()
+    // Setor apagado não some da listagem: a pessoa aparece com o setor em branco.
+    expect(await screen.findByText('Órfã Setor')).toBeInTheDocument()
   })
 })
 
@@ -266,7 +284,8 @@ describe('CollaboratorsSection — acesso administrativo', () => {
 
   async function abrirEdicao() {
     renderSection()
-    fireEvent.click(await screen.findByRole('button', { name: /plataforma \(1\)/i }))
+    // Sem acordeão desde a seção 4.4: a linha já está na tela.
+    await screen.findByRole('table')
     await screen.findAllByText('Diego Reis')
     fireEvent.click(screen.getByRole('button', { name: /^editar$/i }))
   }
@@ -316,7 +335,16 @@ describe('filterCollaborators', () => {
   const bruno = { ...base, id: '2', name: 'Bruno', email: 'bruno@e.com', role: 'LEAD', position: 'Tech Lead', squad: 'Beta', sectorId: 's2' } as never
   const carla = { ...base, id: '3', name: 'Carla', email: 'carla@e.com', role: 'LEGEND', position: null, squad: null, sectorId: 's1' } as never
   const todos = [ana, bruno, carla]
-  const vazio = { search: '', sectorId: '', squad: '', role: '' }
+  const vazio = {
+    search: '',
+    sectorId: '',
+    squad: '',
+    role: '',
+    position: '',
+    managerId: '',
+    tag: '',
+    status: '',
+  }
 
   it('sem filtro devolve todo mundo', () => {
     expect(filterCollaborators(todos, vazio)).toHaveLength(3)
@@ -343,6 +371,33 @@ describe('filterCollaborators', () => {
   it('não encontra nada devolve lista vazia, sem quebrar em campo nulo', () => {
     expect(filterCollaborators(todos, { ...vazio, search: 'zzz' })).toEqual([])
   })
+
+  it('filtra por cargo, líder e tag — as colunas novas da seção 4.4', () => {
+    const comLider = { ...(ana as object), managerId: '2' } as never
+    const lista = [comLider, bruno, carla]
+    const nomes = new Map([['2', 'Bruno']])
+    const tags = new Map([
+      ['1', ['Todos', 'Produto']],
+      ['2', ['Todos', 'Líder']],
+      ['3', ['Todos']],
+    ])
+
+    expect(filterCollaborators(lista, { ...vazio, position: 'Tech Lead' }, nomes, tags)).toEqual([bruno])
+    expect(filterCollaborators(lista, { ...vazio, managerId: '2' }, nomes, tags)).toEqual([comLider])
+    expect(filterCollaborators(lista, { ...vazio, tag: 'Líder' }, nomes, tags)).toEqual([bruno])
+    // Busca global cobre o LÍDER pelo nome, não pelo id — é o que se digita.
+    expect(filterCollaborators(lista, { ...vazio, search: 'bruno' }, nomes, tags)).toEqual([comLider, bruno])
+  })
+
+  it('filtra por status: ativo, inativo e desligado são coisas distintas', () => {
+    const inativo = { ...(bruno as object), active: false, leftAt: null } as never
+    const desligado = { ...(carla as object), active: false, leftAt: '2026-06-01T00:00:00.000Z' } as never
+    const lista = [ana, inativo, desligado]
+
+    expect(filterCollaborators(lista, { ...vazio, status: 'ativo' })).toEqual([ana])
+    expect(filterCollaborators(lista, { ...vazio, status: 'inativo' })).toEqual([inativo])
+    expect(filterCollaborators(lista, { ...vazio, status: 'desligado' })).toEqual([desligado])
+  })
 })
 
 describe('CollaboratorsSection — busca, filtro e CSV', () => {
@@ -362,11 +417,11 @@ describe('CollaboratorsSection — busca, filtro e CSV', () => {
     expect(screen.getByText(/nenhuma pessoa encontrada/i)).toBeInTheDocument()
   })
 
-  it('abre os grupos automaticamente ao filtrar (resultado não fica escondido)', async () => {
+  it('o resultado da busca continua na tela — não há mais grupo para esconder', async () => {
     renderSection()
     await waitFor(() => expect(screen.getByText(/1 de 1 pessoa/i)).toBeInTheDocument())
-    // Acordeão nasce fechado: o nome não está visível.
-    expect(screen.queryByText(/Diego Reis/)).not.toBeInTheDocument()
+    // Sem acordeão, a pessoa já está visível antes e depois do filtro.
+    expect(screen.getByText(/Diego Reis/)).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Buscar pessoa'), { target: { value: 'diego' } })
 

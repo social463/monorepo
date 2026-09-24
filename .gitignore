@@ -10,10 +10,3 @@ apps/api/storage/
 .superpowers/
 scripts/.office-assets/
 .worktrees/
-
-infra/.terraform/
-infra/.terraform.lock.hcl
-*.tfstate
-*.tfstate.*
-*.tfplan
-tfplan*

@@ -332,6 +332,167 @@ describe('rota de upload de evidência de desafio (qualquer colaborador autentic
   })
 })
 
+describe('rota de upload de evidência do diário de bordo do INOVA (qualquer colaborador autenticado)', () => {
+  afterEach(() => {
+    for (const k of S3_KEYS) {
+      if (original[k] === undefined) delete process.env[k]
+      else process.env[k] = original[k]
+    }
+    vi.clearAllMocks()
+  })
+
+  it('lenda comum recebe uploadUrl + publicUrl e chave sob inova-diary/<companyId>/<userId>/', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-diary/presign',
+      headers: auth(lenda.token),
+      payload: { contentType: 'image/png', size: 1000 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().uploadUrl).toBe('https://s3.amazonaws.com/signed-put-url')
+    expect(res.json().publicUrl).toMatch(/^https:\/\/cdn\.exemplo\.com\/inova-diary\/.+\.png$/)
+    expect(res.json().key).toMatch(new RegExp(`^inova-diary/company-emr/${lenda.user.id}/.+\\.png$`))
+    expect(res.json().kind).toBe('IMAGE')
+    await app.close()
+  })
+
+  it('aceita vídeo MP4', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-diary/presign',
+      headers: auth(lenda.token),
+      payload: { contentType: 'video/mp4', size: 1000 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().kind).toBe('VIDEO')
+    await app.close()
+  })
+
+  it('rejeita content-type que não é imagem nem vídeo (400)', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-diary/presign',
+      headers: auth(lenda.token),
+      payload: { contentType: 'application/pdf', size: 1000 },
+    })
+    expect(res.statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('sem auth responde 401', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-diary/presign',
+      payload: { contentType: 'image/png', size: 1000 },
+    })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('sem S3 configurado responde 503', async () => {
+    disableS3()
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-diary/presign',
+      headers: auth(lenda.token),
+      payload: { contentType: 'image/png', size: 1000 },
+    })
+    expect(res.statusCode).toBe(503)
+    await app.close()
+  })
+})
+
+describe('rota de upload de vídeo da biblioteca do Guia (só admin/subadmin)', () => {
+  afterEach(() => {
+    for (const k of S3_KEYS) {
+      if (original[k] === undefined) delete process.env[k]
+      else process.env[k] = original[k]
+    }
+    vi.clearAllMocks()
+  })
+
+  it('admin recebe uploadUrl + storagePath sob inova-guia-videos/<companyId>/', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-guia-video/presign',
+      headers: auth(admin.token),
+      payload: { contentType: 'video/mp4', size: 1000 },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().uploadUrl).toBe('https://s3.amazonaws.com/signed-put-url')
+    expect(res.json().publicUrl).toMatch(/^https:\/\/cdn\.exemplo\.com\/inova-guia-videos\/.+\.mp4$/)
+    expect(res.json().storagePath).toMatch(/^inova-guia-videos\/company-emr\/.+\.mp4$/)
+    await app.close()
+  })
+
+  it('lenda comum é recusada (403)', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const lenda = await makeUser(app, 'LEGEND')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-guia-video/presign',
+      headers: auth(lenda.token),
+      payload: { contentType: 'video/mp4', size: 1000 },
+    })
+    expect(res.statusCode).toBe(403)
+    await app.close()
+  })
+
+  it('rejeita imagem — só vídeo é aceito aqui (400)', async () => {
+    enableS3()
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-guia-video/presign',
+      headers: auth(admin.token),
+      payload: { contentType: 'image/png', size: 1000 },
+    })
+    expect(res.statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('sem S3 configurado responde 503', async () => {
+    disableS3()
+    const app = buildApp()
+    await app.ready()
+    const admin = await makeUser(app, 'ADMIN')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/uploads/inova-guia-video/presign',
+      headers: auth(admin.token),
+      payload: { contentType: 'video/mp4', size: 1000 },
+    })
+    expect(res.statusCode).toBe(503)
+    await app.close()
+  })
+})
+
 describe('presign de foto de evento', () => {
   it('recusa content-type fora do permitido, em português', async () => {
     enableS3()

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -164,5 +164,63 @@ describe('ManualsSection', () => {
         ),
       ).toBe(true)
     })
+  })
+})
+
+/**
+ * Colagem com formatação (Documento 4, seção 6). O campo é Markdown num
+ * `<textarea>`, e colar de um documento sempre entregou texto corrido — o
+ * navegador não tem para onde levar a formatação num campo de texto puro.
+ */
+describe('ManualsSection — colar conteúdo formatado', () => {
+  async function abrirFormulario() {
+    mockApiFetch.mockResolvedValue({ manuals: [] })
+    wrap(<ManualsSection />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Novo manual' }))
+    return screen.getByRole('textbox', { name: /conteúdo em markdown/i })
+  }
+
+  /** Colagem de verdade: o evento carrega `text/html`, como o Word manda. */
+  function colar(campo: HTMLElement, html: string, texto = '') {
+    fireEvent.paste(campo, {
+      clipboardData: {
+        getData: (tipo: string) => (tipo === 'text/html' ? html : texto),
+      },
+    })
+  }
+
+  it('converte títulos, listas e negrito em Markdown', async () => {
+    const campo = await abrirFormulario()
+
+    colar(
+      campo,
+      '<h2>Política de férias</h2><p>Quem tem <b>direito</b>.</p><ul><li>CLT</li><li>PJ</li></ul>',
+    )
+
+    expect(campo).toHaveValue('## Política de férias\n\nQuem tem **direito**.\n\n- CLT\n- PJ')
+  })
+
+  it('cola na posição do cursor, sem apagar o que já estava', async () => {
+    const campo = await abrirFormulario()
+    await userEvent.type(campo, 'Antes.Depois.')
+    ;(campo as HTMLTextAreaElement).setSelectionRange(6, 6)
+
+    colar(campo, '<p>MEIO</p>')
+
+    expect(campo).toHaveValue('Antes.MEIODepois.')
+  })
+
+  // Sem `text/html` não vale interceptar: o navegador já cola texto puro certo.
+  it('não intercepta colagem sem HTML', async () => {
+    const campo = await abrirFormulario()
+    colar(campo, '', 'texto puro')
+    expect(campo).toHaveValue('')
+  })
+
+  // `<script>` colado junto entraria como TEXTO do manual publicado.
+  it('descarta script e style colados junto', async () => {
+    const campo = await abrirFormulario()
+    colar(campo, '<p>Regra</p><script>alert(1)</script><style>p{color:red}</style>')
+    expect(campo).toHaveValue('Regra')
   })
 })

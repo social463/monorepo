@@ -207,7 +207,6 @@ async function makeRequestFixture(email: string) {
     data: {
       slug: `curso-fila-rota-${Math.random().toString(36).slice(2)}`,
       title: 'Curso com aprovação obrigatória',
-      category: 'Liderança',
       requiresCertificateApproval: true,
     },
   })

@@ -89,6 +89,8 @@ export const AUDIT_ENTITY_LABELS: Record<string, string> = {
   SquadMember: 'Membro de squad',
   StoreOrder: 'Pedido da loja',
   StoreProduct: 'Produto da loja',
+  TrainingEvent: 'Evento de treinamento',
+  TrainingRecord: 'Registro de treinamento',
   ThirdPartyInvite: 'Convite de terceirizado',
   User: 'Colaborador',
   UserBadge: 'Selo concedido',
@@ -111,7 +113,11 @@ export function auditEntityLabel(entityType: string): string {
  * dois motivos: mostra o nome **da época do evento**, que é o que aconteceu de
  * fato, e continua funcionando para entidade que já foi apagada.
  */
-const SUBJECT_NAME_KEYS = ['name', 'title', 'label', 'question', 'email', 'slug', 'key', 'monthRef']
+// `subject` primeiro: é o rótulo que um service escreve de propósito quando a
+// entidade não tem um campo de nome natural (ex.: comunicado sem título —
+// `corporate-mural-service.ts` grava um recorte do texto ali), então vence
+// qualquer campo homônimo incidental do payload.
+const SUBJECT_NAME_KEYS = ['subject', 'name', 'title', 'label', 'question', 'email', 'slug', 'key', 'monthRef']
 
 /** Nome do alvo da ação, tirado do payload; `null` quando não há nada legível. */
 export function auditSubjectName(entry: Pick<AuditLogEntryDTO, 'before' | 'after'>): string | null {

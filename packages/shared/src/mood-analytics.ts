@@ -1,13 +1,21 @@
+import type { PublicUser } from './auth'
 import type { MoodLevel, MoodReason } from './mood'
 
 /**
- * Contrato do painel agregado de clima (`GET /admin/mood/overview`).
+ * Contrato do painel de clima (`GET /admin/mood/overview`).
  *
- * Regra que atravessa o arquivo inteiro: **nenhum campo carrega `userId`**.
- * O anonimato aqui é garantia técnica do formato, não escolha de UI — se um
- * identificador de pessoa aparecer em qualquer ponto deste DTO, a entrega está
- * quebrada. Todo recorte com menos de `MOOD_ANONYMITY_MIN` respostas vem
- * suprimido (o service corta antes de serializar).
+ * **Os comentários deixaram de ser anônimos** (Documento 3, seção 4.6): a G&G
+ * pediu identificação para conseguir agir sobre o que lê, e a decisão alcança o
+ * histórico. Este arquivo dizia o contrário até então — "nenhum campo carrega
+ * `userId`" —, e a reversão vem com duas obrigações que não são opcionais:
+ *
+ * 1. a tela do colaborador (`MoodOfDay`) não promete mais confidencialidade;
+ * 2. o piso de `MOOD_ANONYMITY_MIN` **continua** valendo para os agregados
+ *    (média, tendência, distribuição). Ele protege o recorte pequeno, não o
+ *    comentário, e nada no documento pede para tirá-lo.
+ *
+ * Quem lê continua sendo só o bloco de Gente e Gestão: líder não vê comentário
+ * identificado de terceiro.
  */
 
 /** Um dia da série de tendência. `average` em 1..5 (escala `MOOD_SCORES`). */
@@ -46,6 +54,8 @@ export interface MoodCommentDTO {
   mood: MoodLevel
   reason: MoodReason | null
   note: string
+  /** Quem escreveu. Ver a nota de topo deste arquivo. */
+  author: PublicUser
 }
 
 /** Participação do dia: quantos registraram sobre quantos poderiam registrar. */
@@ -73,7 +83,16 @@ export interface MoodOverviewDTO {
   todayDistribution: MoodDistributionSliceDTO[]
   /** Do mais frequente ao menos; vazio quando o recorte ficou abaixo do piso. */
   reasons: MoodReasonSliceDTO[]
-  /** Só de dias que atingiram o piso, do mais recente ao mais antigo. */
+  /**
+   * **Causas de alerta**: só de humor negativo (Estressado e Desanimado).
+   * É a Caixa 1 da seção 4.6.
+   */
+  alertComments: MoodCommentDTO[]
+  /**
+   * **Comentários**: toda a escala, do mais negativo ao mais positivo — a
+   * Caixa 2. Inclui os de `alertComments`; as duas listas se sobrepõem de
+   * propósito, porque a Caixa 2 é "tudo o que foi escrito".
+   */
   comments: MoodCommentDTO[]
 }
 

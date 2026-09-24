@@ -5,6 +5,9 @@ import { OfficeBridge } from './OfficeBridge'
 import { useOfficeFloatingReactions } from './useOfficeFloatingReactions'
 import { OFFICE_FLOAT_REACTION_TTL_MS } from './office-floating-reactions'
 
+/** Tile do mapa dos cenários — a régua de pixel→tile do hook. */
+const TILE = 32
+
 function occ(userId: string, name = userId): OfficeOccupant {
   return { userId, name, x: 5, y: 5, dir: 'down', avatarSeed: null, avatarOptions: null }
 }
@@ -19,7 +22,7 @@ afterEach(() => {
 describe('useOfficeFloatingReactions', () => {
   it('ignora nearby-message que não é reação (fala/pensamento)', () => {
     const bridge = new OfficeBridge()
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana')], null, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana')], null, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'ana', text: 'oi', kind: 'speech' })
@@ -31,7 +34,7 @@ describe('useOfficeFloatingReactions', () => {
 
   it('reação vira item na fila, com nome resolvido pelo occupant', () => {
     const bridge = new OfficeBridge()
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana', 'Ana Silva')], null, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana', 'Ana Silva')], null, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'ana', text: '👋', kind: 'reaction' })
@@ -44,7 +47,7 @@ describe('useOfficeFloatingReactions', () => {
   it('ignora reações enquanto está desabilitado e limpa a fila ao desabilitar', () => {
     const bridge = new OfficeBridge()
     const { result, rerender } = renderHook(
-      ({ enabled }) => useOfficeFloatingReactions(bridge, [occ('ana', 'Ana Silva')], null, null, enabled),
+      ({ enabled }) => useOfficeFloatingReactions(bridge, [occ('ana', 'Ana Silva')], null, null, TILE, enabled),
       { initialProps: { enabled: false } },
     )
 
@@ -65,7 +68,7 @@ describe('useOfficeFloatingReactions', () => {
 
   it('some sozinho depois do TTL', () => {
     const bridge = new OfficeBridge()
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana')], null, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana')], null, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'ana', text: '👋', kind: 'reaction' })
@@ -80,7 +83,7 @@ describe('useOfficeFloatingReactions', () => {
 
   it('duas reações seguidas empilham (não substituem uma a outra)', () => {
     const bridge = new OfficeBridge()
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana'), occ('bruno')], null, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [occ('ana'), occ('bruno')], null, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'ana', text: '👋', kind: 'reaction' })
@@ -93,7 +96,7 @@ describe('useOfficeFloatingReactions', () => {
 
   it('userId sem occupant conhecido ainda vira reação, com nome vazio', () => {
     const bridge = new OfficeBridge()
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [], null, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [], null, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'fantasma', text: '👋', kind: 'reaction' })
@@ -108,7 +111,7 @@ describe('useOfficeFloatingReactions', () => {
     const you = occ('voce')
     const zoneOccupantIds = new Set(['voce', 'ana'])
     const { result } = renderHook(() =>
-      useOfficeFloatingReactions(bridge, [you, occ('ana'), occ('longe')], you, zoneOccupantIds),
+      useOfficeFloatingReactions(bridge, [you, occ('ana'), occ('longe')], you, zoneOccupantIds, TILE),
     )
 
     act(() => {
@@ -125,7 +128,7 @@ describe('useOfficeFloatingReactions', () => {
     const you: OfficeOccupant = { ...occ('voce'), x: 0, y: 0 }
     const perto: OfficeOccupant = { ...occ('perto'), x: 1, y: 1 }
     const longe: OfficeOccupant = { ...occ('longe'), x: 500, y: 500 }
-    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [you, perto, longe], you, null))
+    const { result } = renderHook(() => useOfficeFloatingReactions(bridge, [you, perto, longe], you, null, TILE))
 
     act(() => {
       bridge.emitServerMessage({ type: 'nearby-message', userId: 'perto', text: '👋', kind: 'reaction' })

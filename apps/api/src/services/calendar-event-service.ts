@@ -12,6 +12,7 @@
  */
 import {
   CALENDAR_CATEGORY_FALLBACK_COLOR,
+  CAMPAIGN_CHANNEL_LABELS,
   MAX_CALENDAR_EVENT_RANGE_DAYS,
   audienceReaches,
   calendarCategoryColor,
@@ -20,6 +21,7 @@ import {
   expandOccurrences,
   normalizeAudienceTag,
   viewerAudienceTags,
+  type CalendarCampaignPostDTO,
   type CalendarEventDTO,
   type CalendarEventOccurrenceDTO,
   type CalendarEventTypeDTO,
@@ -32,6 +34,7 @@ import { scopedPrisma } from '../lib/tenant-scope'
 import { addDays, dayFromYmd, ymdOf } from '../lib/sao-paulo-date'
 import { toCalendarEventDTO, toCalendarEventTypeDTO } from '../lib/serialize'
 import { recordAuditLog } from './audit-log-service'
+import { createNotification } from './notification-service'
 
 export class CalendarEventError extends Error {
   constructor(
@@ -46,6 +49,7 @@ export class CalendarEventError extends Error {
 const WITH_RELATIONS = {
   type: true,
   sectors: { include: { sector: { select: { id: true, name: true } } } },
+  guests: { include: { user: true } },
   createdBy: { select: { name: true } },
 } as const
 
@@ -188,6 +192,7 @@ async function normalize(
 ): Promise<{
   title: string
   description: string
+  tag: string | null
   date: Date
   endDate: Date | null
   startTime: string | null
@@ -201,6 +206,7 @@ async function normalize(
   recurrenceCount: number | null
   reminderDaysBefore: number[]
   sectorIds: string[]
+  guestIds: string[]
 }> {
   const title = data.title.trim()
   if (!title) throw new CalendarEventError('Informe o título do evento.')
@@ -237,9 +243,23 @@ async function normalize(
     if (found !== sectorIds.length) throw new CalendarEventError('Setor não encontrado.', 404)
   }
 
+  // Convidados: só gente ATIVA da própria empresa (o `scopedPrisma` recorta).
+  // Convidar quem saiu produziria notificação para conta desativada e um nome
+  // na lista que ninguém reconhece.
+  const guestIds = [...new Set(data.guestIds ?? [])]
+  if (guestIds.length > 0) {
+    const found = await scopedPrisma(companyId).user.count({
+      where: { id: { in: guestIds }, active: true },
+    })
+    if (found !== guestIds.length) throw new CalendarEventError('Pessoa convidada não encontrada.', 404)
+  }
+
   return {
     title,
     description: (data.description ?? '').trim(),
+    // Etiqueta vazia é ausência de etiqueta: string vazia deixaria um chip em
+    // branco na tela, que é pior que nenhum chip.
+    tag: data.tag?.trim() || null,
     date: dayFromYmd(data.date),
     // Fim igual ao início é evento de um dia: guardar `null` mantém uma leitura
     // só de "cabe num dia", em vez de duas equivalentes.
@@ -259,6 +279,7 @@ async function normalize(
     // instável faria dois cadastros iguais parecerem diferentes na auditoria.
     reminderDaysBefore: [...new Set(data.reminderDaysBefore ?? [])].sort((a, b) => a - b),
     sectorIds,
+    guestIds,
   }
 }
 
@@ -332,13 +353,60 @@ export async function getManagedEvent(input: {
   return toCalendarEventDTO(event)
 }
 
+/** `2026-09-14` → `14 de setembro de 2026`. Meio-dia UTC evita virada de fuso. */
+const DATA_POR_EXTENSO = new Intl.DateTimeFormat('pt-BR', {
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'UTC',
+})
+
+/**
+ * Avisa quem foi convidado nominalmente (Documento 3, seção 11).
+ *
+ * **Best-effort**, como a avaliação de selos pós-voto: uma falha de notificação
+ * não pode desfazer um evento que já está cadastrado. O erro sobe para o log,
+ * não para a tela de quem cadastrou.
+ *
+ * Quem convidou não recebe o próprio convite — ele acabou de escrever o evento.
+ */
+async function notifyGuests(
+  event: { id: string; title: string; date: Date; type: { name: string } },
+  guestIds: string[],
+  actorId: string,
+  companyId: string,
+): Promise<void> {
+  const destinatarios = guestIds.filter((id) => id !== actorId)
+  if (destinatarios.length === 0) return
+  const iso = ymdOf(event.date)
+  try {
+    for (const userId of destinatarios) {
+      await createNotification({
+        userId,
+        type: 'CALENDAR_EVENT_INVITED',
+        title: `Você foi convidado: "${event.title}"`,
+        link: `/calendario?dia=${iso}`,
+        actorId,
+        metadata: { eventId: event.id, occurrenceDate: iso },
+        teamsFacts: [
+          { title: 'Quando', value: DATA_POR_EXTENSO.format(new Date(`${iso}T12:00:00Z`)) },
+          { title: 'Tipo', value: event.type.name },
+        ],
+        companyId,
+      })
+    }
+  } catch (err) {
+    console.error(`[calendar-event] falha ao notificar convidados do evento ${event.id}`, err)
+  }
+}
+
 export async function createEvent(input: {
   data: UpsertCalendarEventRequest
   actorId: string
   companyId: string
 }): Promise<CalendarEventDTO> {
   const normalized = await normalize(input.data, input.companyId)
-  const { sectorIds, ...fields } = normalized
+  const { sectorIds, guestIds, ...fields } = normalized
 
   const event = await prisma.calendarEvent.create({
     data: {
@@ -346,9 +414,13 @@ export async function createEvent(input: {
       createdById: input.actorId,
       companyId: input.companyId,
       sectors: { create: sectorIds.map((sectorId) => ({ sectorId })) },
+      guests: { create: guestIds.map((userId) => ({ userId, companyId: input.companyId })) },
     },
     include: WITH_RELATIONS,
   })
+  // Best-effort, como a avaliação de selos pós-voto: falha de notificação não
+  // pode desfazer um evento que já está cadastrado.
+  await notifyGuests(event, guestIds, input.actorId, input.companyId)
   await recordAuditLog({
     actorId: input.actorId,
     entityType: 'CalendarEvent',
@@ -377,16 +449,26 @@ export async function updateEvent(input: {
   assertCanEdit(input, before)
 
   const normalized = await normalize(input.data, input.companyId)
-  const { sectorIds, ...fields } = normalized
+  const { sectorIds, guestIds, ...fields } = normalized
+  // Só quem ENTROU agora é avisado. Salvar o evento para corrigir uma vírgula na
+  // descrição não pode disparar convite para quem já estava na lista.
+  const jaConvidados = new Set(before.guests.map((g) => g.userId))
+  const novosConvidados = guestIds.filter((id) => !jaConvidados.has(id))
 
   const event = await prisma.$transaction(async (tx) => {
     await tx.calendarEventSector.deleteMany({ where: { eventId: input.id } })
+    await tx.calendarEventGuest.deleteMany({ where: { eventId: input.id } })
     return tx.calendarEvent.update({
       where: { id: input.id },
-      data: { ...fields, sectors: { create: sectorIds.map((sectorId) => ({ sectorId })) } },
+      data: {
+        ...fields,
+        sectors: { create: sectorIds.map((sectorId) => ({ sectorId })) },
+        guests: { create: guestIds.map((userId) => ({ userId, companyId: input.companyId })) },
+      },
       include: WITH_RELATIONS,
     })
   })
+  await notifyGuests(event, novosConvidados, input.actorId, input.companyId)
 
   await recordAuditLog({
     actorId: input.actorId,
@@ -435,10 +517,19 @@ export async function deleteEvent(input: {
  * marcados para aquele setor. Usuário sem setor (ex.: admin da empresa) vê só
  * os de empresa inteira — não há setor dele para casar.
  */
-function visibilityWhere(sectorId: string | null) {
+/**
+ * Quem alcança o evento pelo SETOR — ou por ser convidado nominalmente.
+ *
+ * O convite entra como um terceiro caminho no mesmo OR: convidado vê o evento
+ * mesmo estando fora dos setores alvo. Ele também precisa escapar do filtro de
+ * TAG, que roda em memória (`audienceReaches`) — são **dois** pontos, e mexer
+ * só num deixa o convidado de fora sem erro nenhum aparecer.
+ */
+function visibilityWhere(sectorId: string | null, userId: string) {
+  const convidado = { guests: { some: { userId } } }
   return sectorId
-    ? { OR: [{ sectors: { none: {} } }, { sectors: { some: { sectorId } } }] }
-    : { sectors: { none: {} } }
+    ? { OR: [{ sectors: { none: {} } }, { sectors: { some: { sectorId } } }, convidado] }
+    : { OR: [{ sectors: { none: {} } }, convidado] }
 }
 
 /**
@@ -475,6 +566,49 @@ export interface CalendarViewer {
  *    limitado à janela — empurrar isso para o Postgres exigiria uma coluna
  *    espelho só para o `hasSome`.
  */
+/**
+ * O calendário editorial de Campanhas na janela do calendário organizacional
+ * (Documento 4, seção 13.2).
+ *
+ * **Projeção, não espelho.** O item continua sendo só `CampaignPost`; aqui ele
+ * é lido. Criar um `CalendarEvent` gêmeo a cada item seriam duas fontes para o
+ * mesmo dado — e o próprio Documento 4 já registrou o que acontece quando elas
+ * divergem: o bug da 13.2 que o Lote A consertou nasceu de uma linha que
+ * sobreviveu ao que ela representava.
+ *
+ * Cancelado fica de fora: o calendário mostra o que vai acontecer e o que
+ * aconteceu, não o que foi desmarcado.
+ */
+export async function listCalendarCampaignPosts(
+  input: CalendarViewer & { from: string; to: string },
+): Promise<CalendarCampaignPostDTO[]> {
+  // Mesma regra de `isInternalComm`: material de quem publica.
+  if (!canSeeInternalCalendarEvents(input.role, input.sectorFeatures, input.adminAccess)) return []
+
+  const posts = await scopedPrisma(input.companyId).campaignPost.findMany({
+    where: {
+      status: { not: 'CANCELLED' },
+      scheduledFor: {
+        gte: dayFromYmd(input.from),
+        // O fim da janela é um DIA, e `scheduledFor` é um instante: sem somar o
+        // dia inteiro, um item das 14h do último dia ficaria de fora.
+        lt: dayFromYmd(addDays(input.to, 1)),
+      },
+    },
+    include: { campaign: { select: { theme: true } } },
+    orderBy: { scheduledFor: 'asc' },
+  })
+
+  return posts.map((post) => ({
+    id: post.id,
+    title: post.title,
+    scheduledFor: post.scheduledFor.toISOString(),
+    status: post.status,
+    channelLabel: CAMPAIGN_CHANNEL_LABELS[post.channel],
+    campaignTheme: post.campaign?.theme ?? null,
+  }))
+}
+
 export async function listOccurrences(
   input: CalendarViewer & { from: string; to: string },
 ): Promise<CalendarEventOccurrenceDTO[]> {
@@ -499,7 +633,7 @@ export async function listOccurrences(
   const events = await scopedPrisma(input.companyId).calendarEvent.findMany({
     where: {
       AND: [
-        visibilityWhere(input.sectorId),
+        visibilityWhere(input.sectorId, input.userId),
         ...(veInterno ? [] : [{ isInternalComm: false }]),
         { date: { lte: dayFromYmd(input.to) } },
         { OR: [{ recurrenceUntil: null }, { recurrenceUntil: { gte: dayFromYmd(input.from) } }] },
@@ -516,12 +650,22 @@ export async function listOccurrences(
         },
       ],
     },
-    include: { type: true, createdBy: { select: { name: true } } },
+    include: {
+      type: true,
+      createdBy: { select: { name: true } },
+      // Só a linha de quem está pedindo: o `where` acima já garante que ela
+      // existe quando o acesso vem pelo convite, e carregar a lista inteira de
+      // convidados de cada evento seria pagar por um dado que a tela não mostra.
+      guests: { where: { userId: input.userId }, select: { userId: true } },
+    },
   })
 
   const occurrences: CalendarEventOccurrenceDTO[] = []
   for (const event of events) {
-    if (!audienceReaches(event.audienceTags, minhasTags)) continue
+    // Convite vence a tag: chamar alguém nominalmente é justamente alcançar
+    // quem o público-alvo não alcança.
+    const convidado = event.guests.length > 0
+    if (!convidado && !audienceReaches(event.audienceTags, minhasTags)) continue
 
     const inicio = ymdOf(event.date)
     // Duração em dias da regra, replicada em cada ocorrência: evento de 3 dias
@@ -551,6 +695,7 @@ export async function listOccurrences(
         endIso,
         title: event.title,
         description: event.description,
+        tag: event.tag,
         startTime: event.startTime,
         endTime: event.endTime,
         typeSlug: event.type.slug,
@@ -580,6 +725,11 @@ export async function listEventsWithReminders(todayYmd: string, maxOffset: numbe
       OR: [{ recurrenceUntil: null }, { recurrenceUntil: { gte: dayFromYmd(todayYmd) } }],
       date: { lte: dayFromYmd(addDays(todayYmd, maxOffset)) },
     },
-    include: { type: true, sectors: { select: { sectorId: true } } },
+    include: {
+      type: true,
+      sectors: { select: { sectorId: true } },
+      // O lembrete alcança os convidados também — ver `notificar`.
+      guests: { select: { userId: true } },
+    },
   })
 }

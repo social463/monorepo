@@ -17,20 +17,27 @@ import { sectorRoutes } from './routes/sectors'
 import { periodRoutes } from './routes/periods'
 import { voteRoutes } from './routes/votes'
 import { badgeRoutes } from './routes/badges'
+import { adminBadgeImportRoutes } from './routes/admin.badges-import'
 import { profileRoutes } from './routes/profile'
 import { feedbackRoutes } from './routes/feedback'
 import { adminRoutes } from './routes/admin'
+import { adminCalendarEventImportRoutes } from './routes/admin.calendar-events-import'
 import { adminUserImportRoutes } from './routes/admin.users-import'
 import { highlightRoutes } from './routes/highlights'
 import { monthlyHighlightRoutes } from './routes/monthly-highlights'
 import { muralRoutes } from './routes/mural'
 import { celebrationRoutes } from './routes/celebrations'
+import { birthdayGreetingRoutes } from './routes/birthday-greetings'
 import { vacationRoutes } from './routes/vacations'
+import { vacationPlanningRoutes } from './routes/vacation-planning'
 import { notificationRoutes } from './routes/notifications'
 import { retroRoutes } from './routes/retro'
 import { retroWsRoutes } from './routes/retro-ws'
 import { reviewWsRoutes } from './routes/review-ws'
 import { officeWsRoutes } from './routes/office-ws'
+import { arenaWsRoutes } from './routes/arena-ws'
+import { arenaLobbyWsRoutes } from './routes/arena-lobby-ws'
+import { arenaMediaRoutes } from './routes/arena-media'
 import { officeMediaRoutes } from './routes/office-media'
 import { officeGuestRoutes } from './routes/office-guests'
 import { officeMeetingRoutes } from './routes/office-meetings'
@@ -58,10 +65,12 @@ import { learningRoutes } from './routes/learning'
 import { coursesAdminRoutes } from './routes/courses-admin'
 import { adminCertificateRoutes } from './routes/admin-certificates'
 import { pdiRoutes } from './routes/pdi'
+import { okrRoutes } from './routes/okr'
 import { oneOnOneRoutes } from './routes/one-on-one'
 import { oneOnOneWsRoutes } from './routes/one-on-one-ws'
 import { adminOneOnOneTopicRoutes } from './routes/admin.one-on-one-topics'
 import { developmentRoutes } from './routes/development'
+import { inovaRoutes } from './routes/inova'
 import { officeMapRoutes } from './routes/office-maps'
 import { characterFavoriteRoutes } from './routes/character-favorites'
 import { thirdPartyInviteRoutes } from './routes/third-party-invites'
@@ -73,9 +82,14 @@ import { agentRoutes } from './routes/agents'
 import { glassRoutes } from './routes/glass'
 import { benchmarkPracticeRoutes } from './routes/benchmark-practices'
 import { campaignRoutes } from './routes/campaigns'
+import { bonusProgramRoutes } from './routes/bonus-program'
 import { aiSettingsRoutes } from './routes/ai-settings'
 import { brandingRoutes } from './routes/branding'
 import { assistantRoutes } from './routes/assistant'
+import { trainingRoutes } from './routes/training'
+import { apprenticeRoutes } from './routes/apprentice'
+import { apprenticeAdminRoutes } from './routes/apprentice-admin'
+import { trainingAdminRoutes } from './routes/training-admin'
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: false })
@@ -201,17 +215,21 @@ export function buildApp(): FastifyInstance {
   app.register(periodRoutes)
   app.register(voteRoutes)
   app.register(badgeRoutes)
+  app.register(adminBadgeImportRoutes)
   app.register(profileRoutes)
   app.register(feedbackRoutes)
   app.register(adminRoutes)
   app.register(adminUserImportRoutes)
+  app.register(adminCalendarEventImportRoutes)
   app.register(highlightRoutes)
   // Destaques curados pela G&G — mecanismo NOVO, ao lado do destaque da
   // votação acima (ver a spec 2026-08-17-destaques-do-mes-curados).
   app.register(monthlyHighlightRoutes)
   app.register(muralRoutes)
   app.register(celebrationRoutes)
+  app.register(birthdayGreetingRoutes)
   app.register(vacationRoutes)
+  app.register(vacationPlanningRoutes)
   app.register(reviewRoutes)
   app.register(corporateMuralRoutes)
   app.register(gifRoutes)
@@ -228,16 +246,21 @@ export function buildApp(): FastifyInstance {
   app.register(coursesAdminRoutes)
   app.register(adminCertificateRoutes)
   app.register(pdiRoutes)
+  app.register(okrRoutes)
   app.register(oneOnOneRoutes)
   app.register(oneOnOneWsRoutes)
   app.register(adminOneOnOneTopicRoutes)
   app.register(developmentRoutes)
+  app.register(inovaRoutes)
   app.register(notificationRoutes)
   app.register(retroRoutes)
   app.register(retroWsRoutes)
   app.register(reviewWsRoutes)
   app.register(corporateMuralWsRoutes)
   app.register(officeWsRoutes)
+  app.register(arenaWsRoutes)
+  app.register(arenaLobbyWsRoutes)
+  app.register(arenaMediaRoutes)
   app.register(officeMediaRoutes)
   app.register(officeGuestRoutes)
   app.register(officeMeetingRoutes)
@@ -259,9 +282,14 @@ export function buildApp(): FastifyInstance {
   app.register(glassRoutes)
   app.register(benchmarkPracticeRoutes)
   app.register(campaignRoutes)
+  app.register(bonusProgramRoutes)
   app.register(aiSettingsRoutes)
   app.register(brandingRoutes)
   app.register(assistantRoutes)
+  app.register(trainingRoutes)
+  app.register(apprenticeRoutes)
+  app.register(apprenticeAdminRoutes)
+  app.register(trainingAdminRoutes)
 
   return app
 }

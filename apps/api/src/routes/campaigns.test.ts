@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { CAMPAIGN_BODY_MAX_LENGTH } from '@legends/shared'
 import { buildApp } from '../app'
 import { signAccessToken } from '../lib/jwt'
 import { prisma } from '../lib/prisma'
@@ -209,7 +210,170 @@ describe('rotas de campanhas', () => {
       headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
       payload: {
         title: 'A',
-        body: 'x'.repeat(281),
+        body: 'x'.repeat(CAMPAIGN_BODY_MAX_LENGTH + 1),
+        scheduledFor: '2026-09-01T12:00:00.000Z',
+        channel: 'MURAL',
+        audience: 'ALL',
+      },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('lista os agendados do Feed da janela, de qualquer autor', async () => {
+    // O problema que isto resolve: agendado do Feed não aparecia para a G&G em
+    // lugar nenhum — "Meus envios" lista só os do próprio autor, e a fila de
+    // moderação só olha PENDING.
+    const admin = await criarUsuario('ADMIN', 'admin-grade@empresa.com')
+    const colega = await criarUsuario('LEGEND', 'colega-grade@empresa.com')
+    await prisma.corporatePost.create({
+      data: {
+        authorId: colega.id,
+        content: 'Agendado direto no feed',
+        title: 'Aviso do time',
+        status: 'SCHEDULED',
+        publishAt: new Date('2026-09-15T12:00:00.000Z'),
+        companyId: admin.companyId,
+      },
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/admin/campaigns/feed-posts?from=2026-09-01T00:00:00.000Z&to=2026-09-30T23:59:59.000Z',
+      headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().posts).toHaveLength(1)
+    expect(res.json().posts[0]).toMatchObject({
+      title: 'Aviso do time',
+      authorName: colega.name,
+      publishAt: '2026-09-15T12:00:00.000Z',
+    })
+  })
+
+  it('não traz para a grade o que está fora da janela, publicado ou pendente', async () => {
+    // Pendente não tem data marcada (`createPost` ignora `publishAt` de quem cai
+    // na fila), então não teria onde cair na grade.
+    const admin = await criarUsuario('ADMIN', 'admin-grade-filtro@empresa.com')
+    const base = { authorId: admin.id, companyId: admin.companyId, content: 'x' }
+    await prisma.corporatePost.createMany({
+      data: [
+        { ...base, status: 'SCHEDULED', publishAt: new Date('2026-10-15T12:00:00.000Z') },
+        { ...base, status: 'PUBLISHED', publishAt: new Date('2026-09-15T12:00:00.000Z') },
+        { ...base, status: 'PENDING' },
+      ],
+    })
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/admin/campaigns/feed-posts?from=2026-09-01T00:00:00.000Z&to=2026-09-30T23:59:59.000Z',
+      headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
+    })
+
+    expect(res.json().posts).toHaveLength(0)
+  })
+
+  it('barra colaborador comum na grade do Feed', async () => {
+    const legend = await criarUsuario('LEGEND', 'legend-grade@empresa.com')
+    const res = await app.inject({
+      method: 'GET',
+      url: '/admin/campaigns/feed-posts?from=2026-09-01T00:00:00.000Z&to=2026-09-30T23:59:59.000Z',
+      headers: { authorization: `Bearer ${signAccessToken(app, legend)}` },
+    })
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('exclui de vez pela rota própria, sem tocar no cancelamento', async () => {
+    const admin = await criarUsuario('ADMIN', 'admin-exclui@empresa.com')
+    const auth = { authorization: `Bearer ${signAccessToken(app, admin)}` }
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/admin/campaigns/posts',
+      headers: auth,
+      payload: {
+        title: 'A',
+        body: 'Corpo A',
+        scheduledFor: '2026-09-01T12:00:00.000Z',
+        channel: 'MURAL',
+        audience: 'ALL',
+      },
+    })
+    const id = criado.json().post.id
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/admin/campaigns/posts/${id}/permanently`,
+      headers: auth,
+    })
+
+    expect(res.statusCode).toBe(204)
+    expect(await prisma.campaignPost.findUnique({ where: { id } })).toBeNull()
+  })
+
+  it('o DELETE simples continua sendo o cancelamento', async () => {
+    // Não trocar o significado da rota existente é o que evita uma aba aberta
+    // antes do deploy apagar a linha ao clicar em "Cancelar comunicado".
+    const admin = await criarUsuario('ADMIN', 'admin-cancela-ainda@empresa.com')
+    const auth = { authorization: `Bearer ${signAccessToken(app, admin)}` }
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/admin/campaigns/posts',
+      headers: auth,
+      payload: {
+        title: 'A',
+        body: 'Corpo A',
+        scheduledFor: '2026-09-01T12:00:00.000Z',
+        channel: 'MURAL',
+        audience: 'ALL',
+      },
+    })
+    const id = criado.json().post.id
+
+    const res = await app.inject({ method: 'DELETE', url: `/admin/campaigns/posts/${id}`, headers: auth })
+
+    expect(res.json().post.status).toBe('CANCELLED')
+    expect(await prisma.campaignPost.findUnique({ where: { id } })).not.toBeNull()
+  })
+
+  it('aceita a arte no item e a devolve no DTO', async () => {
+    const admin = await criarUsuario('ADMIN', 'admin-arte@empresa.com')
+    const auth = { authorization: `Bearer ${signAccessToken(app, admin)}` }
+
+    const criado = await app.inject({
+      method: 'POST',
+      url: '/admin/campaigns/posts',
+      headers: auth,
+      payload: {
+        title: 'A',
+        body: 'Corpo A',
+        visualHint: 'Imagem do MKT.',
+        image: { url: 'https://cdn.exemplo.com/images/arte.png', width: 1200, height: 630 },
+        scheduledFor: '2026-09-01T12:00:00.000Z',
+        channel: 'MURAL',
+        audience: 'ALL',
+      },
+    })
+
+    expect(criado.statusCode).toBe(201)
+    expect(criado.json().post.image).toEqual({
+      url: 'https://cdn.exemplo.com/images/arte.png',
+      width: 1200,
+      height: 630,
+    })
+    // O briefing em texto continua existindo ao lado da peça pronta.
+    expect(criado.json().post.visualHint).toBe('Imagem do MKT.')
+  })
+
+  it('recusa arte sem URL válida', async () => {
+    const admin = await criarUsuario('ADMIN', 'admin-arte-invalida@empresa.com')
+    const res = await app.inject({
+      method: 'POST',
+      url: '/admin/campaigns/posts',
+      headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
+      payload: {
+        title: 'A',
+        body: 'Corpo A',
+        image: { url: 'nao-e-url', width: 10, height: 10 },
         scheduledFor: '2026-09-01T12:00:00.000Z',
         channel: 'MURAL',
         audience: 'ALL',
@@ -254,5 +418,71 @@ describe('rotas de campanhas', () => {
 
     expect(res.statusCode).toBe(400)
     expect(res.json().message).toMatch(/autor/i)
+  })
+
+  describe('GET /admin/campaigns/calendar-context', () => {
+    it('barra quem não tem gente-gestao', async () => {
+      const legend = await criarUsuario('LEGEND', 'legend-ctx@empresa.com')
+      const res = await app.inject({
+        method: 'GET',
+        url: '/admin/campaigns/calendar-context?from=2026-09-01&to=2026-09-30',
+        headers: { authorization: `Bearer ${signAccessToken(app, legend)}` },
+      })
+      expect(res.statusCode).toBe(403)
+    })
+
+    it('traz eventos do calendário organizacional e aniversários/tempo de casa do mês', async () => {
+      const admin = await criarUsuario('ADMIN', 'admin-ctx@empresa.com')
+      const auth = { authorization: `Bearer ${signAccessToken(app, admin)}` }
+
+      const colega = await criarUsuario('LEGEND', 'colega-ctx@empresa.com')
+      await prisma.user.update({
+        where: { id: colega.id },
+        data: {
+          birthDate: new Date('1990-09-15T00:00:00.000Z'),
+          joinedAt: new Date('2024-09-15T00:00:00.000Z'),
+        },
+      })
+
+      const tipo = await prisma.calendarEventType.create({
+        data: { name: 'Feriado', slug: 'feriado-ctx', icon: 'event', companyId: admin.companyId },
+      })
+      await prisma.calendarEvent.create({
+        data: {
+          title: 'Feriado municipal',
+          date: new Date('2026-09-10'),
+          typeId: tipo.id,
+          createdById: admin.id,
+          companyId: admin.companyId,
+        },
+      })
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/admin/campaigns/calendar-context?from=2026-09-01&to=2026-09-30',
+        headers: auth,
+      })
+
+      expect(res.statusCode).toBe(200)
+      const body = res.json()
+      expect(body.occurrences).toHaveLength(1)
+      expect(body.occurrences[0].title).toBe('Feriado municipal')
+      expect(body.birthdays).toHaveLength(1)
+      expect(body.birthdays[0].user.id).toBe(colega.id)
+      expect(body.birthdays[0].day).toBe(15)
+      expect(body.workAnniversaries).toHaveLength(1)
+      expect(body.workAnniversaries[0].user.id).toBe(colega.id)
+      expect(body.workAnniversaries[0].years).toBe(2)
+    })
+
+    it('recusa período fora do formato AAAA-MM-DD', async () => {
+      const admin = await criarUsuario('ADMIN', 'admin-ctx-invalido@empresa.com')
+      const res = await app.inject({
+        method: 'GET',
+        url: '/admin/campaigns/calendar-context?from=2026-09-01T00:00:00.000Z&to=2026-09-30',
+        headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
+      })
+      expect(res.statusCode).toBe(400)
+    })
   })
 })

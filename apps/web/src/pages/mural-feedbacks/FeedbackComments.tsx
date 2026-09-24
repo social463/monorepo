@@ -13,7 +13,12 @@ import { useAuth } from '../../auth/AuthContext'
 /**
  * Respostas a um reconhecimento. A visibilidade é a do próprio feedback — quem
  * não pode ver o feedback recebe 404 aqui —, então não há regra a repetir no
- * cliente: a lista simplesmente não carrega.
+ * cliente: a lista simplesmente não carrega. É por isso que o mesmo componente
+ * serve o mural (feedback público) e o perfil (onde o privado também aparece):
+ * quem pode responder é o servidor que decide.
+ *
+ * `onChange` avisa quem está mostrando a lista que o número de respostas mudou
+ * — o contador vive no feedback, numa query que este componente não conhece.
  */
 function commentsKey(feedbackId: string) {
   return ['feedbacks', feedbackId, 'comments'] as const
@@ -25,12 +30,23 @@ function formatDate(iso: string): string {
   return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
-function CommentRow({ comment, feedbackId }: { comment: FeedbackCommentDTO; feedbackId: string }) {
+function CommentRow({
+  comment,
+  feedbackId,
+  onChange,
+}: {
+  comment: FeedbackCommentDTO
+  feedbackId: string
+  onChange?: () => void
+}) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
   const remove = useMutation({
     mutationFn: () => apiFetch<void>(`/feedbacks/comments/${comment.id}`, { method: 'DELETE' }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: commentsKey(feedbackId) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: commentsKey(feedbackId) })
+      onChange?.()
+    },
   })
   const canDelete = user?.id === comment.author.id || user?.role === 'ADMIN' || user?.role === 'SUBADMIN'
 
@@ -61,7 +77,7 @@ function CommentRow({ comment, feedbackId }: { comment: FeedbackCommentDTO; feed
   )
 }
 
-export function FeedbackComments({ feedbackId }: { feedbackId: string }) {
+export function FeedbackComments({ feedbackId, onChange }: { feedbackId: string; onChange?: () => void }) {
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
   const comments = useQuery({
@@ -78,6 +94,7 @@ export function FeedbackComments({ feedbackId }: { feedbackId: string }) {
       setMessage('')
       queryClient.invalidateQueries({ queryKey: commentsKey(feedbackId) })
       queryClient.invalidateQueries({ queryKey: ['shared-feedbacks'] })
+      onChange?.()
     },
   })
 
@@ -94,7 +111,7 @@ export function FeedbackComments({ feedbackId }: { feedbackId: string }) {
       ) : (
         <ul className="flex flex-col gap-sm">
           {(comments.data?.comments ?? []).map((comment) => (
-            <CommentRow key={comment.id} comment={comment} feedbackId={feedbackId} />
+            <CommentRow key={comment.id} comment={comment} feedbackId={feedbackId} onChange={onChange} />
           ))}
         </ul>
       )}

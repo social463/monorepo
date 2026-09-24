@@ -23,6 +23,7 @@ const mockReject = learningApi.rejectCertificateRequest as unknown as Mock
 function buildRequest(overrides: Partial<CertificateRequestDTO> = {}): CertificateRequestDTO {
   return {
     id: 'req-1',
+    origin: 'INTERNAL',
     enrollmentId: 'enroll-1',
     courseId: 'course-1',
     courseTitle: 'Liderança situacional',

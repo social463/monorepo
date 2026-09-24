@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BALL_REACH,
+  BALL_REACH_PX,
   ballDistanceFrom,
   type OfficeBall,
   type OfficeBallPower,
@@ -28,10 +28,26 @@ function isTextInput(target: EventTarget | null): boolean {
 export const BALL_KEYS = { touch: 'z', kick: 'x', lob: 'c' } as const
 
 /**
+ * Gestos que CARREGAM força ao segurar. O toque (Z) fica de fora de propósito:
+ * já era o gesto fraco e fixo, e carregar um toque não faria sentido.
+ */
+const CHARGEABLE_POWERS: readonly OfficeBallPower[] = ['kick', 'lob']
+
+/** Tempo segurando a tecla até a força máxima. */
+export const BALL_CHARGE_MS = 600
+
+/** Carga em andamento — base para desenhar a barra de força. */
+export interface OfficeBallCharge {
+  power: OfficeBallPower
+  /** `Date.now()` de quando a tecla desceu. */
+  startedAt: number
+}
+
+/**
  * Alcance com que o CLIENTE libera as teclas e o aviso — um tile mais folgado
- * que o do servidor (`BALL_REACH`), de propósito.
+ * que o do servidor (`BALL_REACH_PX`), de propósito.
  *
- * Quem anda vê o próprio personagem na posição PREVISTA (`MovementPredictor`),
+ * Quem anda vê o próprio personagem na posição PREVISTA (`ArenaPredictor`),
  * mas `you` aqui é a posição AUTORITATIVA, que chega um eco depois. Ao conduzir
  * a bola, essa diferença de um tile apagava o aviso e desarmava a barra bem no
  * meio da corrida — e aí o Espaço voltava a ser push-to-talk, abrindo o
@@ -39,23 +55,36 @@ export const BALL_KEYS = { touch: 'z', kick: 'x', lob: 'c' } as const
  * decide se o chute vale continua sendo o servidor: fora do alcance de lá, a
  * mensagem simplesmente não faz nada.
  */
-export const BALL_INPUT_REACH = BALL_REACH + 1
+/**
+ * Alcance que a TECLA considera, em pixel — um pouco maior que o do servidor
+ * (`BALL_REACH_PX`), de propósito: o botão some antes de a bola sair do
+ * alcance, e não depois.
+ */
+export const BALL_INPUT_REACH = BALL_REACH_PX + 8
 
 export interface OfficeBallAction {
   /** Bola ao alcance do pé, ou `null` — o que acende o aviso na tela. */
   nearbyBall: OfficeBall | null
   canKick: boolean
-  kick(power: OfficeBallPower, sprint?: boolean): void
+  /** X ou C segurados, carregando força — ou `null`. Base da barra de força. */
+  charging: OfficeBallCharge | null
+  kick(power: OfficeBallPower, sprint?: boolean, charge?: number): void
 }
 
 /**
  * Toque (Z), chute rasteiro (X) e chute alto (C) na bola ao alcance. Shift
  * junto de qualquer chute é a corrida.
  *
- * O cliente manda só o gesto: quem decide direção, força e trajetória é o
- * servidor (`kickBall`, `@legends/shared`), a partir de onde a pessoa está e
- * do que ela encara. Por isso aqui não há física nenhuma — só alcance, para
- * saber quando mostrar o aviso e quando as teclas valem.
+ * X e C CARREGAM força: descem a tecla e o chute só sai ao SOLTAR (`keyup`),
+ * do jeito do confete (`OfficeScene.handleConfettiDown/Up`) — eventos físicos
+ * de tecla, não polling. Quanto mais tempo segurada, mais perto de
+ * `BALL_CHARGE_MS` e mais forte o chute; toque rápido sai fraco. O toque (Z)
+ * continua instantâneo no `keydown`, sem carregar nada.
+ *
+ * O cliente manda só o gesto e a carga: quem decide direção, força e
+ * trajetória é o servidor (`kickBall`, `@legends/shared`), a partir de onde a
+ * pessoa está e do que ela encara. Por isso aqui não há física nenhuma — só
+ * alcance, para saber quando mostrar o aviso e quando as teclas valem.
  *
  * Estar EM CIMA da bola conta como alcance: o chute sai na direção encarada.
  * O alcance é medido até a PEGADA da peça (`ballDistanceFrom`), então a bola de
@@ -80,11 +109,28 @@ export function useOfficeBall(
   const canKick = nearbyBall !== null
 
   const kick = useCallback(
-    (power: OfficeBallPower, sprint = false) => {
-      bridge.emitClientMessage({ type: 'kick-ball', power, ...(sprint ? { sprint } : {}) })
+    (power: OfficeBallPower, sprint = false, charge = 1) => {
+      bridge.emitClientMessage({
+        type: 'kick-ball',
+        power,
+        ...(sprint ? { sprint } : {}),
+        ...(charge < 1 ? { charge } : {}),
+      })
     },
     [bridge],
   )
+
+  const [charging, setCharging] = useState<OfficeBallCharge | null>(null)
+  const chargingRef = useRef<OfficeBallCharge | null>(null)
+
+  const cancelCharge = useCallback(() => {
+    chargingRef.current = null
+    setCharging(null)
+  }, [])
+
+  useEffect(() => {
+    if (!canKick) cancelCharge()
+  }, [canKick, cancelCharge])
 
   useEffect(() => {
     if (!canKick) return
@@ -97,11 +143,35 @@ export function useOfficeBall(
       )
       if (!power) return
       event.preventDefault()
-      kick(power, event.shiftKey)
+      if (!CHARGEABLE_POWERS.includes(power)) {
+        kick(power)
+        return
+      }
+      if (chargingRef.current?.power === power) return
+      const next = { power, startedAt: Date.now() }
+      chargingRef.current = next
+      setCharging(next)
+    }
+    const onKeyUp = (event: KeyboardEvent) => {
+      const current = chargingRef.current
+      if (!current) return
+      const key = event.key.toLowerCase()
+      if (BALL_KEYS[current.power as keyof typeof BALL_KEYS] !== key) return
+      const elapsed = Date.now() - current.startedAt
+      const charge = Math.max(0, Math.min(1, elapsed / BALL_CHARGE_MS))
+      cancelCharge()
+      kick(current.power, event.shiftKey, charge)
     }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [canKick, kick])
+    window.addEventListener('keyup', onKeyUp)
+    // Alt-tab com a tecla segurada não pode virar chute em segundo plano.
+    window.addEventListener('blur', cancelCharge)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', cancelCharge)
+    }
+  }, [canKick, kick, cancelCharge])
 
-  return { nearbyBall, canKick, kick }
+  return { nearbyBall, canKick, charging, kick }
 }

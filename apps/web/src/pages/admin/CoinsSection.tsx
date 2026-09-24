@@ -12,7 +12,6 @@ import {
   COIN_TRANSACTION_KINDS,
   COIN_TRANSACTION_KIND_LABELS,
   type AdminUserDTO,
-  type CoinCapWindow,
   type CoinEvent,
   type CoinLedgerResponse,
   type CoinReportDTO,
@@ -24,6 +23,13 @@ import { ApiError, apiFetch } from '../../lib/api'
 import { Icon } from '../../components/Icon'
 import { Select } from '../../components/Select'
 import { Panel, inputCls } from './shared'
+import {
+  emptyRuleValue,
+  RuleValueFields,
+  ruleValueBody,
+  useRuleEditing,
+  type RuleValue,
+} from './RuleValueFields'
 
 const ADMIN_COINS_KEY = ['admin', 'coins'] as const
 
@@ -46,10 +52,9 @@ function RulesPanel() {
   const queryClient = useQueryClient()
   const [showForm, setShowForm] = useState(false)
   const [event, setEvent] = useState<CoinEvent | ''>('')
-  const [amount, setAmount] = useState('10')
-  const [capWindow, setCapWindow] = useState<CoinCapWindow>('NONE')
-  const [capAmount, setCapAmount] = useState('')
+  const [novaRegra, setNovaRegra] = useState<RuleValue>(() => emptyRuleValue())
   const [error, setError] = useState<string | null>(null)
+  const edicao = useRuleEditing()
 
   const rulesQuery = useQuery({
     queryKey: ['admin', 'coins', 'rules'],
@@ -67,9 +72,7 @@ function RulesPanel() {
     onSuccess: () => {
       setShowForm(false)
       setEvent('')
-      setAmount('10')
-      setCapWindow('NONE')
-      setCapAmount('')
+      setNovaRegra(emptyRuleValue())
       setError(null)
       void invalidate()
     },
@@ -81,6 +84,7 @@ function RulesPanel() {
       apiFetch(`/admin/coins/rules/${vars.id}`, { method: 'PATCH', body: JSON.stringify(vars.body) }),
     onSuccess: () => {
       setError(null)
+      edicao.stop()
       void invalidate()
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : 'Erro ao atualizar a regra.'),
@@ -101,12 +105,15 @@ function RulesPanel() {
       setError('Escolha o evento da regra.')
       return
     }
-    create.mutate({
-      event,
-      amount: Number(amount),
-      capWindow,
-      capAmount: capWindow === 'NONE' ? null : Number(capAmount),
-    })
+    create.mutate({ event, ...ruleValueBody(novaRegra) })
+  }
+
+  function handleEditSubmit(submitEvent: FormEvent) {
+    submitEvent.preventDefault()
+    if (!edicao.editing) return
+    // Só valor e teto: o evento é a identidade da regra e a API nem o aceita
+    // no PATCH (ver `RuleValueFields`).
+    update.mutate({ id: edicao.editing.id, body: ruleValueBody(edicao.editing.value) })
   }
 
   return (
@@ -137,40 +144,14 @@ function RulesPanel() {
             options={availableEvents.map((option) => ({ value: option, label: COIN_EVENT_LABELS[option] }))}
           />
           {event && <p className="text-body-sm text-on-surface-variant">{COIN_EVENT_DESCRIPTIONS[event]}</p>}
-          <div className="flex flex-wrap gap-sm">
-            <input
-              type="number"
-              min={1}
-              value={amount}
-              onChange={(input) => setAmount(input.target.value)}
-              aria-label="Coins por ação"
-              placeholder="Coins por ação"
-              className={`${inputCls} w-40`}
-            />
-            <Select
-              value={capWindow}
-              onChange={(value) => setCapWindow(value as CoinCapWindow)}
-              ariaLabel="Janela do teto"
-              options={COIN_CAP_WINDOWS.map((option) => ({ value: option, label: COIN_CAP_WINDOW_LABELS[option] }))}
-            />
-            {capWindow !== 'NONE' && (
-              <input
-                type="number"
-                min={1}
-                value={capAmount}
-                onChange={(input) => setCapAmount(input.target.value)}
-                aria-label="Teto da janela"
-                placeholder="Teto da janela"
-                className={`${inputCls} w-40`}
-              />
-            )}
-            <button
-              type="submit"
-              className="rounded-md bg-primary px-lg py-sm font-label text-label-md font-bold text-on-primary hover:bg-primary-container hover:text-on-primary-container"
-            >
-              Adicionar
-            </button>
-          </div>
+          <RuleValueFields
+            value={novaRegra}
+            onChange={setNovaRegra}
+            amountLabel="Coins por ação"
+            capWindows={COIN_CAP_WINDOWS}
+            capWindowLabels={COIN_CAP_WINDOW_LABELS}
+            submitLabel="Adicionar"
+          />
         </form>
       )}
 
@@ -193,22 +174,49 @@ function RulesPanel() {
                   +{rule.amount} · {capLabel(rule)} · {rule.active ? 'ativa' : 'inativa'}
                 </p>
               </div>
-              <div className="flex gap-sm">
-                <button
-                  type="button"
-                  onClick={() => update.mutate({ id: rule.id, body: { active: !rule.active } })}
-                  className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
-                >
-                  {rule.active ? 'Desativar' : 'Ativar'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => remove.mutate(rule.id)}
-                  className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-error hover:border-error"
-                >
-                  Excluir
-                </button>
-              </div>
+              {edicao.editing?.id === rule.id ? (
+                <form onSubmit={handleEditSubmit} className="flex flex-wrap gap-sm">
+                  <RuleValueFields
+                    value={edicao.editing.value}
+                    onChange={edicao.change}
+                    amountLabel="Coins por ação"
+                    capWindows={COIN_CAP_WINDOWS}
+                    capWindowLabels={COIN_CAP_WINDOW_LABELS}
+                    submitLabel="Salvar"
+                    onCancel={edicao.stop}
+                  />
+                </form>
+              ) : (
+                <div className="flex gap-sm">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      edicao.start(rule.id, {
+                        amount: String(rule.amount),
+                        capWindow: rule.capWindow,
+                        capAmount: rule.capAmount == null ? '' : String(rule.capAmount),
+                      })
+                    }
+                    className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
+                  >
+                    Editar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => update.mutate({ id: rule.id, body: { active: !rule.active } })}
+                    className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
+                  >
+                    {rule.active ? 'Desativar' : 'Ativar'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => remove.mutate(rule.id)}
+                    className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-error hover:border-error"
+                  >
+                    Excluir
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

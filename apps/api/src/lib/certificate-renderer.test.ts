@@ -126,6 +126,22 @@ describe('modelo visual (cores, assinatura, logo)', () => {
     expect(svg).not.toContain('<image')
   })
 
+  /**
+   * O campo existia no modelo e no formulário desde sempre, mas o SVG nunca o
+   * desenhava: quem colava uma URL de fundo salvava e não via efeito nenhum.
+   */
+  it('com backgroundUrl, a arte de fundo entra cobrindo a folha', () => {
+    const fundo = 'https://cdn.example.com/fundos/papel.png'
+    const svg = buildCertificateSvg(DATA, { ...TEMPLATE, backgroundUrl: fundo })
+    expect(svg).toContain(fundo)
+    expect(svg).toContain('preserveAspectRatio="xMidYMid slice"')
+  })
+
+  it('modelo sem backgroundUrl não desenha fundo nenhum', () => {
+    const svg = buildCertificateSvg(DATA, { ...TEMPLATE, backgroundUrl: null })
+    expect(svg).not.toContain('preserveAspectRatio="xMidYMid slice"')
+  })
+
   it('escapa cores/textos do modelo que quebrariam o XML', () => {
     const svg = buildCertificateSvg(DATA, { ...TEMPLATE, signatureName: 'Ana <script> & Cia' })
     expect(svg).toContain('Ana &lt;script&gt; &amp; Cia')
@@ -153,6 +169,42 @@ describe('compatibilidade: certificado já emitido, sem modelo', () => {
  * exportada só pra isso), não a string de entrada — e que uma falha ao buscar
  * a imagem é best-effort: loga, não derruba a emissão.
  */
+/**
+ * A herança da logo do branding passa por aqui, e a pergunta é uma só: o resvg
+ * desenha SVG dentro de `<image>`?
+ *
+ * Desenha — e o teste existe porque a intuição diz o contrário. O rodapé do
+ * Teams DESCARTA logo em SVG (`isTeamsRenderableLogo`), mas lá quem rasteriza é
+ * a Microsoft e não há como interferir. Aqui quem rasteriza é o resvg, e a
+ * própria logo embutida do certificado sempre foi um SVG. Copiar a restrição do
+ * Teams para cá deixaria a empresa com a logo cadastrada e o certificado sem
+ * ela, sem explicação.
+ */
+describe('logo em SVG (a herança da marca)', () => {
+  const LOGO_VERMELHA =
+    'data:image/svg+xml;base64,' +
+    Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#ff0000"/></svg>',
+    ).toString('base64')
+
+  /** Cor do pixel no centro de onde a logo é desenhada (`WIDTH - 260`, `HEIGHT - 150`). */
+  function pixelDaLogo(png: Buffer): [number, number, number] {
+    const image = PNG.sync.read(png)
+    const i = ((1131 - 150) * image.width + (1600 - 260)) * 4
+    return [image.data[i], image.data[i + 1], image.data[i + 2]]
+  }
+
+  it('o resvg rasteriza a logo SVG do modelo — ela sai desenhada no certificado', async () => {
+    const png = await renderCertificate(DATA, { ...TEMPLATE, logoUrl: LOGO_VERMELHA, signatureImageUrl: null })
+    expect(pixelDaLogo(png)).toEqual([255, 0, 0])
+  })
+
+  it('sem logo, aquele mesmo ponto é o papel — não é o vermelho que passa por acaso', async () => {
+    const png = await renderCertificate(DATA, { ...TEMPLATE, logoUrl: null, signatureImageUrl: null })
+    expect(pixelDaLogo(png)).not.toEqual([255, 0, 0])
+  })
+})
+
 describe('resolução de imagens remotas (renderCertificate)', () => {
   const A_TINY_PNG_BYTES = new Uint8Array([1, 2, 3, 4]) // conteúdo não precisa ser um PNG de verdade pra provar a costura do data URI
 

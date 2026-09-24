@@ -1,4 +1,24 @@
 import {
+  stepBodyKart,
+  type BodyKartState,
+  fireBodyShot,
+  officeKickBall,
+  stepBodyBall,
+  touchBodyBall,
+  BODY_SPEED,
+  BODY_SPRINT_FACTOR,
+  stepBodyAmongBlockers,
+  bodyCollisionGrid,
+  bodySpawnPoint,
+  BODY_TICK_HZ,
+  BODY_SNAPSHOT_HZ,
+  BODY_MAX_PENDING_INPUTS,
+  BODY_MAX_STEP_MS,
+  BODY_TIME_BUDGET_CAP_MS,
+  TILE_SIZE,
+  type BodyBlocker,
+  type BodyCollisionGrid,
+  type BodyInput,
   ballDistanceFrom,
   canStepTo,
   DIRECTION_DELTAS,
@@ -6,14 +26,15 @@ import {
   MOVE_DIRECTION_DELTAS,
   HIGH_FIVE_EMOJI,
   isBallInReach,
+  PAINTBALL_COOLDOWN_MS,
+  PAINTBALL_MAX_SPLATS,
   isMapTileWalkable,
-  kickBall,
   mapBalls,
   mapKarts,
   mapSpawnTiles,
-  mapZoneAt,
+  mapZoneAtTile,
   claimedDeskInMeetingRoom,
-  officeRoomForMapPosition,
+  officeRoomForTile,
   officeHash,
   REACTION_ACTIVE_WINDOW_MS,
   PERFECT_HIGH_FIVE_CHANCE,
@@ -33,9 +54,11 @@ import {
   type OfficeBall,
   type OfficeBallPower,
   type OfficeKart,
+  type PaintSplat,
   type OfficeOccupant,
   type OfficeRoomAudioDeniedReason,
   type OfficeRoomAudioEntry,
+  type OfficeRoomManager,
   type OfficeRoomEntryDeniedReason,
   type OfficeServerMessage,
   type OfficeUserStatus,
@@ -71,6 +94,8 @@ export interface OfficeUser {
   id: string
   name: string
   isGuest?: boolean
+  /** ADMIN da empresa: modera qualquer sala, mesmo sem ser manager dela. */
+  isAdmin?: boolean
   officeCharacterName?: string | null
   photoUrl: string | null
   avatarStyle: AvatarStyleKey | null
@@ -149,7 +174,59 @@ interface Bucket {
 interface Entry {
   occupant: OfficeOccupant
   sockets: Set<OfficeSocket>
+  /** Inputs recebidos e ainda não simulados, em ordem de chegada. */
+  pending: BodyInput[]
+  /** Último `seq` já aplicado — volta no snapshot e guia a reconciliação. */
+  lastSeq: number
+  /** Tempo de simulação creditado e ainda não gasto (ver `BODY_TIME_BUDGET_CAP_MS`). */
+  budgetMs: number
+  /**
+   * O tile COMITADO — não o tile em que o centro está agora.
+   *
+   * É contra ele que a borda é detectada. Ficam separados porque, com posição
+   * contínua, dá para parar exatamente em cima da divisa e oscilar: sem
+   * histerese, entrar/sair de sala dispararia várias vezes por segundo, e o som
+   * de presença viraria um picote (ver `TILE_COMMIT_MARGIN`).
+   */
+  tile: { x: number; y: number }
+  /**
+   * A última intenção aplicada, e quando. É ela que diz se a pessoa CONDUZ a
+   * bola ou só está no caminho dela — e o instante existe porque input que
+   * parou de chegar (aba em segundo plano, rede caída) não pode deixar alguém
+   * conduzindo para sempre.
+   */
+  lastMove: { dx: number; dy: number; sprint: boolean }
+  lastMoveAt: number
+  speed: number
+  /**
+   * O que foi no último snapshot. É a base da SUPRESSÃO: escritório parado não
+   * pode custar 20 pacotes por segundo por pessoa, que é o que o modelo de
+   * snapshot cobraria se emitisse sempre.
+   */
+  sent: { x: number; y: number; dir: Direction; seq: number; sprint: boolean } | null
 }
+
+/** Quantos ticks entre dois snapshots. Inteiro por construção (ver `BODY_TICK_HZ`). */
+const TICKS_PER_SNAPSHOT = Math.round(BODY_TICK_HZ / BODY_SNAPSHOT_HZ)
+
+/**
+ * Quanto o centro precisa entrar num tile novo para ele valer como comitado.
+ *
+ * A histerese que impede o picote na divisa. Parar em cima da linha entre dois
+ * tiles é comum (encostado numa parede, por exemplo), e sem margem o tile
+ * derivado alterna a cada quadro — disparando entrar/sair de sala, som de
+ * presença e fila de mão levantada dezenas de vezes por segundo.
+ *
+ * Pequena de propósito: a porta tem de responder na hora, não depois de um
+ * passo inteiro.
+ */
+const TILE_COMMIT_MARGIN = 3
+
+/**
+ * Por quanto tempo a última intenção de passo continua valendo — o mesmo
+ * raciocínio (e o mesmo valor) da arena.
+ */
+const MOVE_INTENT_TTL_MS = 200
 
 /**
  * Estado do escritório virtual — inteiramente em memória, por instância.
@@ -164,6 +241,10 @@ export class OfficeHub {
   private runtime: ActiveOfficeMapDTO | null = null
   /** Veículos dinâmicos, sem persistência: nascem dos assets da publicação. */
   private kartStates = new Map<string, OfficeKart>()
+  /** O laço de simulação; `null` com o escritório vazio. */
+  private timer: ReturnType<typeof setInterval> | null = null
+  private tickCount = 0
+  private lastTickAt = 0
 
   /**
    * Onde cada bola está AGORA. Some ao reiniciar o hub e volta para a posição
@@ -171,6 +252,20 @@ export class OfficeHub {
    * estado que valha um banco.
    */
   private ballStates = new Map<string, OfficeBall>()
+
+  /**
+   * Marcas de tinta vivas, por usuário que as levou. Como a bola, existem só
+   * em memória: tinta de ontem não é estado que valha um banco.
+   *
+   * Cada marca guarda o instante em que vence — e o hub NÃO ganhou timer para
+   * expirá-las. A limpeza é preguiçosa (`livePaintSplats`), feita em toda
+   * leitura: um `setTimeout` por marca seria estado agendado por empresa para
+   * algo que ninguém consulta enquanto não olha.
+   */
+  private paintSplats = new Map<string, Array<PaintSplat & { expiresAt: number }>>()
+
+  /** Último tiro de cada um — a cadência do marcador (ver `PAINTBALL_COOLDOWN_MS`). */
+  private lastPaintballAt = new Map<string, number>()
   private entries = new Map<string, Entry>()
   /**
    * Chaveado por userId (não por socket): várias abas da mesma pessoa
@@ -222,7 +317,7 @@ export class OfficeHub {
    * Salas de reunião trancadas nesta sessão (`room.id`). A tranca é da SALA,
    * não de quem trancou: qualquer ocupante liga/desliga e responde aos
    * pedidos, então quem trancou sair não destranca nada. Ela só cai quando a
-   * sala fica vazia (ver `unlockIfRoomEmpty`).
+   * sala fica vazia (ver `sweepEmptyLockedRooms`).
    */
   private lockedRooms = new Set<string>()
   /** Passe de entrada por sala, concedido no aceite; vale enquanto a tranca durar. */
@@ -246,6 +341,24 @@ export class OfficeHub {
   private roomAudio = new Map<string, RoomAudioEntry>()
   /** Último início de áudio por usuário (anti-spam, como `lastKnockAt`). */
   private lastRoomAudioAt = new Map<string, number>()
+  /**
+   * Ordem de chegada em cada sala (`room.id` → userIds), a mais antiga
+   * primeiro. É o que decide o manager quando a sala não tem dono de mesa: o
+   * primeiro da fila manda, e sair passa a vez para o seguinte.
+   *
+   * Precisa ser estado, e não derivado da posição como o resto: a geometria
+   * diz quem ESTÁ na sala, nunca quem chegou antes.
+   */
+  private roomArrivals = new Map<string, string[]>()
+  /**
+   * Quem foi tirado da chamada e ainda não saiu da área da sala
+   * (`userId` → `room.id`). Enquanto a marca existe, o token de mídia daquela
+   * sala é negado — é o que impede a pessoa de voltar sozinha, já que ela
+   * continua fisicamente lá dentro. Sai da área, a marca é apagada.
+   */
+  private removedFromRoom = new Map<string, string>()
+  /** Última lista de managers publicada — evita rebroadcast quando nada mudou. */
+  private lastRoomManagersKey = ''
 
   join(socket: OfficeSocket, user: OfficeUser, runtime?: ActiveOfficeMapDTO): void {
     if (runtime) this.configure(runtime)
@@ -267,7 +380,23 @@ export class OfficeHub {
     } else {
       this.buckets.set(user.id, { tokens: BURST, updatedAt: Date.now() })
       this.annotationBuckets.set(user.id, { tokens: ANNOTATION_BURST, updatedAt: Date.now() })
-      const spawn = this.pickSpawn(user.id)
+      // O spawn do mapa é um TILE; o corpo contínuo nasce no ponto com folga
+      // mais próximo dele. O tile de spawn costuma ser um vão estreito, onde um
+      // corpo em pixel nasceria praticamente entalado (ver `bodySpawnPoint`).
+      const spawnTile = this.pickSpawn(user.id)
+      const grid = this.collisionGrid()
+      const spawn =
+        grid && this.runtime
+          ? bodySpawnPoint(
+              this.runtime.document,
+              grid,
+              spawnTile,
+              [...this.entries.values()].map((other) => ({ x: other.occupant.x, y: other.occupant.y })),
+            )
+          : {
+              x: spawnTile.x * TILE_SIZE + TILE_SIZE / 2,
+              y: spawnTile.y * TILE_SIZE + TILE_SIZE / 2,
+            }
       const occupant: OfficeOccupant = {
         userId: user.id,
         name: user.name,
@@ -282,13 +411,32 @@ export class OfficeHub {
         avatarOptions: user.avatarOptions,
         status: 'online',
       }
-      this.entries.set(user.id, { occupant, sockets: new Set([socket]) })
+      this.entries.set(user.id, {
+        occupant,
+        sockets: new Set([socket]),
+        pending: [],
+        lastSeq: 0,
+        budgetMs: 0,
+        tile: this.tileOf(occupant),
+        lastMove: { dx: 0, dy: 0, sprint: false },
+        lastMoveAt: 0,
+        // Parado, e a pé: só quem monta num kart passa a ter velocidade.
+        speed: 0,
+        sent: null,
+      })
       this.broadcast({ type: 'joined', occupant }, user.id)
+      // O spawn pode cair dentro de uma sala, e entrar no escritório não passa
+      // por `move` — sem isto, quem nasce lá dentro nunca entra na fila e a
+      // sala fica sem manager até alguém andar.
+      this.trackRoomArrival(user.id, null, this.roomOf(occupant)?.id ?? null)
+      this.refreshRoomManagers()
     }
 
     this.sendTo(socket, {
       type: 'welcome',
       youId: user.id,
+      // De onde a predição retoma a numeração (ver o comentário no contrato).
+      seq: this.entries.get(user.id)?.lastSeq ?? 0,
       occupants: this.occupants(),
       publicationId: this.runtime?.publication.id,
       confettiUserIds: [...this.confettiActive],
@@ -296,8 +444,10 @@ export class OfficeHub {
       editorUserIds: [...this.editingActive],
       lockedRoomIds: [...this.lockedRooms],
       roomAudio: this.roomAudioEntries(),
+      roomManagers: this.roomManagers(),
       karts: this.karts(),
       balls: this.balls(),
+      paintSplats: this.paintSplatsSnapshot(),
     })
   }
 
@@ -329,6 +479,13 @@ export class OfficeHub {
       this.raisedHandsByRoom.clear()
       this.raisedHandRoomOf.clear()
       this.lastCelebrationAt = 0
+      this.paintSplats.clear()
+      this.lastPaintballAt.clear()
+      // Mapa novo, salas novas: fila de chegada e marcas de remoção não
+      // sobrevivem à troca — os ids de sala nem existem mais.
+      this.roomArrivals.clear()
+      this.removedFromRoom.clear()
+      this.lastRoomManagersKey = ''
       this.clearRoomLockState()
       this.clearRoomAudioState()
     }
@@ -384,9 +541,9 @@ export class OfficeHub {
     return this.runtime?.publication.id ?? null
   }
 
-  roomForPosition(x: number, y: number) {
+  roomForTile(x: number, y: number) {
     if (!this.runtime) return null
-    const zone = mapZoneAt(this.runtime.document, x, y)
+    const zone = mapZoneAtTile(this.runtime.document, x, y)
     if (zone?.type !== 'meeting-room') return null
     return this.runtime.rooms.find((room) => room.externalKey === zone.properties.externalKey) ?? null
   }
@@ -396,10 +553,125 @@ export class OfficeHub {
     return claimedDeskInMeetingRoom(this.runtime.document, this.runtime.desks, roomExternalKey)?.claimedBy?.id ?? null
   }
 
+  /** Quem está dentro da sala agora, derivado da posição (como todo o resto). */
+  private occupantIdsInRoom(roomId: string): string[] {
+    const ids: string[] = []
+    for (const [userId, entry] of this.entries) {
+      if (this.roomOf(entry.occupant)?.id === roomId) ids.push(userId)
+    }
+    return ids
+  }
+
+  /**
+   * Quem manda na sala: o dono da mesa reivindicada lá dentro, se ele estiver
+   * presente; senão quem chegou primeiro. Sala vazia não tem manager.
+   *
+   * O dono da mesa só vale enquanto está na sala — foi decisão explícita: a
+   * mesa continua sendo dele, mas moderar uma conversa de onde não se está não
+   * faz sentido, e deixaria a sala sem ninguém para resolver o problema na
+   * hora.
+   */
+  managerOf(roomId: string): OfficeRoomManager | null {
+    const room = this.runtime?.rooms.find((r) => r.id === roomId)
+    if (!room) return null
+    const present = new Set(this.occupantIdsInRoom(roomId))
+    if (present.size === 0) return null
+
+    const ownerId = this.roomLockOwnerId(room.externalKey)
+    if (ownerId && present.has(ownerId)) return { roomId, userId: ownerId, byDeskOwner: true }
+
+    const firstIn = (this.roomArrivals.get(roomId) ?? []).find((userId) => present.has(userId))
+    return firstIn ? { roomId, userId: firstIn, byDeskOwner: false } : null
+  }
+
+  /** Manager de cada sala ocupada — o que vai no `welcome` e no broadcast. */
+  roomManagers(): OfficeRoomManager[] {
+    const managers: OfficeRoomManager[] = []
+    for (const room of this.runtime?.rooms ?? []) {
+      const manager = this.managerOf(room.id)
+      if (manager) managers.push(manager)
+    }
+    return managers
+  }
+
+  /**
+   * Recalcula os managers e avisa o escritório se algum mudou. Chamado depois
+   * de qualquer coisa que mexa em quem está onde: entrar, sair da sala, sair
+   * do escritório. Silencioso quando nada mudou — é chamado a cada passo de
+   * quem cruza uma porta, e um broadcast por passo seria ruído puro.
+   */
+  private refreshRoomManagers(): void {
+    const managers = this.roomManagers()
+    const next = managers.map((m) => `${m.roomId}:${m.userId}:${m.byDeskOwner}`).join('|')
+    if (next === this.lastRoomManagersKey) return
+    this.lastRoomManagersKey = next
+    this.broadcast({ type: 'room-managers-changed', managers })
+  }
+
+  /**
+   * Registra a chegada de alguém numa sala e a saída da anterior. A fila é a
+   * memória de quem chegou antes; a presença em si continua sendo derivada da
+   * posição.
+   */
+  private trackRoomArrival(userId: string, previousRoomId: string | null, nextRoomId: string | null): void {
+    if (previousRoomId === nextRoomId) return
+    if (previousRoomId) {
+      const queue = (this.roomArrivals.get(previousRoomId) ?? []).filter((id) => id !== userId)
+      if (queue.length > 0) this.roomArrivals.set(previousRoomId, queue)
+      else this.roomArrivals.delete(previousRoomId)
+    }
+    if (nextRoomId) {
+      const queue = this.roomArrivals.get(nextRoomId) ?? []
+      if (!queue.includes(userId)) this.roomArrivals.set(nextRoomId, [...queue, userId])
+    }
+  }
+
+  /**
+   * O TILE que uma posição em pixel ocupa.
+   *
+   * Desde o movimento livre, `occupant.x/y` são pixel — mas sala, mesa, zona e
+   * alcance de voz continuam sendo conceitos de tile, e é certo que continuem:
+   * uma sala tem borda de tile, não de pixel.
+   *
+   * Os helpers que consomem tile ganharam `Tile` no nome de propósito. O
+   * compilador não distingue pixel de tile (os dois são `number`), então o único
+   * lugar onde essa confusão pode ser barrada é o nome — e ela seria do tipo que
+   * só aparece em produção, como "a sala não detecta quem entrou".
+   */
+  private tileOf(point: { x: number; y: number }): { x: number; y: number } {
+    const tileWidth = this.runtime?.document.map.tileWidth ?? TILE_SIZE
+    const tileHeight = this.runtime?.document.map.tileHeight ?? TILE_SIZE
+    return { x: Math.floor(point.x / tileWidth), y: Math.floor(point.y / tileHeight) }
+  }
+
+  /** A sala de reunião de quem está aqui — para quem só tem o occupant em mãos. */
+  roomOf(occupant: { x: number; y: number }): ReturnType<OfficeHub['roomForTile']> {
+    const tile = this.tileOf(occupant)
+    return this.roomForTile(tile.x, tile.y)
+  }
+
+  /** A sala de ÁUDIO por proximidade de quem está aqui. */
+  mediaRoomOf(occupant: { x: number; y: number }): string | null {
+    const tile = this.tileOf(occupant)
+    return this.mediaRoomForTile(tile.x, tile.y)
+  }
+
+  /** Está na sala de silêncio? — para quem tem o occupant, não o tile. */
+  private isInPrivateZoneOf(occupant: { x: number; y: number }): boolean {
+    const tile = this.tileOf(occupant)
+    return this.isInPrivateTile(tile.x, tile.y)
+  }
+
+  /** A zona de mão levantada de quem está aqui. */
+  private raiseHandZoneIdOf(occupant: { x: number; y: number }): string | null {
+    const tile = this.tileOf(occupant)
+    return this.raiseHandZoneIdAtTile(tile.x, tile.y)
+  }
+
   /** Sala de silêncio: onde o status fica travado em 'away'. */
-  private isInPrivateZone(x: number, y: number): boolean {
+  private isInPrivateTile(x: number, y: number): boolean {
     if (!this.runtime) return false
-    return mapZoneAt(this.runtime.document, x, y)?.type === 'private-zone'
+    return mapZoneAtTile(this.runtime.document, x, y)?.type === 'private-zone'
   }
 
   /**
@@ -416,7 +688,7 @@ export class OfficeHub {
     const entry = this.entries.get(userId)
     if (!entry) return
     if ((entry.occupant.status ?? 'online') === 'online') return
-    if (this.isInPrivateZone(entry.occupant.x, entry.occupant.y)) return
+    if (this.isInPrivateZoneOf(entry.occupant)) return
     entry.occupant.status = 'online'
     this.broadcast({ type: 'status-changed', userId, status: 'online' })
   }
@@ -426,85 +698,122 @@ export class OfficeHub {
    * modalidades de zona onde a mão levantada forma fila. Zona privada não
    * tem `Room` no banco (sem capacidade/política de acesso formal), então o
    * id usado pra agrupar é o mesmo da sala de áudio por proximidade
-   * (`officeRoomForMapPosition`): `externalKey` da zona, ou o id do objeto
+   * (`officeRoomForTile`): `externalKey` da zona, ou o id do objeto
    * no mapa se ela não tiver `externalKey`. Fora de qualquer zona, `null`.
    */
-  private raiseHandZoneId(x: number, y: number): string | null {
+  private raiseHandZoneIdAtTile(x: number, y: number): string | null {
     if (!this.runtime) return null
-    const zone = mapZoneAt(this.runtime.document, x, y)
+    const zone = mapZoneAtTile(this.runtime.document, x, y)
     if (!zone) return null
-    if (zone.type === 'meeting-room') return this.roomForPosition(x, y)?.id ?? null
+    if (zone.type === 'meeting-room') return this.roomForTile(x, y)?.id ?? null
     return zone.properties.externalKey ?? zone.id
   }
 
-  mediaRoomForPosition(x: number, y: number): string | null {
+  mediaRoomForTile(x: number, y: number): string | null {
     if (!this.runtime) return null
-    return officeRoomForMapPosition(this.runtime.map.id, this.runtime.document, x, y)
+    return officeRoomForTile(this.runtime.map.id, this.runtime.document, x, y)
   }
 
   /**
    * `seq` é o identificador do passo mandado pelo cliente — volta no `sync` de
    * recusa para ele desfazer exatamente a predição correspondente.
    */
-  move(socket: OfficeSocket, userId: string, move: MoveDirection, sprint = false, seq?: number): void {
+  /**
+   * Enfileira a intenção de quem está andando. NÃO simula aqui: quem simula é o
+   * tick, senão o ritmo do movimento passaria a ser o ritmo com que os pacotes
+   * chegam — e quem tivesse rede pior andaria diferente.
+   *
+   * Substituiu o `move` de grade, que resolvia o passo na chegada da mensagem e
+   * cobrava um token por passo. O teto agora é o mesmo da arena: fila limitada
+   * mais banco de tempo creditado pelo relógio DO SERVIDOR, que é o que impede
+   * um cliente adulterado de comprar velocidade inflando o próprio `dtMs`.
+   */
+  applyInput(socket: OfficeSocket, userId: string, input: BodyInput): void {
     if (this.socketOwner.get(socket) !== userId) return
     const entry = this.entries.get(userId)
     if (!entry) return
-    if (!this.takeToken(userId)) return
+    // Input velho (chegou fora de ordem) não volta no tempo.
+    if (input.seq <= entry.lastSeq) return
+    // Fila cheia: descarta o mais ANTIGO. Segurar os velhos e recusar os novos
+    // deixaria a pessoa andando no passado até a fila drenar.
+    if (entry.pending.length >= BODY_MAX_PENDING_INPUTS) entry.pending.shift()
+    entry.pending.push(input)
+    this.startLoop()
+  }
 
-    const delta = MOVE_DIRECTION_DELTAS[move]
-    // O sprite tem quatro poses; a diagonal encara para os lados.
-    const dir = facingForMove(move)
-    const targetX = entry.occupant.x + delta.x
-    const targetY = entry.occupant.y + delta.y
+  /** Karts estacionados, como caixas que bloqueiam o passo. */
+  private kartBlockers(): BodyBlocker[] {
+    const tileWidth = this.runtime?.document.map.tileWidth ?? TILE_SIZE
+    const tileHeight = this.runtime?.document.map.tileHeight ?? TILE_SIZE
+    // Só os ESTACIONADOS: um kart com piloto anda junto de alguém, e bloquear
+    // nele bloquearia o próprio piloto.
+    return [...this.kartStates.values()]
+      .filter((kart) => !kart.riderUserId)
+      .map((kart) => ({
+        x: kart.x,
+        y: kart.y,
+        halfWidth: tileWidth / 2,
+        halfHeight: tileHeight / 2,
+      }))
+  }
 
-    // Na diagonal não basta o destino estar livre: `canStepTo` também exige as
-    // duas ortogonais, a MESMA regra que a predição do cliente usa.
-    const canStep = this.canStep(entry.occupant, move)
-    const denial = canStep ? this.roomEntryDenial(userId, targetX, targetY) : null
-    if (!canStep || denial) {
-      // Encara a parede mesmo sem andar: vira o personagem e re-ancora o cliente.
-      entry.occupant.dir = dir
-      this.sendTo(socket, {
-        type: 'sync',
-        x: entry.occupant.x,
-        y: entry.occupant.y,
-        dir,
-        ...(seq === undefined ? {} : { seq }),
-      })
-      // Parede é auto-explicativa; porta de sala não. Só aqui o cliente
-      // descobre POR QUE não entrou — e, na tranca de sessão, ganha o tile
-      // recusado para caminhar até ele se o pedido for aceito.
-      if (denial) this.sendEntryDenied(socket, userId, denial, targetX, targetY)
-      // NÃO avalia high-five aqui: essa virada só é confirmada de volta pro
-      // próprio socket (sync privado), nunca em broadcast — os outros
-      // clientes nunca ficam sabendo que a direção mudou. Disparar o
-      // high-five neste branch animaria, pra quem está assistindo, dois
-      // personagens que na tela deles continuam sem estar de frente.
-      return
-    }
+  /** A grade fina de colisão do mapa ativo. Memoizada pela identidade de `objects`. */
+  private collisionGrid(): BodyCollisionGrid | null {
+    if (!this.runtime) return null
+    return bodyCollisionGrid(this.runtime.document)
+  }
 
-    // Sala/zona de origem, ANTES de reposicionar — sala de reunião (som de
-    // presença) e zona de mão levantada (sala OU zona privada) são
-    // rastreadas separadamente: a primeira nunca inclui zona privada, a
-    // segunda inclui as duas.
-    const previousRoom = this.roomForPosition(entry.occupant.x, entry.occupant.y)
-    const previousZoneId = this.raiseHandZoneId(entry.occupant.x, entry.occupant.y)
-    const wasInPrivateZone = this.isInPrivateZone(entry.occupant.x, entry.occupant.y)
-    entry.occupant.x = targetX
-    entry.occupant.y = targetY
-    entry.occupant.dir = dir
-    delete entry.occupant.thoughtText
-    this.syncRiderKart(entry.occupant)
-    this.broadcast({ type: 'moved', userId, x: targetX, y: targetY, dir, sprint })
-    this.dribble(entry.occupant, sprint, delta)
+  /**
+   * O tile que vale AGORA para efeito de sala e zona.
+   *
+   * Só troca quando o centro entrou de fato no tile novo (`TILE_COMMIT_MARGIN`).
+   * Parar em cima da divisa é comum — encostado numa parede, por exemplo — e sem
+   * a margem o tile derivado alternaria a cada quadro, disparando entrar/sair de
+   * sala dezenas de vezes por segundo.
+   */
+  private committedTile(entry: Entry): { x: number; y: number } {
+    const tileWidth = this.runtime?.document.map.tileWidth ?? TILE_SIZE
+    const tileHeight = this.runtime?.document.map.tileHeight ?? TILE_SIZE
+    const candidato = this.tileOf(entry.occupant)
+    if (candidato.x === entry.tile.x && candidato.y === entry.tile.y) return entry.tile
+    const dentroX = entry.occupant.x - candidato.x * tileWidth
+    const dentroY = entry.occupant.y - candidato.y * tileHeight
+    const firme =
+      dentroX >= TILE_COMMIT_MARGIN &&
+      dentroX <= tileWidth - TILE_COMMIT_MARGIN &&
+      dentroY >= TILE_COMMIT_MARGIN &&
+      dentroY <= tileHeight - TILE_COMMIT_MARGIN
+    return firme ? candidato : entry.tile
+  }
 
-    // Ausente automático ao entrar numa sala de silêncio (private-zone).
-    // Fora dela, andar é sinal de atividade: quem estava 'ausente'/'volto
-    // logo' volta pra online sozinho — o mesmo passo que SAI da sala já cai
-    // aqui, então a saída reverte pra online sem precisar de caso próprio.
-    // Trocas manuais enquanto dentro são forçadas pra 'away' em setStatus().
-    if (this.isInPrivateZone(targetX, targetY)) {
+  /**
+   * A cascata de travessia: som de presença, tranca, dono do áudio, knock,
+   * fila de mão levantada, fila de chegada, manager e status ausente.
+   *
+   * A REGRA é a mesma que o `move` de grade tinha; o que mudou é o gatilho. Lá
+   * havia um instante exato de entrada — o passo. Aqui há um tick em que o tile
+   * comitado mudou, e é sobre essa BORDA que tudo roda.
+   *
+   * O efeito colateral é bom: antes a cascata era avaliada a cada passo (até
+   * 20×/s por pessoa) mesmo sem ninguém trocar de sala; agora ela roda quando
+   * houve travessia de verdade.
+   */
+  private settleRegions(entry: Entry): void {
+    const anterior = entry.tile
+    const atual = this.committedTile(entry)
+    if (atual.x === anterior.x && atual.y === anterior.y) return
+
+    const userId = entry.occupant.userId
+    const socket = [...entry.sockets][0]
+    const previousRoom = this.roomForTile(anterior.x, anterior.y)
+    const previousZoneId = this.raiseHandZoneIdAtTile(anterior.x, anterior.y)
+    const wasInPrivateZone = this.isInPrivateTile(anterior.x, anterior.y)
+    entry.tile = atual
+
+    // Ausente automático ao entrar numa sala de silêncio (private-zone). Fora
+    // dela, andar é sinal de atividade: quem estava 'ausente'/'volto logo'
+    // volta pra online sozinho.
+    if (this.isInPrivateTile(atual.x, atual.y)) {
       if (!wasInPrivateZone) {
         entry.occupant.status = 'away'
         this.broadcast({ type: 'status-changed', userId, status: 'away' })
@@ -514,39 +823,40 @@ export class OfficeHub {
     }
 
     // Sinal sonoro de entrar/sair de sala de reunião.
-    const nextRoom = this.roomForPosition(targetX, targetY)
+    const nextRoom = this.roomForTile(atual.x, atual.y)
     if (nextRoom?.id !== previousRoom?.id) {
       if (nextRoom) {
-        // O próprio já está reposicionado dentro da sala, então o broadcast
-        // alcança ele + quem já estava lá (e ninguém de fora).
         this.broadcastToRoom(nextRoom.id, { type: 'room-presence', kind: 'enter', userId, roomId: nextRoom.id })
       }
       if (previousRoom) {
-        // O próprio já saiu da sala, logo o broadcast só pega quem ficou —
-        // mandamos direto ao socket dele para que também ouça.
         const leftMessage = { type: 'room-presence', kind: 'leave', userId, roomId: previousRoom.id } as const
-        this.sendTo(socket, leftMessage)
+        if (socket) this.sendTo(socket, leftMessage)
         this.broadcastToRoom(previousRoom.id, leftMessage)
-        // Saiu de uma sala trancada: a tranca fica com quem ficou; some só
-        // se ele era o último lá dentro.
-        this.unlockIfRoomEmpty(previousRoom.id)
         // O áudio, ao contrário da tranca, é de quem iniciou e sai com ele.
         this.clearRoomAudioIfOwnerLeft(previousRoom.id, userId)
       }
+      // Saiu de uma sala trancada: a tranca fica com quem ficou; some só se ele
+      // era o último lá dentro. Fora do `if` acima porque a sala que a pessoa
+      // deixou pode não ser a que a cascata enxerga (ver `sweepEmptyLockedRooms`).
+      this.sweepEmptyLockedRooms()
       // Entrou na sala que tinha pedido para entrar: o pedido cumpriu o papel.
       if (nextRoom && this.knockRoomOf.get(userId) === nextRoom.id) this.clearKnock(userId)
+
+      this.trackRoomArrival(userId, previousRoom?.id ?? null, nextRoom?.id ?? null)
+      // Sair da área é o que devolve a chamada a quem foi removido.
+      if (previousRoom && this.removedFromRoom.get(userId) === previousRoom.id) {
+        this.removedFromRoom.delete(userId)
+      }
+      this.refreshRoomManagers()
     }
 
-    // Fila/ícone de mão levantada: entra/sai de sala de reunião OU zona
-    // privada — a mão só existe DENTRO de uma dessas, então sair da zona
-    // abaixa tudo (fila e ícone global), não só a fila.
-    const nextZoneId = this.raiseHandZoneId(targetX, targetY)
+    // Fila/ícone de mão levantada: entra/sai de sala de reunião OU zona privada
+    // — a mão só existe DENTRO de uma dessas, então sair da zona abaixa tudo.
+    const nextZoneId = this.raiseHandZoneIdAtTile(atual.x, atual.y)
     if (nextZoneId !== previousZoneId) {
       if (nextZoneId) {
-        // Fila já em andamento na zona: manda o snapshot só para quem
-        // chegou (sem `event` — não deve tocar som de "levantou").
         const queue = this.raisedHandsByRoom.get(nextZoneId)
-        if (queue && queue.length > 0) {
+        if (queue && queue.length > 0 && socket) {
           this.sendTo(socket, { type: 'raised-hands', roomId: nextZoneId, queue: [...queue] })
         }
       }
@@ -559,7 +869,7 @@ export class OfficeHub {
             queue: removedHand.queue,
             event: { kind: 'lowered', userId },
           } as const
-          this.sendTo(socket, handMessage)
+          if (socket) this.sendTo(socket, handMessage)
           this.broadcastToRoom(removedHand.roomId, handMessage)
         }
         if (this.raisedHandActive.delete(userId)) {
@@ -570,6 +880,267 @@ export class OfficeHub {
     }
 
     this.evaluateHighFive(userId)
+  }
+
+  /**
+   * O laço de simulação do escritório.
+   *
+   * Nasce no primeiro que entra e morre quando o escritório esvazia — o padrão
+   * que a arena já usa, e que responde à objeção original (timer OCIOSO por
+   * empresa) sem abrir mão do modelo.
+   *
+   * A diferença em relação à arena é que escritório raramente esvazia. É por
+   * isso que a supressão de snapshot sem mudança não é otimização aqui: é parte
+   * do desenho (ver `broadcastSnapshot`).
+   */
+  private startLoop(): void {
+    if (this.timer || this.entries.size === 0) return
+    this.lastTickAt = Date.now()
+    this.timer = setInterval(() => this.tick(), Math.round(1000 / BODY_TICK_HZ))
+    // Não segura o processo Node aberto (mesmo cuidado do heartbeat do socket).
+    this.timer.unref?.()
+  }
+
+  private stopLoopIfEmpty(): void {
+    if (this.entries.size > 0 || !this.timer) return
+    clearInterval(this.timer)
+    this.timer = null
+    this.tickCount = 0
+  }
+
+  /** Só para teste: o loop está vivo? */
+  isRunning(): boolean {
+    return this.timer !== null
+  }
+
+  /**
+   * Só para teste: anda o equivalente a UM tile na direção pedida.
+   *
+   * Existe para os testes que herdaram o modelo de grade continuarem dizendo o
+   * que diziam. Eles quase nunca são sobre o passo — são sobre o que a
+   * travessia PROVOCA (som de presença, tranca, fila de mão levantada, manager,
+   * high-five) —, e essa parte não mudou de regra, só de gatilho.
+   *
+   * Não é atalho para dentro da simulação: ele empurra input de verdade e roda
+   * o tick de verdade. O que ele dispensa é o relógio de parede.
+   */
+  __walkForTest(socket: OfficeSocket, userId: string, move: MoveDirection, sprint = false): void {
+    const entry = this.entries.get(userId)
+    if (!entry) return
+    const delta = MOVE_DIRECTION_DELTAS[move]
+    const tile = this.runtime?.document.map.tileWidth ?? TILE_SIZE
+    const velocidade = BODY_SPEED * (sprint ? BODY_SPRINT_FACTOR : 1)
+    let restante = (tile / velocidade) * 1000
+    while (restante > 0.001) {
+      const dtMs = Math.min(BODY_MAX_STEP_MS, restante)
+      this.applyInput(socket, userId, {
+        seq: entry.lastSeq + entry.pending.length + 1,
+        dx: delta.x,
+        dy: delta.y,
+        dtMs,
+        sprint,
+      })
+      this.tick(dtMs)
+      restante -= dtMs
+    }
+  }
+
+  /** Só para teste: a velocidade do kart de quem está montado. */
+  __speedForTest(userId: string): number {
+    return this.entries.get(userId)?.speed ?? 0
+  }
+
+  /** Só para teste: roda um tick com o tempo decorrido que se quer. */
+  __tickForTest(elapsedMs: number): void {
+    this.tick(elapsedMs)
+  }
+
+  /** Só para teste: leva alguém direto a um tile, com a cascata rodando. */
+  __placeAtTileForTest(userId: string, tileX: number, tileY: number): void {
+    const entry = this.entries.get(userId)
+    if (!entry) return
+    const tileWidth = this.runtime?.document.map.tileWidth ?? TILE_SIZE
+    const tileHeight = this.runtime?.document.map.tileHeight ?? TILE_SIZE
+    entry.occupant.x = tileX * tileWidth + tileWidth / 2
+    entry.occupant.y = tileY * tileHeight + tileHeight / 2
+    this.syncRiderKart(entry.occupant)
+    this.settleRegions(entry)
+  }
+
+  private tick(forcedElapsedMs?: number): void {
+    const grid = this.collisionGrid()
+    if (!grid) return
+    const now = Date.now()
+    // O tempo decorrido vem do relógio, salvo quando um teste o impõe: os
+    // testes do hub exercitam a CASCATA de travessia, e depender do relógio de
+    // parede para andar um tile os deixaria lentos e instáveis.
+    const elapsed = forcedElapsedMs ?? Math.max(0, now - this.lastTickAt)
+    this.lastTickAt = now
+    const blockers = this.kartBlockers()
+
+    for (const entry of this.entries.values()) {
+      // Credita pelo relógio DO SERVIDOR e debita por input aplicado: o `dtMs`
+      // vem do cliente, e sem isso quem inflasse o próprio `dt` compraria
+      // velocidade. O banco (com teto) é o que ainda assim tolera jitter.
+      entry.budgetMs = Math.min(entry.budgetMs + elapsed, BODY_TIME_BUDGET_CAP_MS)
+
+      while (entry.pending.length > 0 && entry.budgetMs > 0) {
+        const input = entry.pending[0]
+        const dtMs = Math.min(Math.max(input.dtMs, 0), BODY_MAX_STEP_MS, entry.budgetMs)
+        const antes = { x: entry.occupant.x, y: entry.occupant.y }
+        if (entry.occupant.ridingKartId) {
+          // De kart, o passo é o MESMO da corrida: rumo contínuo, inércia,
+          // esterço que só morde andando. Reusar `stepBodyKart` é o que faz
+          // dirigir no escritório ser igual a dirigir na arena — duas
+          // implementações de pilotagem divergiriam, e a pessoa sentiria.
+          const kart: BodyKartState = {
+            x: entry.occupant.x,
+            y: entry.occupant.y,
+            dir: entry.occupant.dir,
+            heading: entry.occupant.heading ?? 0,
+            speed: entry.speed,
+          }
+          const proximo = stepBodyKart(kart, { ...input, dtMs }, grid)
+          entry.occupant.x = proximo.x
+          entry.occupant.y = proximo.y
+          entry.occupant.dir = proximo.dir
+          entry.occupant.heading = proximo.heading
+          entry.speed = proximo.speed
+        } else {
+          const proximo = stepBodyAmongBlockers(
+            { x: entry.occupant.x, y: entry.occupant.y, dir: entry.occupant.dir },
+            { ...input, dtMs },
+            grid,
+            blockers,
+          )
+          entry.occupant.x = proximo.x
+          entry.occupant.y = proximo.y
+          entry.occupant.dir = proximo.dir
+        }
+        // Sala recusada é COLISÃO, não silêncio: o corpo para na porta em vez de
+        // escorregar para dentro. Sem isso, deslizar ao longo de uma parede
+        // poderia empurrar alguém para dentro de uma sala trancada.
+        if (this.refuseForbiddenRoom(entry, antes)) {
+          entry.occupant.x = antes.x
+          entry.occupant.y = antes.y
+        }
+        entry.budgetMs -= dtMs
+        entry.lastSeq = input.seq
+        entry.lastMove = { dx: input.dx, dy: input.dy, sprint: input.sprint === true }
+        entry.lastMoveAt = now
+        entry.pending.shift()
+      }
+
+      // O pensamento some quando a pessoa se mexe, como sempre foi — só que
+      // agora "se mexer" é ter andado neste tick, não ter mandado um `move`.
+      if (entry.lastMoveAt === now && (entry.lastMove.dx !== 0 || entry.lastMove.dy !== 0)) {
+        this.clearThought(entry)
+      }
+      this.syncRiderKart(entry.occupant)
+      this.settleRegions(entry)
+    }
+
+    const bolasRolando = this.updateBalls(elapsed)
+
+    this.tickCount += 1
+    if (this.tickCount % TICKS_PER_SNAPSHOT === 0) {
+      // Rede de segurança da invariante da tranca: quem sai de uma sala pode
+      // não disparar travessia nenhuma (ver `sweepEmptyLockedRooms`). Sai na
+      // primeira linha quando não há tranca no ar, que é o caso comum.
+      this.sweepEmptyLockedRooms()
+      this.broadcastSnapshot(bolasRolando > 0)
+    }
+  }
+
+  /**
+   * Apaga o pensamento de quem se mexeu — e AVISA os clientes.
+   *
+   * O aviso é a parte que não dá para deduzir do snapshot: ele carrega
+   * posição, não pensamento. No modelo de grade o eco `moved` fazia esse
+   * papel; o movimento livre o aposentou, e o balão passou a ficar pendurado
+   * na tela dos outros. Sai do ar só na transição (tinha pensamento e passou a
+   * não ter), então não vira tráfego por tick.
+   */
+  private clearThought(entry: Entry): void {
+    if (entry.occupant.thoughtText === undefined) return
+    delete entry.occupant.thoughtText
+    this.broadcast({ type: 'thought-cleared', userId: entry.occupant.userId })
+  }
+
+  /**
+   * A entrada neste tile seria recusada? Se sim, avisa o cliente (uma vez por
+   * intervalo) e devolve `true` para o chamador desfazer o passo.
+   *
+   * Parede é auto-explicativa; porta de sala não — só por aqui o cliente
+   * descobre POR QUE não entrou, e só a tranca de sessão aceita pedir para
+   * entrar. É o mesmo `entry-denied` do modelo de grade: o que sumiu foi o
+   * `sync`, não a explicação.
+   */
+  private refuseForbiddenRoom(entry: Entry, antes: { x: number; y: number }): boolean {
+    const destino = this.tileOf(entry.occupant)
+    const origem = this.tileOf(antes)
+    if (destino.x === origem.x && destino.y === origem.y) return false
+    const userId = entry.occupant.userId
+    const denial = this.roomEntryDenialAtTile(userId, destino.x, destino.y, origem)
+    if (!denial) return false
+
+    // A cadência é do `sendEntryDenied`, que já a aplica — sem cadência, uma
+    // pessoa encostada na porta geraria um aviso por tick. Repeti-la aqui
+    // silenciava o aviso por inteiro: o registro gravado fora fazia a checagem
+    // de dentro desistir sempre.
+    const socket = [...entry.sockets][0]
+    if (socket) this.sendEntryDenied(socket, userId, denial, destino.x, destino.y)
+    return true
+  }
+
+  /**
+   * Estado autoritativo de quem está no escritório.
+   *
+   * **Suprimido quando nada mudou.** É o que devolve o custo zero do escritório
+   * parado: sem isso, trinta pessoas de pé custariam 600 pacotes por segundo
+   * para não dizer nada. Com isso, o modelo de snapshot só cobra quando há
+   * movimento — e continua cobrando `N × 20` em vez de `M × 20 × N` quando há.
+   */
+  private broadcastSnapshot(bolasRolando = false): void {
+    if (this.entries.size === 0) return
+    let mudou = false
+    const players = [...this.entries.values()].map((entry) => {
+      const sprint = entry.lastMove.sprint && Date.now() - entry.lastMoveAt <= MOVE_INTENT_TTL_MS
+      const linha = {
+        userId: entry.occupant.userId,
+        x: entry.occupant.x,
+        y: entry.occupant.y,
+        dir: entry.occupant.dir,
+        seq: entry.lastSeq,
+        // Rumo e velocidade só de quem está montado: são o que a reconciliação
+        // do dono precisa (reancorar sem eles reexecutaria os pendentes a
+        // partir de um kart apontado para outro lado) e o que faz o veículo
+        // girar liso na tela dos outros.
+        ...(entry.occupant.ridingKartId ? { h: entry.occupant.heading ?? 0, v: entry.speed } : {}),
+        ...(sprint ? { sprint: true } : {}),
+      }
+      const enviado = entry.sent
+      if (
+        !enviado ||
+        enviado.x !== linha.x ||
+        enviado.y !== linha.y ||
+        enviado.dir !== linha.dir ||
+        enviado.seq !== linha.seq ||
+        enviado.sprint !== sprint
+      ) {
+        mudou = true
+      }
+      entry.sent = { x: linha.x, y: linha.y, dir: linha.dir, seq: linha.seq, sprint }
+      return linha
+    })
+    // Bola rolando também é mudança: sem isto ela pararia de ser transmitida
+    // sempre que todo mundo estivesse parado olhando ela rolar.
+    if (!mudou && !bolasRolando) return
+    this.broadcast({
+      type: 'snapshot',
+      players,
+      ...(bolasRolando ? { balls: this.balls() } : {}),
+    })
   }
 
   /**
@@ -666,10 +1237,14 @@ export class OfficeHub {
     const entry = this.entries.get(userId)
     if (!entry || entry.sockets.size > 0) return // reconectou dentro da janela
     // Sala onde estava, antes de remover o entry — para o sinal sonoro de saída.
-    const previousRoom = this.roomForPosition(entry.occupant.x, entry.occupant.y)
+    const previousRoom = this.roomOf(entry.occupant)
     this.parkKart(userId)
     this.entries.delete(userId)
     this.buckets.delete(userId) // saída efetivada: some o orçamento junto
+    this.lastEntryDeniedAt.delete(userId)
+    // Escritório vazio volta a não custar nada — é a metade que responde à
+    // objeção do timer ocioso por empresa.
+    this.stopLoopIfEmpty()
     this.annotationBuckets.delete(userId)
     this.lastCallAt.delete(userId)
     this.confettiActive.delete(userId) // não deixa fantasma inflando a contagem de confete
@@ -688,10 +1263,18 @@ export class OfficeHub {
     if (previousRoom) {
       // Já removido das entries: o broadcast avisa só quem continua na sala.
       this.broadcastToRoom(previousRoom.id, { type: 'room-presence', kind: 'leave', userId, roomId: previousRoom.id })
-      this.unlockIfRoomEmpty(previousRoom.id)
       this.clearRoomAudioIfOwnerLeft(previousRoom.id, userId)
     }
+    this.sweepEmptyLockedRooms()
+    // Sair do escritório passa a vez do manager adiante. A marca de remoção
+    // também some: voltar ao escritório é sessão nova, não é a mesma conversa.
+    this.trackRoomArrival(userId, previousRoom?.id ?? null, null)
+    this.removedFromRoom.delete(userId)
+    this.refreshRoomManagers()
     this.lastRoomAudioAt.delete(userId)
+    // A tinta some com quem a levava; o marcador vai junto do occupant.
+    this.paintSplats.delete(userId)
+    this.lastPaintballAt.delete(userId)
     if (removedHand) {
       this.broadcastToRoom(removedHand.roomId, {
         type: 'raised-hands',
@@ -713,6 +1296,33 @@ export class OfficeHub {
 
   balls(): OfficeBall[] {
     return [...this.ballStates.values()].map((ball) => ({ ...ball }))
+  }
+
+  /**
+   * Marcas de uma pessoa que ainda não venceram, já podadas. É a ÚNICA leitura
+   * de `paintSplats`: como não há timer expirando nada, quem lê é quem limpa.
+   */
+  private livePaintSplats(userId: string, now: number): Array<PaintSplat & { expiresAt: number }> {
+    const live = (this.paintSplats.get(userId) ?? []).filter((splat) => splat.expiresAt > now)
+    if (live.length === 0) this.paintSplats.delete(userId)
+    else this.paintSplats.set(userId, live)
+    return live
+  }
+
+  /**
+   * Todas as marcas vivas, com o `ttlMs` já descontado do tempo decorrido:
+   * quem entra no meio da vida de uma mancha recebe o que SOBROU dela, não o
+   * prazo cheio. Mesma escolha do áudio de sala, e pelo mesmo motivo — assim o
+   * cliente não precisa ter o relógio sincronizado com o servidor.
+   */
+  paintSplatsSnapshot(): PaintSplat[] {
+    const now = Date.now()
+    return [...this.paintSplats.keys()].flatMap((userId) =>
+      this.livePaintSplats(userId, now).map(({ expiresAt, ...splat }) => ({
+        ...splat,
+        ttlMs: expiresAt - now,
+      })),
+    )
   }
 
   /** Posição atual de um usuário no escritório, ou null se não está nele. */
@@ -750,18 +1360,24 @@ export class OfficeHub {
     const me = this.entries.get(userId)?.occupant
     if (!me) return
 
-    const frontX = me.x + DIRECTION_DELTAS[me.dir].x
-    const frontY = me.y + DIRECTION_DELTAS[me.dir].y
+    // O high-five continua raciocinando em TILE, e isso é deliberado: "estar de
+    // frente" é uma relação de vizinhança, não uma distância em pixel. Medir em
+    // pixel exigiria escolher um raio e um cone de mira, e transformaria um
+    // gesto simples num teste de pontaria.
+    const meTile = this.tileOf(me)
+    const frontX = meTile.x + DIRECTION_DELTAS[me.dir].x
+    const frontY = meTile.y + DIRECTION_DELTAS[me.dir].y
 
     for (const [otherId, entry] of this.entries) {
       if (otherId === userId) continue
       const other = entry.occupant
+      const otherTile = this.tileOf(other)
       // Ele está no tile que eu encaro...
-      if (other.x !== frontX || other.y !== frontY) continue
+      if (otherTile.x !== frontX || otherTile.y !== frontY) continue
       // ...e me encara de volta. Isso já implica adjacência (delta tem norma 1),
       // então não precisa de teste de distância separado.
-      if (other.x + DIRECTION_DELTAS[other.dir].x !== me.x) continue
-      if (other.y + DIRECTION_DELTAS[other.dir].y !== me.y) continue
+      if (otherTile.x + DIRECTION_DELTAS[other.dir].x !== meTile.x) continue
+      if (otherTile.y + DIRECTION_DELTAS[other.dir].y !== meTile.y) continue
       if (!this.waving(otherId, now)) continue
 
       const pairKey = [userId, otherId].sort().join('|')
@@ -840,7 +1456,7 @@ export class OfficeHub {
     if (!entry) return
     // Dentro da sala de silêncio o status fica travado em 'away' — ignora
     // qualquer troca manual (mesmo pra 'brb') enquanto a pessoa estiver lá.
-    const effectiveStatus = this.isInPrivateZone(entry.occupant.x, entry.occupant.y) ? 'away' : status
+    const effectiveStatus = this.isInPrivateZoneOf(entry.occupant) ? 'away' : status
     entry.occupant.status = effectiveStatus
     this.broadcast({ type: 'status-changed', userId, status: effectiveStatus })
   }
@@ -942,7 +1558,7 @@ export class OfficeHub {
     if (this.socketOwner.get(socket) !== userId) return
     const entry = this.entries.get(userId)
     if (!entry) return
-    const room = this.roomForPosition(entry.occupant.x, entry.occupant.y)
+    const room = this.roomOf(entry.occupant)
     if (!room) return
     const trimmed = text.trim().slice(0, ROOM_CHAT_MESSAGE_MAX_LENGTH)
     if (!trimmed) return
@@ -966,7 +1582,7 @@ export class OfficeHub {
    * confete: nada é guardado, então quem chega no meio de um traço não o vê —
    * coerente com um apontador.
    *
-   * Escopo: dentro de sala de reunião OU zona privada (`raiseHandZoneId`, as
+   * Escopo: dentro de sala de reunião OU zona privada (`raiseHandZoneIdAtTile`, as
    * duas modalidades onde a mão levantada forma fila), só quem está na
    * mesma zona — público mais amplo que o do chat da sala (`roomChatMessage`,
    * que só existe dentro de sala de reunião); fora de qualquer zona, o
@@ -1003,7 +1619,7 @@ export class OfficeHub {
       ...(message.done === true ? { done: true } : {}),
     }
 
-    const zoneId = this.raiseHandZoneId(entry.occupant.x, entry.occupant.y)
+    const zoneId = this.raiseHandZoneIdOf(entry.occupant)
     if (zoneId) this.broadcastToRoom(zoneId, outgoing, socket)
     else this.broadcast(outgoing, userId)
   }
@@ -1060,7 +1676,7 @@ export class OfficeHub {
   /**
    * Levantar (active:true) ou abaixar (active:false) a própria mão. Levantar
    * só funciona DENTRO de uma sala de reunião ou zona privada ("espaço de
-   * conversa" — ver `raiseHandZoneId`); é no-op em qualquer outro ponto do
+   * conversa" — ver `raiseHandZoneIdAtTile`); é no-op em qualquer outro ponto do
    * mapa. Dois efeitos, sempre juntos enquanto a mão está numa zona:
    * 1. Estado global (`raisedHandActive`, mesmo padrão do confete): liga o
    *    ícone sobre o personagem pra todo mundo, esteja perto ou não.
@@ -1080,21 +1696,23 @@ export class OfficeHub {
     }
 
     const occupant = entry.occupant
+    // Alcance em PIXEL agora, mas ancorado no que ele sempre significou: "um
+    // tile de distância". Com o corpo contínuo, exigir o tile exato deixaria de
+    // funcionar por meio pixel — e montar num kart não pode virar teste de
+    // pontaria.
+    const alcance = (this.runtime?.document.map.tileWidth ?? TILE_SIZE) * 1.5
+    const distancia = (candidate: OfficeKart) =>
+      Math.hypot(candidate.x - occupant.x, candidate.y - occupant.y)
     const kart = [...this.kartStates.values()]
-      .filter(
-        (candidate) =>
-          !candidate.riderUserId
-          && Math.abs(candidate.x - occupant.x) <= 1
-          && Math.abs(candidate.y - occupant.y) <= 1,
-      )
-      .sort((a, b) => {
-        const distanceA = Math.abs(a.x - occupant.x) + Math.abs(a.y - occupant.y)
-        const distanceB = Math.abs(b.x - occupant.x) + Math.abs(b.y - occupant.y)
-        return distanceA - distanceB || a.id.localeCompare(b.id)
-      })[0]
+      .filter((candidate) => !candidate.riderUserId && distancia(candidate) <= alcance)
+      .sort((a, b) => distancia(a) - distancia(b) || a.id.localeCompare(b.id))[0]
     if (!kart) return
 
     occupant.ridingKartId = kart.id
+    // Nasce parado e apontado para onde a pessoa encara — senão o kart herdaria
+    // um rumo velho e sairia de lado no primeiro acelerador.
+    occupant.heading = Math.atan2(DIRECTION_DELTAS[occupant.dir].y, DIRECTION_DELTAS[occupant.dir].x)
+    entry.speed = 0
     kart.riderUserId = userId
     kart.x = occupant.x
     kart.y = occupant.y
@@ -1118,6 +1736,8 @@ export class OfficeHub {
     const kartId = entry?.occupant.ridingKartId
     if (!entry || !kartId) return
     delete entry.occupant.ridingKartId
+    delete entry.occupant.heading
+    entry.speed = 0
     const kart = this.kartStates.get(kartId)
     if (!kart) return
     kart.x = entry.occupant.x
@@ -1137,7 +1757,13 @@ export class OfficeHub {
    * trajetória inteira é resolvida na hora, o estado já vai para o tile final
    * e cada cliente anima a rolagem no caminho recebido.
    */
-  kickBall(socket: OfficeSocket, userId: string, power: OfficeBallPower, sprint = false): void {
+  kickBall(
+    socket: OfficeSocket,
+    userId: string,
+    power: OfficeBallPower,
+    sprint = false,
+    charge = 1,
+  ): void {
     if (this.socketOwner.get(socket) !== userId) return
     const entry = this.entries.get(userId)
     if (!entry || !this.runtime) return
@@ -1147,27 +1773,15 @@ export class OfficeHub {
     const ball = this.nearestBall(occupant.x, occupant.y)
     if (!ball) return
 
-    const kick = kickBall({
-      document: this.runtime.document,
-      ball,
-      kicker: { x: occupant.x, y: occupant.y, dir: occupant.dir },
-      power,
-      sprint,
-      // Gente no caminho para a bola: ela bate e volta, em vez de atravessar
-      // quem está de pé no meio do corredor.
-      obstacles: [...this.entries.values()]
-        .filter((other) => other.occupant.userId !== userId)
-        .map((other) => ({ x: other.occupant.x, y: other.occupant.y })),
-    })
-    if (!kick) return
+    // Só o GESTO e a CARGA vêm do cliente. A direção sai do facing autoritativo
+    // e a força de `officeKickBall` — o escritório nunca teve mira de mouse, e
+    // migrar para pixel não é motivo para dar uma.
+    const chutada = officeKickBall({ ball, kicker: occupant, power, sprint, charge })
+    if (!chutada) return
 
-    const landing = kick.path.at(-1)
-    if (landing) {
-      ball.x = landing.x
-      ball.y = landing.y
-    }
+    Object.assign(ball, chutada)
     this.markActive(userId)
-    this.broadcast({ type: 'ball-kicked', userId, kick })
+    this.broadcast({ type: 'ball-kicked', userId, ball: { ...ball }, power })
   }
 
   /**
@@ -1181,31 +1795,128 @@ export class OfficeHub {
    * bola simplesmente fica — quem conduz passa por cima dela e a perde, como
    * quem leva a bola até a parede.
    */
-  private dribble(occupant: OfficeOccupant, sprint: boolean, step: { x: number; y: number }): void {
-    if (!this.runtime) return
-    // Só quem está EM CIMA da bola conduz: encostar de lado não empurra.
-    const ball = [...this.ballStates.values()].find((candidate) => ballDistanceFrom(candidate, occupant) === 0)
-    if (!ball) return
+  /**
+   * Roda as bolas: integra, resolve quem as encosta e avisa quando alguma se
+   * mexe.
+   *
+   * No tick e DEPOIS do movimento, pelo mesmo motivo da arena: encostar é
+   * consequência de onde a pessoa ESTÁ, e resolver isso na chegada do input
+   * deixaria o resultado depender do ritmo dos pacotes.
+   *
+   * O drible deixou de sair do `delta` do passo — que não existe mais — e passou
+   * a sair do CONTATO: quem está em cima dela, andando, a empurra.
+   */
+  private updateBalls(elapsed: number): number {
+    const grid = this.collisionGrid()
+    if (!grid || this.ballStates.size === 0) return 0
+    const now = Date.now()
+    let emMovimento = 0
 
-    const kick = kickBall({
-      document: this.runtime.document,
-      ball,
-      kicker: { x: occupant.x, y: occupant.y, dir: occupant.dir },
-      power: 'dribble',
-      sprint,
-      // A bola vai para onde o PASSO foi, não para onde o sprite encara: numa
-      // diagonal os dois divergem (`facingForMove`), e empurrar pela pose
-      // faria quem anda de banda perder a bola de lado.
-      pushDirection: step,
-      obstacles: [...this.entries.values()]
-        .filter((other) => other.occupant.userId !== occupant.userId)
-        .map((other) => ({ x: other.occupant.x, y: other.occupant.y })),
+    for (const ball of this.ballStates.values()) {
+      const antes = { x: ball.x, y: ball.y }
+      Object.assign(ball, stepBodyBall(ball, elapsed, grid))
+      for (const entry of this.entries.values()) {
+        const intencao = this.moveOf(entry, now)
+        const toque = touchBodyBall(ball, {
+          x: entry.occupant.x,
+          y: entry.occupant.y,
+          dx: intencao.dx,
+          dy: intencao.dy,
+          sprint: intencao.sprint,
+        })
+        if (toque) Object.assign(ball, toque)
+      }
+      if (ball.x !== antes.x || ball.y !== antes.y) emMovimento += 1
+    }
+    return emMovimento
+  }
+
+  /**
+   * A intenção de passo que vale AGORA — a mesma da arena, e pelo mesmo motivo:
+   * input que parou de chegar (aba em segundo plano, rede caída) não pode
+   * deixar alguém conduzindo a bola para sempre.
+   */
+  private moveOf(entry: Entry, now: number): { dx: number; dy: number; sprint: boolean } {
+    if (now - entry.lastMoveAt > MOVE_INTENT_TTL_MS) return { dx: 0, dy: 0, sprint: false }
+    return entry.lastMove
+  }
+
+  /**
+   * Equipa ou guarda o marcador de paintball. Estado efêmero do occupant, como
+   * `ridingKartId`: viaja no `welcome` dentro da própria pessoa e some quando
+   * ela sai — não encosta em `avatarOptions` nem no editor de personagem.
+   *
+   * É a guarda que impede o escritório de virar campo de tiro por acidente:
+   * `firePaintball` recusa quem está desarmado, e quem olha o mapa vê pelo
+   * sprite quem está jogando.
+   */
+  setPaintMarker(socket: OfficeSocket, userId: string, active: boolean): void {
+    if (this.socketOwner.get(socket) !== userId) return
+    const entry = this.entries.get(userId)
+    if (!entry) return
+    if ((entry.occupant.paintMarker ?? false) === active) return
+    if (active) entry.occupant.paintMarker = true
+    else delete entry.occupant.paintMarker
+    this.markActive(userId)
+    this.broadcast({ type: 'paint-marker', userId, active })
+  }
+
+  /**
+   * Atira. Como o chute, o cliente manda só o GESTO: direção é o facing
+   * autoritativo, alcance é constante e o alvo é quem estiver na linha
+   * (`firePaintball`, em `@legends/shared`) — cliente adulterado não escolhe
+   * em quem acerta.
+   *
+   * Duas guardas moram aqui, e não no cliente. A primeira é estar armado. A
+   * segunda é a cadência: cada tiro aceito é broadcast para o escritório
+   * inteiro, e sem `PAINTBALL_COOLDOWN_MS` um teclado com auto-repeat já vira
+   * metralhadora de broadcast, sem precisar de má-fé.
+   */
+  firePaintball(socket: OfficeSocket, userId: string): void {
+    if (this.socketOwner.get(socket) !== userId) return
+    const entry = this.entries.get(userId)
+    if (!entry || !this.runtime) return
+    if (!entry.occupant.paintMarker) return
+
+    const now = Date.now()
+    const last = this.lastPaintballAt.get(userId) ?? 0
+    if (now - last < PAINTBALL_COOLDOWN_MS) return
+    this.lastPaintballAt.set(userId, now)
+
+    const occupant = entry.occupant
+    const grid = this.collisionGrid()
+    if (!grid) return
+    // A direção é o FACING autoritativo, não uma mira do cliente: o escritório
+    // não tem mouse apontando, e migrar para pixel não é motivo para dar um.
+    const angle = Math.atan2(DIRECTION_DELTAS[occupant.dir].y, DIRECTION_DELTAS[occupant.dir].x)
+    const shot = fireBodyShot({
+      grid,
+      shooter: { userId, x: occupant.x, y: occupant.y },
+      angle,
+      // Quem está ausente não leva marca nem para o tiro de quem está atrás —
+      // a sala de silêncio não vira escudo, e nem alvo.
+      targets: [...this.entries.values()]
+        .filter((other) => (other.occupant.status ?? 'online') !== 'away')
+        .map((other) => ({
+          userId: other.occupant.userId,
+          x: other.occupant.x,
+          y: other.occupant.y,
+        })),
+      now,
     })
-    const landing = kick?.path.at(-1)
-    if (!kick || !landing) return
-    ball.x = landing.x
-    ball.y = landing.y
-    this.broadcast({ type: 'ball-kicked', userId: occupant.userId, kick })
+
+    if (shot.splat) {
+      // Teto por pessoa, com a mais VELHA saindo: uma rajada em cima de alguém
+      // parado empilharia dezenas de sprites no mesmo personagem.
+      const live = this.livePaintSplats(shot.splat.userId, now)
+      const next = [...live, { ...shot.splat, expiresAt: now + shot.splat.ttlMs }].slice(
+        -PAINTBALL_MAX_SPLATS,
+      )
+      this.paintSplats.set(shot.splat.userId, next)
+    }
+
+    this.markActive(userId)
+    this.broadcast({ type: 'paintball-shot', shot })
   }
 
   /** Bola mais próxima ao alcance do pé; empate desempata por id, como o kart. */
@@ -1244,7 +1955,7 @@ export class OfficeHub {
 
     // Sem-mudança (reenvio, aba duplicada): não republica pra todo mundo.
     if (this.raisedHandActive.has(userId)) return
-    const zoneId = this.raiseHandZoneId(entry.occupant.x, entry.occupant.y)
+    const zoneId = this.raiseHandZoneIdOf(entry.occupant)
     if (!zoneId) return
 
     this.raisedHandActive.add(userId)
@@ -1265,7 +1976,7 @@ export class OfficeHub {
   /**
    * Trancar/destrancar a sala de reunião onde a pessoa ESTÁ. A tranca é da
    * sala, não de quem trancou: qualquer ocupante liga e desliga, e sair não
-   * destranca — quem fica herda a chave (ver `unlockIfRoomEmpty`). Fora de
+   * destranca — quem fica herda a chave (ver `sweepEmptyLockedRooms`). Fora de
    * sala de reunião é no-op; numa sala bloqueada pelo admin também, porque o
    * `Room.status` já barra todo mundo e destrancar aqui não abriria nada.
    */
@@ -1273,7 +1984,7 @@ export class OfficeHub {
     if (this.socketOwner.get(socket) !== userId) return
     const entry = this.entries.get(userId)
     if (!entry) return
-    const room = this.roomForPosition(entry.occupant.x, entry.occupant.y)
+    const room = this.roomOf(entry.occupant)
     if (!room || room.status === 'LOCKED') return
     const lockOwnerId = this.roomLockOwnerId(room.externalKey)
     if (lockOwnerId && lockOwnerId !== userId) return
@@ -1286,6 +1997,64 @@ export class OfficeHub {
     if (this.lockedRooms.has(room.id)) return
     this.lockedRooms.add(room.id)
     this.broadcast({ type: 'room-lock-changed', roomId: room.id, locked: true, byUserId: userId })
+  }
+
+  /**
+   * Tira alguém da CHAMADA da sala onde quem pede está. Ao contrário da
+   * tranca, não é de qualquer ocupante: só do manager (`managerOf`) ou de um
+   * ADMIN, que modera qualquer sala como rede de segurança.
+   *
+   * Não mexe no mapa. O personagem continua onde estava, com a sessão intacta
+   * — o que cai é só a mídia. Como a sala é derivada da POSIÇÃO, cortar a
+   * mídia sozinho não bastaria: parado lá dentro, o cliente pediria outro
+   * token e voltaria. Por isso fica a marca em `removedFromRoom`, que nega o
+   * token daquela sala até a pessoa sair da área (ver `move`).
+   *
+   * Devolve o alvo (userId + sala) quando a remoção vale, para a borda derrubar
+   * a mídia no LiveKit; `null` quando não vale, e aí nada acontece.
+   */
+  removeFromRoom(
+    socket: OfficeSocket,
+    userId: string,
+    targetUserId: string,
+    options: { isAdmin?: boolean } = {},
+  ): { roomId: string; mediaRoom: string | null; targetUserId: string } | null {
+    if (this.socketOwner.get(socket) !== userId) return null
+    if (targetUserId === userId) return null // ninguém se remove: para isso basta sair andando
+    const entry = this.entries.get(userId)
+    const target = this.entries.get(targetUserId)
+    if (!entry || !target) return null
+
+    const room = this.roomOf(entry.occupant)
+    if (!room) return null
+    // O alvo precisa estar na MESMA sala — remover alguém de longe não existe.
+    if (this.roomOf(target.occupant)?.id !== room.id) return null
+
+    const manager = this.managerOf(room.id)
+    if (!options.isAdmin && manager?.userId !== userId) return null
+
+    this.removedFromRoom.set(targetUserId, room.id)
+    const message = {
+      type: 'removed-from-room',
+      roomId: room.id,
+      userId: targetUserId,
+      byUserId: userId,
+      byName: entry.occupant.name,
+    } as const
+    // Vai para a sala inteira (o alvo incluso, que ainda está lá dentro).
+    this.broadcastToRoom(room.id, message)
+    // `room.id` é do banco; quem identifica a sala no LiveKit é o nome
+    // derivado da posição — é ele que a borda usa para derrubar a mídia.
+    return {
+      roomId: room.id,
+      mediaRoom: this.mediaRoomOf(target.occupant),
+      targetUserId,
+    }
+  }
+
+  /** A pessoa foi tirada desta sala e ainda não saiu da área? (gate do token de mídia) */
+  isRemovedFromRoom(userId: string, roomId: string): boolean {
+    return this.removedFromRoom.get(userId) === roomId
   }
 
   /**
@@ -1311,7 +2080,7 @@ export class OfficeHub {
     // Playlist é opcional e best-effort: mix/lista privada vira `null` no
     // parser e a sala ouve o vídeo sozinho, em vez de um player que não abre.
     const playlistId = rawPlaylist ? parseYouTubePlaylistId(rawPlaylist) : null
-    const room = this.roomForPosition(entry.occupant.x, entry.occupant.y)
+    const room = this.roomOf(entry.occupant)
     if (!room) return deny('not-in-room')
     if (this.roomAudio.has(room.id)) return deny('busy')
 
@@ -1475,7 +2244,7 @@ export class OfficeHub {
     }
     if (!this.lockedRooms.has(roomId)) return
     // Já está dentro (foi aceito antes, ou a tranca subiu com ele lá): nada a pedir.
-    if (this.roomForPosition(entry.occupant.x, entry.occupant.y)?.id === roomId) return
+    if (this.roomOf(entry.occupant)?.id === roomId) return
     // Pedido idêntico já de pé: não bate na porta duas vezes.
     if (this.knockRoomOf.get(userId) === roomId) return
 
@@ -1505,7 +2274,7 @@ export class OfficeHub {
     if (!responder) return
     const roomId = this.knockRoomOf.get(userId)
     if (!roomId) return
-    if (this.roomForPosition(responder.occupant.x, responder.occupant.y)?.id !== roomId) return
+    if (this.roomOf(responder.occupant)?.id !== roomId) return
 
     this.clearKnock(userId)
     if (accepted) {
@@ -1534,7 +2303,7 @@ export class OfficeHub {
     x: number,
     y: number,
   ): void {
-    const room = this.roomForPosition(x, y)
+    const room = this.roomForTile(x, y)
     if (!room) return
     const now = Date.now()
     if (now - (this.lastEntryDeniedAt.get(userId) ?? 0) < ENTRY_DENIED_THROTTLE_MS) return
@@ -1573,13 +2342,27 @@ export class OfficeHub {
    * A tranca sobrevive a quem trancou, mas não à sala vazia: sem ninguém
    * dentro não há a quem pedir para entrar, e a sala viraria uma porta
    * fechada para sempre.
+   *
+   * Varre TODAS as trancas, e não só a sala que alguém acabou de deixar, de
+   * propósito. Trancar é aceito pela posição em PIXEL (`roomOf`), mas a
+   * travessia é detectada pelo tile COMITADO, que tem histerese
+   * (`TILE_COMMIT_MARGIN`): quem trancasse de raspão — centro já dentro do
+   * tile da sala, sem ter comitado — criava uma tranca que saída nenhuma
+   * desfazia, porque o `previousRoom` da cascata era outro. A sala ficava
+   * fechada e vazia para sempre, e nem o dono da mesa voltava para dentro.
+   * Conferir a invariante pela posição de todo mundo não depende de o evento
+   * certo ter sido disparado.
    */
-  private unlockIfRoomEmpty(roomId: string): void {
-    if (!this.lockedRooms.has(roomId)) return
-    const stillInside = [...this.entries.values()].some(
-      (entry) => this.roomForPosition(entry.occupant.x, entry.occupant.y)?.id === roomId,
-    )
-    if (!stillInside) this.unlockRoom(roomId, null)
+  private sweepEmptyLockedRooms(): void {
+    if (this.lockedRooms.size === 0) return
+    const ocupadas = new Set<string>()
+    for (const entry of this.entries.values()) {
+      const room = this.roomOf(entry.occupant)
+      if (room) ocupadas.add(room.id)
+    }
+    for (const roomId of [...this.lockedRooms]) {
+      if (!ocupadas.has(roomId)) this.unlockRoom(roomId, null)
+    }
   }
 
   private clearRoomLockState(): void {
@@ -1594,6 +2377,10 @@ export class OfficeHub {
   /** Só para testes: zera o estado do singleton entre casos. */
   reset(): void {
     this.entries.clear()
+    // Para o laço junto: um hub descartado com `setInterval` vivo continua
+    // simulando gente que já saiu, e em teste ele atravessa para o caso
+    // seguinte.
+    this.stopLoopIfEmpty()
     this.buckets.clear()
     this.annotationBuckets.clear()
     this.socketOwner.clear()
@@ -1611,6 +2398,9 @@ export class OfficeHub {
     this.lastHighFiveAt.clear()
     this.kartStates.clear()
     this.ballStates.clear()
+    this.roomArrivals.clear()
+    this.removedFromRoom.clear()
+    this.lastRoomManagersKey = ''
     this.clearRoomLockState()
     this.runtime = null
   }
@@ -1656,16 +2446,33 @@ export class OfficeHub {
    * explicar a recusa ao cliente — só a tranca de sessão (`locked`) aceita
    * "pedir para entrar"; as demais não têm a quem pedir.
    */
-  private roomEntryDenial(userId: string, x: number, y: number): OfficeRoomEntryDeniedReason | null {
-    const room = this.roomForPosition(x, y)
+  private roomEntryDenialAtTile(
+    userId: string,
+    x: number,
+    y: number,
+    /**
+     * De onde a pessoa vem. Explícito, e não lido do occupant, porque no
+     * movimento contínuo a posição JÁ FOI aplicada quando esta pergunta é
+     * feita: ler o occupant faria o "já estou nesta sala" enxergar o destino e
+     * liberar toda entrada — a tranca deixaria de trancar, em silêncio.
+     */
+    fromTile?: { x: number; y: number },
+  ): OfficeRoomEntryDeniedReason | null {
+    const room = this.roomForTile(x, y)
     if (!room) return null
-    const current = this.occupantOf(userId)
-    if (current && this.roomForPosition(current.x, current.y)?.id === room.id) return null
+    const origem = fromTile ?? (this.occupantOf(userId) ? this.tileOf(this.occupantOf(userId)!) : null)
+    if (origem && this.roomForTile(origem.x, origem.y)?.id === room.id) return null
     if (room.status === 'LOCKED') return 'admin-locked'
     if (this.lockedRooms.has(room.id) && !this.roomEntryGrants.get(room.id)?.has(userId)) return 'locked'
     if (room.accessPolicy === 'ALLOWLIST' && !room.allowedUsers.some((user) => user.id === userId)) return 'allowlist'
     if (room.capacity !== null) {
-      const occupants = this.occupants().filter((occupant) => this.roomForPosition(occupant.x, occupant.y)?.id === room.id)
+      // Sem contar QUEM ESTÁ ENTRANDO. No movimento contínuo a posição já foi
+      // aplicada quando esta pergunta é feita, então ele apareceria dentro da
+      // sala e ocuparia a própria vaga — uma sala de capacidade N só admitiria
+      // N−1, e a última vaga nunca seria usada.
+      const occupants = this.occupants().filter(
+        (occupant) => occupant.userId !== userId && this.roomOf(occupant)?.id === room.id,
+      )
       if (occupants.length >= room.capacity) return 'capacity'
     }
     return null
@@ -1720,9 +2527,9 @@ export class OfficeHub {
 
   /**
    * Broadcast filtrado por zona (sala de reunião OU zona privada — ver
-   * `raiseHandZoneId`). Callers de sala de reunião (chat, presença) sempre
-   * passam um `room.id` de verdade, que `raiseHandZoneId` resolve
-   * IDENTICAMENTE a `roomForPosition(...).id` pra esse tipo de zona — dá no
+   * `raiseHandZoneIdAtTile`). Callers de sala de reunião (chat, presença) sempre
+   * passam um `room.id` de verdade, que `raiseHandZoneIdAtTile` resolve
+   * IDENTICAMENTE a `roomForTile(...).id` pra esse tipo de zona — dá no
    * mesmo de antes pra eles. Zona privada só entra em jogo pra quem passa o
    * id ad-hoc dela (hoje, só a mão levantada).
    */
@@ -1733,7 +2540,7 @@ export class OfficeHub {
   ): void {
     const payload = JSON.stringify(message)
     for (const entry of this.entries.values()) {
-      if (this.raiseHandZoneId(entry.occupant.x, entry.occupant.y) !== roomId) continue
+      if (this.raiseHandZoneIdOf(entry.occupant) !== roomId) continue
       for (const socket of entry.sockets) {
         if (socket === exceptSocket) continue
         try {

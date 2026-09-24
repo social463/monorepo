@@ -38,7 +38,8 @@ import {
 } from '../lib/serialize-pdi'
 import { leaderApprovalRequired } from './development-settings-service'
 import { syncPdiBadgesForUser } from './badge-service'
-import { notifyBadgesEarned, notifyPdiActionReviewed, notifyPdiActionAwaitingReview } from './notification-service'
+import { notifyPdiActionReviewed, notifyPdiActionAwaitingReview } from './notification-service'
+import { settleBadgesEarned } from './badge-reward-service'
 
 export class PdiError extends Error {
   constructor(
@@ -398,7 +399,7 @@ async function syncPdiBadges(userId: string, companyId: string): Promise<void> {
   try {
     const { awarded } = await syncPdiBadgesForUser(userId)
     if (awarded.length === 0) return
-    await notifyBadgesEarned(userId, awarded.map((entry) => entry.badgeId), companyId)
+    await settleBadgesEarned(userId, awarded.map((entry) => entry.badgeId), companyId)
   } catch {
     // silencioso de propósito
   }

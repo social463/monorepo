@@ -18,6 +18,9 @@ import {
   type CertificateWithUser,
 } from '../lib/certificate-issuer'
 import { toCertificateDTO } from '../lib/serialize-learning'
+import { CERTIFICATE_ATTACHMENT_PREFIX, presignDocumentDownload, s3Config } from '../lib/s3-client'
+import type { CertificateTemplateVisual } from '../lib/certificate-renderer'
+import { certificateBrandFor } from './branding-service'
 import { recordAuditLog } from './audit-log-service'
 import { notifyCertificateApproved } from './notification-service'
 import type { CourseActor } from './course-admin-service'
@@ -99,7 +102,8 @@ export async function createCertificateTemplate(
 ): Promise<CertificateTemplateDTO> {
   const name = requireText(data.name, 'Informe o nome do modelo.', CERTIFICATE_TEMPLATE_NAME_MAX_LENGTH)
   const title = requireText(data.title, 'Informe o título do certificado.', CERTIFICATE_TEMPLATE_TITLE_MAX_LENGTH)
-  const accentColor = requireText(data.accentColor, 'Informe a cor de destaque.', 20)
+  // Vazia é escolha válida: é ela que faz o certificado herdar a cor da empresa.
+  const accentColor = data.accentColor?.trim() || null
   const signatureName = requireText(data.signatureName, 'Informe o nome de quem assina.', 120)
   const signatureRole = requireText(data.signatureRole, 'Informe o cargo de quem assina.', 120)
   const isDefault = data.isDefault ?? false
@@ -165,7 +169,7 @@ export async function updateCertificateTemplate(
     patch.title = requireText(data.title, 'Informe o título do certificado.', CERTIFICATE_TEMPLATE_TITLE_MAX_LENGTH)
   }
   if (data.backgroundUrl !== undefined) patch.backgroundUrl = data.backgroundUrl?.trim() || null
-  if (data.accentColor !== undefined) patch.accentColor = requireText(data.accentColor, 'Informe a cor de destaque.', 20)
+  if (data.accentColor !== undefined) patch.accentColor = data.accentColor?.trim() || null
   if (data.signatureName !== undefined) {
     patch.signatureName = requireText(data.signatureName, 'Informe o nome de quem assina.', 120)
   }
@@ -252,6 +256,40 @@ export async function resolveCertificateTemplateForCourse(
 }
 
 /**
+ * Modelo do banco → o recorte que o renderer usa, **com a marca da empresa
+ * preenchendo o que o modelo deixou em branco**.
+ *
+ * A identidade do certificado era mantida à parte da marca — e manter a mesma
+ * coisa em dois lugares é o que faz um envelhecer enquanto o outro muda. Agora
+ * a marca é o padrão e o modelo é a exceção: cor e logo preenchidos continuam
+ * mandando, o que é branco herda.
+ *
+ * **Não vale para o certificado SEM modelo.** Aquele caminho sai com o visual
+ * embutido de sempre, de propósito: é o que garante que um certificado emitido
+ * antes de os modelos existirem, re-renderizado, não mude de cara.
+ */
+export async function toCertificateTemplateVisual(
+  companyId: string,
+  template: CertificateTemplate | null,
+): Promise<CertificateTemplateVisual | null> {
+  if (!template) return null
+  const { signatureName, signatureRole, signatureImageUrl, backgroundUrl } = template
+  const daPessoa = { signatureName, signatureRole, signatureImageUrl, backgroundUrl }
+
+  // Modelo com cor e logo próprios não paga uma leitura a mais por render: não
+  // há nada para herdar.
+  if (template.accentColor && template.logoUrl) {
+    return { ...daPessoa, accentColor: template.accentColor, logoUrl: template.logoUrl }
+  }
+  const marca = await certificateBrandFor(companyId)
+  return {
+    ...daPessoa,
+    accentColor: template.accentColor ?? marca.accentColor,
+    logoUrl: template.logoUrl ?? marca.logoUrl,
+  }
+}
+
+/**
  * ---------------------------------------------------------------------------
  * Fila de aprovação (Task 9)
  * ---------------------------------------------------------------------------
@@ -262,18 +300,27 @@ export async function resolveCertificateTemplateForCourse(
  * recusa com motivo obrigatório.
  */
 
-function toCertificateRequestDTO(
-  row: CertificateRequest & {
-    user: { name: string }
-    course: { title: string }
-    reviewedBy: { id: string; name: string } | null
-  },
-): CertificateRequestDTO {
+type CertificateRequestRow = CertificateRequest & {
+  user: { name: string }
+  course: { title: string } | null
+  reviewedBy: { id: string; name: string } | null
+}
+
+/**
+ * `async` por causa do anexo: o certificado externo é documento pessoal, então
+ * o que fica gravado é a CHAVE no S3, e a leitura sai como URL assinada e
+ * temporária — nunca um link permanente no DTO.
+ *
+ * Sem S3 configurado (dev, teste) o anexo vem `null` em vez de derrubar a fila:
+ * quem administra ainda precisa ver o resto do pedido.
+ */
+async function toCertificateRequestDTO(row: CertificateRequestRow): Promise<CertificateRequestDTO> {
   return {
     id: row.id,
+    origin: row.origin,
     enrollmentId: row.enrollmentId,
     courseId: row.courseId,
-    courseTitle: row.course.title,
+    courseTitle: row.course?.title ?? null,
     userId: row.userId,
     userName: row.user.name,
     status: row.status,
@@ -349,10 +396,11 @@ async function loadRequestScoped(
   db: RequestDb,
   actor: CourseActor,
   id: string,
-): Promise<{ request: CertificateRequest; course: Course }> {
+): Promise<{ request: CertificateRequest; course: Course | null }> {
   const request = await db.certificateRequest.findUnique({ where: { id } })
   if (!request) throw new CertificateError('Solicitação não encontrada.', 404)
-  const course = await db.course.findUnique({ where: { id: request.courseId } })
+
+  const course = request.courseId ? await db.course.findUnique({ where: { id: request.courseId } }) : null
   if (!course) throw new CertificateError('Solicitação não encontrada.', 404)
   if (actor.role === 'SUBADMIN' && course.sectorId !== actor.sectorId) {
     throw new CertificateError('Solicitação não encontrada.', 404)
@@ -368,6 +416,8 @@ export async function listCertificateRequests(
   const db = scopedPrisma(actor.companyId)
   const where: Prisma.CertificateRequestWhereInput = {
     ...(status ? { status } : {}),
+    // O SUBADMIN vê o próprio setor, e o setor sai do CURSO — a fila é de
+    // emissão de certificado interno, então todo pedido tem curso.
     ...(actor.role === 'SUBADMIN' ? { course: { sectorId: actor.sectorId } } : {}),
   }
   const requests = await db.certificateRequest.findMany({
@@ -375,7 +425,7 @@ export async function listCertificateRequests(
     include: REQUEST_DTO_INCLUDE,
     orderBy: { createdAt: 'asc' },
   })
-  return requests.map(toCertificateRequestDTO)
+  return Promise.all(requests.map(toCertificateRequestDTO))
 }
 
 const CONCURRENT_APPROVAL_MESSAGE = 'Outro administrador já avaliou esta solicitação. Atualize a fila e tente de novo.'
@@ -409,13 +459,14 @@ const CONCURRENT_APPROVAL_MESSAGE = 'Outro administrador já avaliou esta solici
 export async function approveCertificateRequest(
   actor: CourseActor,
   id: string,
-): Promise<{ request: CertificateRequestDTO; certificate: CertificateDTO }> {
+): Promise<{ request: CertificateRequestDTO; certificate: CertificateDTO | null }> {
   const db = scopedPrisma(actor.companyId)
 
   let result: {
-    certificate: CertificateWithUser
+    // `null` no externo: nada é emitido, só validado.
+    certificate: CertificateWithUser | null
     created: boolean
-    course: Course
+    course: Course | null
     requestRow: Parameters<typeof toCertificateRequestDTO>[0]
   }
   try {
@@ -427,12 +478,35 @@ export async function approveCertificateRequest(
           throw new CertificateError('Esta solicitação já foi avaliada.', 409)
         }
 
+        // Sem curso não há o que emitir (o curso foi apagado depois do
+        // pedido): aprovar aqui é só encerrar a linha da fila.
+        if (!course) {
+          const requestRow = await tx.certificateRequest.update({
+            where: { id },
+            data: { status: 'APPROVED', reviewedById: actor.id, reviewedAt: new Date(), rejectionReason: null },
+            include: REQUEST_DTO_INCLUDE,
+          })
+          await recordAuditLog({
+            actorId: actor.id,
+            entityType: 'CertificateRequest',
+            entityId: id,
+            action: 'UPDATE',
+            before: { status: request.status },
+            after: { status: 'APPROVED' },
+            companyId: actor.companyId,
+            tx: scopedTx,
+          })
+          return { certificate: null, created: false, course: null, requestRow }
+        }
+
         // Releitura das guardas de `issueCertificate`: o pedido pode ter ficado
         // PENDING tempo suficiente para o curso ou a inscrição mudarem por baixo.
         if (!course.certificateEnabled) {
           throw new CertificateError('Este curso não emite mais certificado.', 409)
         }
-        const enrollment = await tx.courseEnrollment.findUnique({ where: { id: request.enrollmentId } })
+        const enrollment = request.enrollmentId
+          ? await tx.courseEnrollment.findUnique({ where: { id: request.enrollmentId } })
+          : null
         if (!enrollment || enrollment.status !== 'COMPLETED') {
           throw new CertificateError(
             'A inscrição não está mais concluída — a pessoa desmarcou uma aula depois do pedido.',
@@ -445,7 +519,7 @@ export async function approveCertificateRequest(
 
         const { certificate, created } = await createCertificateRecord(scopedTx, {
           userId: request.userId,
-          courseId: request.courseId,
+          courseId: course.id,
           courseTitle: course.title,
         })
 
@@ -482,12 +556,32 @@ export async function approveCertificateRequest(
   }
 
   const { certificate, created, course, requestRow } = result
+
+  if (!certificate || !course) {
+    // Curso apagado depois do pedido: só avisa que foi aceito. Best-effort pelo
+    // motivo de sempre — falhar em notificar não desfaz uma aprovação commitada.
+    try {
+      await notifyCertificateApproved({
+        userId: requestRow.userId,
+        courseId: null,
+        courseTitle: requestRow.course?.title ?? 'curso',
+        companyId: actor.companyId,
+      })
+    } catch (err) {
+      console.error('[certificate-request-service] Falha ao notificar aprovação de certificado.', err)
+    }
+    return { request: await toCertificateRequestDTO(requestRow), certificate: null }
+  }
+
   const withImage = created
     ? await renderAndStoreCertificate(
         actor.companyId,
         certificate,
         course,
-        await resolveCertificateTemplateForCourse(actor.companyId, course),
+        await toCertificateTemplateVisual(
+          actor.companyId,
+          await resolveCertificateTemplateForCourse(actor.companyId, course),
+        ),
       )
     : certificate
 
@@ -505,7 +599,7 @@ export async function approveCertificateRequest(
     console.error('[certificate-request-service] Falha ao notificar aprovação de certificado.', err)
   }
 
-  return { request: toCertificateRequestDTO(requestRow), certificate: toCertificateDTO(withImage) }
+  return { request: await toCertificateRequestDTO(requestRow), certificate: toCertificateDTO(withImage) }
 }
 
 /** Recusa com motivo obrigatório. Guarda "só se ainda PENDENTE" por contagem de

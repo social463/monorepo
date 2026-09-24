@@ -178,6 +178,7 @@ function ConsistencyRanking() {
   if (isLoading) return <LoadingState />
   if (isError) return <ErrorState />
 
+  const podium = entries.slice(0, 3)
   const me = data?.me ?? null
 
   return (
@@ -186,6 +187,14 @@ function ConsistencyRanking() {
         Dias <strong className="font-label text-on-surface">úteis seguidos</strong> registrando o humor do dia.
         Fim de semana é ponte: não conta e não quebra a sequência.
       </p>
+
+      {podium.length > 0 && (
+        <Podium>
+          <div className="order-2 md:order-1">{podium[1] && <StreakPodiumCard entry={podium[1]} />}</div>
+          <div className="order-1 md:order-2">{podium[0] && <StreakPodiumCard entry={podium[0]} highlight />}</div>
+          <div className="order-3">{podium[2] && <StreakPodiumCard entry={podium[2]} />}</div>
+        </Podium>
+      )}
 
       {me && (
         <p className="rounded-2xl border border-primary/30 bg-primary/5 px-lg py-md text-body-md text-on-surface">
@@ -343,6 +352,52 @@ function PodiumCard({ entry, highlight = false }: { entry: RankingEntryDTO; high
       <p className="mt-sm font-label text-label-lg font-bold tabular-nums text-on-surface">{points} pts</p>
       <div className="mt-sm">
         <LevelChip name={level.name} color={level.color} />
+      </div>
+    </Link>
+  )
+}
+
+function StreakPodiumCard({ entry, highlight = false }: { entry: StreakRankingEntryDTO; highlight?: boolean }) {
+  const { position, user, currentStreak, online } = entry
+  const ring =
+    position === 1
+      ? 'border-amber-400'
+      : position === 2
+        ? 'border-slate-300'
+        : 'border-orange-400'
+  const badge =
+    position === 1 ? 'bg-amber-400 text-amber-950' : position === 2 ? 'bg-slate-300 text-slate-900' : 'bg-orange-400 text-orange-950'
+
+  return (
+    <Link
+      to={`/perfil/${user.id}`}
+      className={`relative mx-auto flex w-full max-w-[260px] flex-col items-center rounded-2xl border-2 bg-surface-container p-lg text-center transition-transform hover:-translate-y-0.5 ${ring} ${
+        highlight ? 'pt-xl' : ''
+      }`}
+    >
+      <span
+        className={`absolute -top-4 flex h-8 w-8 items-center justify-center rounded-full font-label text-label-md font-bold shadow-sm ${badge}`}
+      >
+        {position === 1 ? <Icon name="trophy" className="text-[18px]" filled /> : position}
+      </span>
+
+      <div className="relative">
+        <div
+          className={`flex items-center justify-center overflow-hidden rounded-full border-2 bg-surface-container-highest ${ring} ${
+            highlight ? 'h-24 w-24' : 'h-16 w-16'
+          }`}
+        >
+          <Avatar user={user} />
+        </div>
+        <OnlineDot online={online} label={user.name} />
+      </div>
+
+      <p className={`mt-md font-label text-on-surface ${highlight ? 'text-label-lg font-bold' : 'text-label-md font-semibold'}`}>
+        {user.name}
+      </p>
+      <p className="text-body-sm text-on-surface-variant">{user.sectorName || 'Sem setor'}</p>
+      <div className="mt-sm">
+        <StreakChip days={currentStreak} />
       </div>
     </Link>
   )

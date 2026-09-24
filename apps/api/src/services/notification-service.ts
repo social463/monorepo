@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client'
+import { LEADER_ROLES, type CorporatePostAudience, type UserRole } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { monthLabel } from '../lib/month-label'
 import { postTeamsNotification } from '../lib/teams-client'
@@ -33,8 +34,10 @@ export function emojiForNotificationType(type: Prisma.NotificationCreateInput['t
     CORPORATE_POST_REJECTED: '🚫',
     FEEDBACK_RECEIVED: '📝',
     FEEDBACK_REACTION: '❤️',
+    FEEDBACK_COMMENT: '💬',
     BADGE_EARNED: '🏅',
     HIGHLIGHT_PUBLISHED: '🏆',
+    BIRTHDAY_GREETING_RECEIVED: '🎂',
     DEVELOPMENT_THURSDAY_EVENT: '📚',
     PERIOD_OPENED: '📣',
     PERIOD_CLOSED: '📣',
@@ -165,6 +168,53 @@ export async function notifyReaction(
     metadata: { feedbackId: feedback.id },
     companyId,
   })
+}
+
+/**
+ * Quem soube da resposta a um feedback. Duas rodas de gente, e o título é o que
+ * as separa: quem é DONO do feedback (escreveu ou recebeu) ouve "um feedback
+ * seu"; quem só respondeu antes ouve que a conversa continuou. O tipo é o mesmo
+ * — resposta a feedback é lista plana, sem thread, diferente de resenha e
+ * comunicado, onde `_REPLY` é outra coisa.
+ *
+ * O link é o deep-link do perfil, o mesmo de `notifyFeedbackReceived`: é lá que
+ * a conversa abre, e o servidor resolve em que página o feedback caiu.
+ *
+ * Quem respondeu nunca é avisado da própria resposta.
+ */
+export async function notifyFeedbackComment(
+  input: {
+    feedbackId: string
+    feedbackTargetId: string
+    /** Quem escreveu o feedback e quem o recebeu. */
+    ownerIds: string[]
+    /** Quem já tinha respondido antes — a conversa continuou sem eles. */
+    previousCommenterIds: string[]
+    actorId: string
+  },
+  companyId: string,
+): Promise<void> {
+  const owners = new Set(input.ownerIds.filter((id) => id !== input.actorId))
+  const others = new Set(
+    input.previousCommenterIds.filter((id) => id !== input.actorId && !owners.has(id)),
+  )
+  if (owners.size === 0 && others.size === 0) return
+  const name = await actorName(input.actorId)
+  const link = `/perfil/${input.feedbackTargetId}?feedback=${input.feedbackId}`
+  for (const [userId, title] of [
+    ...[...owners].map((id) => [id, `${name} respondeu a um feedback seu`] as const),
+    ...[...others].map((id) => [id, `${name} também respondeu a um feedback que você respondeu`] as const),
+  ]) {
+    await createNotification({
+      userId,
+      type: 'FEEDBACK_COMMENT',
+      actorId: input.actorId,
+      title,
+      link,
+      metadata: { feedbackId: input.feedbackId },
+      companyId,
+    })
+  }
 }
 
 /** Resolve o nome do ator para compor o título da notificação. */
@@ -369,17 +419,33 @@ export async function notifyCorporatePostMention(
  * O autor fica fora da lista: ele acabou de escrever o comunicado.
  */
 export async function notifyCorporatePostPublished(
-  input: { postId: string; title: string | null; authorId: string; sectorIds: string[] },
+  input: {
+    postId: string
+    title: string | null
+    authorId: string
+    sectorIds: string[]
+    /** Escopo do público. `LEADERS` recorta por papel, não por setor. */
+    audience?: CorporatePostAudience
+  },
   companyId: string,
 ): Promise<void> {
   const name = await actorName(input.authorId)
+  // Comunicado da liderança avisa quem lidera, e só. ADMIN e SUBADMIN ficam de
+  // fora do aviso de propósito: eles administram a plataforma e não lideram
+  // ninguém no organograma — é a razão de já estarem fora de `LEADER_ROLES`.
+  // Continuam VENDO o post no feed, o que nunca dependeu da notificação.
+  const paraLideranca = input.audience === 'LEADERS'
   await broadcastToActive(
     'CORPORATE_POST_PUBLISHED',
     input.title ? `Novo comunicado: ${input.title}` : `${name} publicou um comunicado no feed da empresa`,
     `/mural-corporativo#${input.postId}`,
     companyId,
     input.sectorIds.length ? input.sectorIds : undefined,
-    { actorId: input.authorId, excludeUserId: input.authorId },
+    {
+      actorId: input.authorId,
+      excludeUserId: input.authorId,
+      ...(paraLideranca ? { roles: LEADER_ROLES } : {}),
+    },
   )
 }
 
@@ -520,8 +586,13 @@ export async function notifyMandatoryCourseAssigned(input: {
  * fizer (ela mesma não engole erro).
  */
 export async function notifyCertificateApproved(input: {
+  /**
+   * Nulo no certificado de curso EXTERNO (Documento 4, seção 9.8): não há curso
+   * no portal para onde apontar, então o link leva à página de envio, onde a
+   * pessoa vê o próprio pedido aprovado.
+   */
+  courseId: string | null
   userId: string
-  courseId: string
   courseTitle: string
   companyId: string
 }): Promise<void> {
@@ -529,8 +600,34 @@ export async function notifyCertificateApproved(input: {
     userId: input.userId,
     type: 'CERTIFICATE_APPROVED',
     title: `Seu certificado de "${input.courseTitle}" foi aprovado!`,
-    link: `/aprendizado/curso/${input.courseId}`,
-    metadata: { courseId: input.courseId },
+    link: input.courseId ? `/aprendizado/curso/${input.courseId}` : '/aprendizado/certificados',
+    metadata: input.courseId ? { courseId: input.courseId } : {},
+    companyId: input.companyId,
+  })
+}
+
+/**
+ * Validação (ou recusa) de um registro de treinamento pela G&G.
+ *
+ * O link leva a "Meus treinamentos", que é onde a pessoa vê a situação e — na
+ * recusa — corrige e reenvia. O motivo entra no título porque uma recusa sem
+ * motivo visível obriga a abrir a tela para descobrir o que fazer.
+ */
+export async function notifyTrainingReviewed(input: {
+  userId: string
+  courseTitle: string
+  approved: boolean
+  rejectionReason: string | null
+  companyId: string
+}): Promise<void> {
+  await createNotification({
+    userId: input.userId,
+    type: input.approved ? 'TRAINING_VALIDATED' : 'TRAINING_REJECTED',
+    title: input.approved
+      ? `Seu treinamento "${input.courseTitle}" foi validado pelo T&D!`
+      : `Seu treinamento "${input.courseTitle}" precisa de ajuste: ${input.rejectionReason ?? 'confira os dados'}`,
+    link: '/treinamentos',
+    metadata: {},
     companyId: input.companyId,
   })
 }
@@ -583,8 +680,12 @@ async function broadcastToActive(
    * tem público-alvo de N setores; o resto do sistema manda um só.
    */
   sectorId?: string | string[],
-  /** `actorId` faz o sino mostrar o avatar de quem gerou; `excludeUserId` tira essa pessoa da lista. */
-  opts: { actorId?: string; excludeUserId?: string } = {},
+  /**
+   * `actorId` faz o sino mostrar o avatar de quem gerou; `excludeUserId` tira
+   * essa pessoa da lista; `roles` recorta por PAPEL — é o que o comunicado
+   * dirigido à liderança precisa, e que o recorte por setor não expressa.
+   */
+  opts: { actorId?: string; excludeUserId?: string; roles?: readonly UserRole[] } = {},
 ): Promise<void> {
   const db = scopedPrisma(companyId)
   const users = await db.user.findMany({
@@ -595,6 +696,7 @@ async function broadcastToActive(
         : sectorId
           ? { sectorId }
           : {}),
+      ...(opts.roles?.length ? { role: { in: [...opts.roles] } } : {}),
       ...(opts.excludeUserId ? { id: { not: opts.excludeUserId } } : {}),
     },
     select: { id: true, teamsWebhookUrl: true, email: true },

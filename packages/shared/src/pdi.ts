@@ -264,13 +264,14 @@ export interface DevelopmentSettingsDTO {
   /** Link externo de Avaliações e Pesquisas (ImpulseUP); `null` esconde o item do menu. */
   impulseUpUrl: string | null
   /**
-   * Link externo da Comunidade INOVA; `null` esconde o item do menu.
-   *
-   * Config por empresa, como o ImpulseUP, e não item fixo: a comunidade é de um
-   * cliente, e num produto white label cravar o destino de um tenant no código
-   * o entregaria para todos os outros.
+   * Liga o módulo nativo da Comunidade INOVA (projetos de inovação). Restrito
+   * à EMR por uma trava de código além desta config — ver
+   * `INOVA_ALLOWED_COMPANY_SLUG` em `inova-service.ts`. `false`/ausente esconde
+   * o item do menu e a rota responde 403.
    */
-  inovaCommunityUrl: string | null
+  inovaModuleEnabled: boolean
+  /** Webhook do Teams que recebe aviso de criação/edição de projeto do INOVA. */
+  inovaTeamsWebhookUrl: string | null
 }
 
 export interface PdiLeadersResponse {

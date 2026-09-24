@@ -29,6 +29,7 @@ const FEEDBACK = {
   updatedAt: '2026-06-01T00:00:00.000Z',
   sharedAt: null,
   reactions: [],
+  commentCount: 0,
 }
 
 const FEEDBACK2 = {
@@ -42,6 +43,7 @@ const FEEDBACK2 = {
   updatedAt: '2026-06-02T00:00:00.000Z',
   sharedAt: null,
   reactions: [],
+  commentCount: 0,
 }
 
 const CATEGORIES = [
@@ -116,6 +118,94 @@ describe('FeedbackSection', () => {
     expect(screen.queryByText('Conduziu o incidente com calma e comunicou bem o time.')).not.toBeInTheDocument()
     expect(screen.getByText(/página 2 de 2/)).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: /Próxima/ })).toBeDisabled())
+  })
+
+  // Responder a um feedback já existia no mural; no perfil vale para o que a
+  // pessoa recebeu E para o que ela escreveu, inclusive privado — a permissão
+  // é a mesma do feedback, e quem decide é o servidor.
+  describe('responder a um feedback', () => {
+    const COMMENT = {
+      id: 'cm1',
+      author: { id: 'dev2', name: 'Bruno', email: 'b@e.com', role: 'LEGEND', position: null, squad: null, photoUrl: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z' },
+      message: 'Obrigado pelo retorno, ajudou demais.',
+      createdAt: '2026-06-03T00:00:00.000Z',
+    }
+
+    function mockComComentarios(comments = [COMMENT], feedback = FEEDBACK) {
+      mockApiFetch.mockImplementation((path: string) => {
+        if (path.startsWith('/users/lead1/feedbacks')) {
+          return Promise.resolve({ feedbacks: [feedback], hasMore: false, total: 1, offset: 0 })
+        }
+        if (path === '/categories') return Promise.resolve({ categories: CATEGORIES })
+        if (path === '/feedbacks/f1/comments') return Promise.resolve({ comments })
+        return Promise.reject(new Error(`unexpected ${path}`))
+      })
+    }
+
+    it('abre a conversa e lista as respostas que já existem', async () => {
+      mockComComentarios()
+      renderSection()
+      await screen.findByText('Conduziu o incidente com calma e comunicou bem o time.')
+
+      fireEvent.click(screen.getByLabelText('Responder'))
+
+      expect(await screen.findByText('Obrigado pelo retorno, ajudou demais.')).toBeInTheDocument()
+      expect(mockApiFetch).toHaveBeenCalledWith('/feedbacks/f1/comments')
+    })
+
+    it('escrever uma resposta manda para o servidor', async () => {
+      mockComComentarios([])
+      renderSection()
+      await screen.findByText('Conduziu o incidente com calma e comunicou bem o time.')
+      fireEvent.click(screen.getByLabelText('Responder'))
+
+      const input = await screen.findByLabelText('Escrever uma resposta')
+      fireEvent.change(input, { target: { value: 'Combinado!' } })
+      fireEvent.submit(input.closest('form') as HTMLFormElement)
+
+      await waitFor(() =>
+        expect(mockApiFetch).toHaveBeenCalledWith('/feedbacks/f1/comments', {
+          method: 'POST',
+          body: JSON.stringify({ message: 'Combinado!' }),
+        }),
+      )
+    })
+
+    // O contador vem do feedback, não da lista de respostas: sem recarregar a
+    // página do perfil ele ficaria para trás depois de responder.
+    it('depois de responder, recarrega a lista do perfil para atualizar o contador', async () => {
+      mockComComentarios([])
+      renderSection()
+      await screen.findByText('Conduziu o incidente com calma e comunicou bem o time.')
+      fireEvent.click(screen.getByLabelText('Responder'))
+      const chamadasAntes = mockApiFetch.mock.calls.filter((c) => String(c[0]).startsWith('/users/lead1/feedbacks')).length
+
+      const input = await screen.findByLabelText('Escrever uma resposta')
+      fireEvent.change(input, { target: { value: 'Combinado!' } })
+      fireEvent.submit(input.closest('form') as HTMLFormElement)
+
+      await waitFor(() => {
+        const depois = mockApiFetch.mock.calls.filter((c) => String(c[0]).startsWith('/users/lead1/feedbacks')).length
+        expect(depois).toBeGreaterThan(chamadasAntes)
+      })
+    })
+
+    it('o botão mostra quantas respostas o feedback já tem', async () => {
+      mockComComentarios([COMMENT], { ...FEEDBACK, commentCount: 3 })
+      renderSection()
+      await screen.findByText('Conduziu o incidente com calma e comunicou bem o time.')
+
+      expect(screen.getByLabelText('Responder')).toHaveTextContent('3')
+    })
+
+    it('a conversa só abre depois do clique', async () => {
+      mockComComentarios()
+      renderSection()
+      await screen.findByText('Conduziu o incidente com calma e comunicou bem o time.')
+
+      expect(screen.queryByLabelText('Escrever uma resposta')).not.toBeInTheDocument()
+      expect(mockApiFetch).not.toHaveBeenCalledWith('/feedbacks/f1/comments')
+    })
   })
 
   it('não mostra paginação quando tudo cabe numa página', async () => {

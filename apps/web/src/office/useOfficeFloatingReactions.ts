@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { isWithinProximity, type OfficeOccupant } from '@legends/shared'
+import { isWithinProximityTiles, type OfficeOccupant,
+  tileOfPixel,
+} from '@legends/shared'
 import type { OfficeBridge } from './OfficeBridge'
 import { makeOfficeFloatingReaction, OFFICE_FLOAT_REACTION_TTL_MS, type OfficeFloatingReaction } from './office-floating-reactions'
 
@@ -14,13 +16,15 @@ import { makeOfficeFloatingReaction, OFFICE_FLOAT_REACTION_TTL_MS, type OfficeFl
  * aberto) — quem escopa por sala/proximidade é o cliente, igual já faz
  * `nearbyRemotesForGrid` pros vídeos da grade. Dentro de sala/zona,
  * `zoneOccupantIds` restringe a quem está na mesma zona; no espaço aberto,
- * filtra por `isWithinProximity`.
+ * filtra por `isWithinProximityTiles`.
  */
 export function useOfficeFloatingReactions(
   bridge: OfficeBridge,
   occupants: OfficeOccupant[],
   you: OfficeOccupant | null,
   zoneOccupantIds: Set<string> | null,
+  /** Tile do mapa ATIVO, em pixels — a régua do `tileOfPixel`. */
+  tileSize: number,
   enabled = true,
 ): OfficeFloatingReaction[] {
   const [reactions, setReactions] = useState<OfficeFloatingReaction[]>([])
@@ -31,6 +35,10 @@ export function useOfficeFloatingReactions(
   youRef.current = you
   const zoneOccupantIdsRef = useRef(zoneOccupantIds)
   zoneOccupantIdsRef.current = zoneOccupantIds
+  // Em ref como os demais: a assinatura do bridge não pode ser refeita a cada
+  // publicação de mapa só para enxergar o tile novo.
+  const tileSizeRef = useRef(tileSize)
+  tileSizeRef.current = tileSize
 
   useEffect(() => {
     if (!enabled) {
@@ -45,7 +53,11 @@ export function useOfficeFloatingReactions(
         if (!currentZoneOccupantIds.has(message.userId)) return
       } else if (currentYou) {
         const occupant = occupantsRef.current.find((o) => o.userId === message.userId)
-        if (!occupant || !isWithinProximity(currentYou.x, currentYou.y, occupant.x, occupant.y)) return
+        if (!occupant) return
+        // O alcance é em TILE, como todo alcance do escritório.
+        const meu = tileOfPixel(currentYou, tileSizeRef.current)
+        const dele = tileOfPixel(occupant, tileSizeRef.current)
+        if (!isWithinProximityTiles(meu.x, meu.y, dele.x, dele.y)) return
       }
       seqRef.current += 1
       const occupant = occupantsRef.current.find((o) => o.userId === message.userId)

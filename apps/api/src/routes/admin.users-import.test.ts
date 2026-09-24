@@ -4,7 +4,10 @@ import { buildApp } from '../app'
 import { prisma } from '../lib/prisma'
 import { parseCsvTable } from '../lib/csv-parse'
 
-const HEADER = 'Nome;E-mail;Cargo;Setor;Squad;Papel;Área;Líder (e-mail);Na equipe desde;Data de nascimento'
+// As linhas montadas nos testes não trazem a última coluna: é de propósito, e
+// vale como verificação de que "Tipo de contrato" vazio não mexe em ninguém.
+const HEADER =
+  'Nome;E-mail;Cargo;Setor;Squad;Papel;Área;Líder (e-mail);Na equipe desde;Data de nascimento;Situação;Desligado em;Tipo de contrato;Categoria do cargo;Foto (URL)'
 const BOUNDARY = 'legends-import-boundary'
 
 function spreadsheet(...lines: string[]): Buffer {

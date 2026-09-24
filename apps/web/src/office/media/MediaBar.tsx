@@ -90,6 +90,7 @@ export function MediaBar({
   media,
   zoneName,
   silenced = false,
+  removedFromRoomBy = null,
   micLocked = false,
   broadcast,
   canBroadcast,
@@ -130,6 +131,8 @@ export function MediaBar({
 }: {
   media: OfficeMediaState
   zoneName: string | null
+  /** Nome de quem tirou você da reunião — a mídia caiu de propósito, não por instabilidade. */
+  removedFromRoomBy?: string | null
   /** Você está na sala de silêncio: sem sala de voz, de propósito. */
   silenced?: boolean
   /** Área de silêncio: microfone forçado desligado e botão bloqueado. */
@@ -197,7 +200,9 @@ export function MediaBar({
   // Na sala de silêncio não há sala de voz, então `media.status` é 'off' — o
   // rótulo padrão ("Áudio desligado" / "Entre no escritório") mentiria: a
   // pessoa ESTÁ no escritório, e o áudio está desligado de propósito.
-  const statusLabel = silenced
+  const statusLabel = removedFromRoomBy
+    ? `${removedFromRoomBy} removeu você da reunião — saia da sala e entre de novo`
+    : silenced
     ? `${zoneName ?? 'Sala de silêncio'} — sem som`
     : media.status === 'connected'
       ? zoneName
@@ -209,7 +214,9 @@ export function MediaBar({
           ? 'Sem áudio — tentando reconectar'
           : 'Áudio desligado'
   const mediaControlsDisabled = media.status !== 'connected'
-  const mediaDisabledTitle = silenced
+  const mediaDisabledTitle = removedFromRoomBy
+    ? 'Você foi removido desta reunião. Saia da sala e entre de novo para voltar.'
+    : silenced
     ? 'Sala de silêncio: sem áudio nem vídeo enquanto você estiver aqui'
     : media.status === 'connecting'
       ? 'Conectando áudio e vídeo...'

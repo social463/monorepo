@@ -33,6 +33,7 @@ const ASSET = {
   imageUrl: 'https://cdn.example.com/visual-assets/company-emr/a1.png',
   fileName: 'EMR-Banner-LinkedIn.png',
   fit: 'COVER' as const,
+  brand: 'CURRENT' as const,
   order: 0,
   published: true,
   updatedAt: '2026-08-16T00:00:00.000Z',
@@ -99,6 +100,41 @@ describe('KitVisualTab', () => {
     wrap(<KitVisualTab />)
 
     expect(await screen.findByText('Nunca distorça o logo.')).toBeInTheDocument()
+  })
+
+  // Documento 4, seção 7: as duas identidades da EMR conviviam na mesma grade,
+  // e a regra de uso de cada uma não acompanhava o download.
+  it('separa as peças em Marca Atual e Nova Marca, com a regra de uso à vista', async () => {
+    const nova = { ...ASSET, id: 'a2', title: 'Selo da nova marca', brand: 'NEW' as const }
+    responder({ assets: [ASSET, nova] })
+    wrap(<KitVisualTab />)
+
+    // A aba abre na marca atual — é a que ainda vale para dentro e para fora.
+    expect(await screen.findByText('Banner para LinkedIn')).toBeInTheDocument()
+    expect(screen.queryByText('Selo da nova marca')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('Uso interno e externo, até a divulgação oficial da nova marca.'),
+    ).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Nova Marca' }))
+
+    expect(screen.getByText('Selo da nova marca')).toBeInTheDocument()
+    expect(screen.queryByText('Banner para LinkedIn')).not.toBeInTheDocument()
+    expect(
+      screen.getByText('Uso restrito ao ambiente interno. Não deve ser usada fora da empresa.'),
+    ).toBeInTheDocument()
+  })
+
+  it('aba sem peça mostra estado vazio — sumir levaria a regra de uso junto', async () => {
+    responder({ assets: [ASSET] })
+    wrap(<KitVisualTab />)
+
+    await userEvent.click(await screen.findByRole('tab', { name: 'Nova Marca' }))
+
+    expect(screen.getByText('Nenhuma peça publicada nesta identidade ainda.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Uso restrito ao ambiente interno. Não deve ser usada fora da empresa.'),
+    ).toBeInTheDocument()
   })
 
   it('peça sem URL (storage fora do ar) não vira quadrado quebrado nem botão morto', async () => {

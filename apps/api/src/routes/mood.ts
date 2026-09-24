@@ -12,7 +12,7 @@ import { captureFor } from '../lib/analytics/request'
 import { MoodAlreadyAnsweredError, getTodayMood, setTodayMood, todayInSaoPaulo } from '../services/mood-service'
 import { toTodayMoodDTO } from '../lib/serialize'
 import { evaluateStreakBadgesForUser } from '../services/badge-service'
-import { notifyBadgesEarned } from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { awardCoins } from '../services/coin-service'
 import { awardXp } from '../services/xp-service'
 
@@ -68,7 +68,7 @@ export async function moodRoutes(app: FastifyInstance) {
     try {
       const awarded = await evaluateStreakBadgesForUser(request.user.sub)
       if (awarded.length > 0) {
-        await notifyBadgesEarned(request.user.sub, awarded.map((b) => b.badgeId), request.user.companyId)
+        await settleBadgesEarned(request.user.sub, awarded.map((b) => b.badgeId), request.user.companyId)
       }
     } catch (err) {
       request.log.error(err)

@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type ClipboardEvent, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { CultureManualDTO } from '@legends/shared'
+import { richDocToMarkdown, type CultureManualDTO } from '@legends/shared'
+import { domToRichDoc } from '../../../components/rich-text/rich-text-dom'
 import { ApiError, apiFetch } from '../../../lib/api'
 import { Icon } from '../../../components/Icon'
 import { UploadError, uploadDocument } from '../../../lib/upload'
@@ -119,6 +120,40 @@ export function ManualsSection() {
     }
   }
 
+  /**
+   * Colagem com formatação (Documento 4, seção 6).
+   *
+   * O campo é Markdown num `<textarea>`, e colar Word ali sempre entregou
+   * `text/plain` — o navegador não tem para onde levar a formatação. Aqui o
+   * `text/html` da área de transferência passa pelo MESMO parser que o Mural
+   * usa (`domToRichDoc`) e sai como Markdown, no subset que o leitor de manual
+   * renderiza.
+   *
+   * Sem `text/html` (colar de um bloco de notas, por exemplo) o handler não faz
+   * nada e o navegador cola como sempre — não vale interceptar o que já
+   * funciona.
+   */
+  function handleBodyPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const html = event.clipboardData.getData('text/html')
+    if (!html || !form) return
+
+    const holder = document.createElement('div')
+    holder.innerHTML = html
+    // `<script>`/`<style>` colados junto entrariam como TEXTO do manual — mesma
+    // limpeza que o `RichTextEditor` faz antes de interpretar.
+    holder.querySelectorAll('script, style, noscript').forEach((node) => node.remove())
+    const markdown = richDocToMarkdown(domToRichDoc(holder))
+    if (!markdown) return
+
+    event.preventDefault()
+    // Insere na posição do cursor, substituindo a seleção — é o que colar faz.
+    const alvo = event.currentTarget
+    const inicio = alvo.selectionStart ?? form.body.length
+    const fim = alvo.selectionEnd ?? inicio
+    const corpo = `${form.body.slice(0, inicio)}${markdown}${form.body.slice(fim)}`
+    setForm({ ...form, body: corpo })
+  }
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     if (!form) return
@@ -203,7 +238,11 @@ export function ManualsSection() {
               className={`${inputCls} min-h-40 font-mono`}
               value={form.body}
               onChange={(e) => setForm({ ...form, body: e.target.value })}
+              onPaste={handleBodyPaste}
             />
+            <span className="text-body-sm text-on-surface-variant">
+              Ao colar de um documento, títulos, listas, negrito e links são convertidos para Markdown.
+            </span>
           </label>
 
           <div className="flex flex-col gap-xs">

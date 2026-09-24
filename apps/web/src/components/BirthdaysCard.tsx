@@ -1,22 +1,36 @@
 import { Link } from 'react-router-dom'
+import { canSignBirthdayWall } from '@legends/shared'
 import { useCelebrations } from '../lib/use-celebrations'
+import { useAuth } from '../auth/AuthContext'
 import { CelebrationDateLabel } from './CelebrationDateLabel'
 import { CelebrationTile } from './CelebrationTile'
 import { Icon } from './Icon'
 
-/** Card da sidebar da Home: os próximos aniversariantes de nascimento (3 datas mais próximas, hoje incluso). */
+/** Quantas pessoas cabem no card antes do "ver todos". */
+const PREVIEW = 3
+
+/**
+ * Card da sidebar da Home: os próximos aniversariantes de nascimento.
+ *
+ * O corte é de **pessoas**, e é feito aqui, não no `celebration-service`: lá o
+ * limite é por DATA (`nearestThreeDates`), e uma data com sete aniversariantes
+ * traz os sete — que é o que a G&G apontou como poluição visual. Cortar no
+ * servidor não serve porque o mesmo `upcoming` alimenta `/aniversariantes` e o
+ * `use-birthday-confetti`; gente sumiria dessas duas telas junto.
+ */
 export function BirthdaysCard() {
   const { birthdays, isLoading, isError } = useCelebrations()
+  const { user } = useAuth()
   // Enquanto carrega (ou se a chamada falhar) o card não aparece: é conteúdo
   // acessório, não vale ocupar a sidebar com skeleton nem com mensagem de erro.
   if (isLoading || isError) return null
 
-  const upcoming = birthdays.upcoming
+  const upcoming = birthdays.upcoming.slice(0, PREVIEW)
 
   return (
     <aside
       data-testid="birthdays-card"
-      className="flex flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="flex min-w-0 flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       {/* 18px em vez de headline-md: a sidebar tem 320px e o título quebrava em duas linhas. */}
       <h2 className="flex items-center gap-sm font-headline text-body-lg font-semibold text-on-surface">
@@ -36,6 +50,18 @@ export function BirthdaysCard() {
                 dateLabel={
                   <CelebrationDateLabel daysUntil={birthday.daysUntil} observedDate={birthday.observedDate} />
                 }
+                celebrating={birthday.daysUntil === 0}
+                // Quantas pessoas já assinaram o mural — só de quem comemora
+                // HOJE, que é o único dia em que o servidor conta (zero num
+                // aniversário de daqui a 12 dias pareceria abandono).
+                caption={
+                  birthday.daysUntil === 0 && birthday.greetingCount > 0
+                    ? `${birthday.greetingCount} ${birthday.greetingCount === 1 ? 'pessoa já assinou' : 'pessoas já assinaram'} o mural`
+                    : undefined
+                }
+                // Assinar o mural é de todo mundo menos o próprio
+                // aniversariante — diferente do feedback, que barra o ADMIN.
+                canCongratulate={canSignBirthdayWall(user, birthday.user.id)}
               />
             </li>
           ))}

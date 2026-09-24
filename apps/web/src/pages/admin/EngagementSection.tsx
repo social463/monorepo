@@ -24,7 +24,14 @@ import { Panel } from './shared'
  * Não confundir com Administração › People Analytics, que mede humor, alcance
  * do mural e telas mais vistas. Ali é comportamento; aqui é pontuação.
  */
-export function EngagementSection() {
+/**
+ * Panorama de pontos da empresa.
+ *
+ * `embedded` some com o `<header>` próprio: desde a seção 4.7 do Documento 3 o
+ * painel mora **dentro** da aba Engajamento de People Analytics, que já tem
+ * título e filtros. A rota `/admin/engajamento` virou redirecionamento.
+ */
+export function EngagementSection({ embedded = false }: { embedded?: boolean } = {}) {
   const { data, isLoading, isError } = useRankingOverview()
 
   if (isLoading) {
@@ -46,7 +53,9 @@ export function EngagementSection() {
   return (
     <div className="flex flex-col gap-lg">
       <header>
-        <h2 className="font-headline text-headline-lg text-on-surface">Engajamento</h2>
+        {!embedded && (
+          <h2 className="font-headline text-headline-lg text-on-surface">Engajamento</h2>
+        )}
         <p className="mt-1 text-body-md text-on-surface-variant">
           Como os {XP_CURRENCY_LABEL.toLowerCase()} estão circulando na empresa. Referência de adesão:{' '}
           <strong className="font-label text-on-surface">{formatMonth(overview.monthRef)}</strong>. As regras de

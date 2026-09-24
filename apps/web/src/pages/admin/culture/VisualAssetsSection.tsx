@@ -1,8 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  CULTURE_VISUAL_ASSET_BRANDS,
+  CULTURE_VISUAL_ASSET_BRAND_LABELS,
   CULTURE_VISUAL_ASSET_FITS,
   CULTURE_VISUAL_ASSET_FIT_LABELS,
+  type CultureVisualAssetBrand,
   type CultureVisualAssetDTO,
   type CultureVisualAssetFit,
   type CultureVisualAssetsResponse,
@@ -19,6 +22,8 @@ interface FormState {
   description: string
   fileName: string
   fit: CultureVisualAssetFit
+  /** A qual das duas identidades a peça pertence — decide em que aba ela sai. */
+  brand: CultureVisualAssetBrand
   published: boolean
   /**
    * Só definido quando uma imagem NOVA foi enviada nesta edição — assim
@@ -35,6 +40,7 @@ const EMPTY: FormState = {
   description: '',
   fileName: '',
   fit: 'COVER',
+  brand: 'CURRENT',
   published: true,
   previewUrl: null,
 }
@@ -70,6 +76,7 @@ export function VisualAssetsSection() {
         description: state.description.trim(),
         fileName: state.fileName.trim(),
         fit: state.fit,
+        brand: state.brand,
         published: state.published,
         ...(state.storageKey !== undefined ? { storageKey: state.storageKey } : {}),
       }
@@ -165,6 +172,7 @@ export function VisualAssetsSection() {
       description: asset.description,
       fileName: asset.fileName,
       fit: asset.fit,
+      brand: asset.brand,
       published: asset.published,
       // `storageKey` fica indefinido de propósito: sem imagem nova, o PATCH não
       // deve tocar no arquivo publicado.
@@ -257,6 +265,23 @@ export function VisualAssetsSection() {
           </label>
 
           <div className="flex flex-col gap-xs">
+            <span className="font-label text-label-sm text-on-surface-variant">Identidade visual</span>
+            <Select
+              ariaLabel="Identidade visual"
+              value={form.brand}
+              onChange={(value) => setForm({ ...form, brand: value as CultureVisualAssetBrand })}
+              options={CULTURE_VISUAL_ASSET_BRANDS.map((brand) => ({
+                value: brand,
+                label: CULTURE_VISUAL_ASSET_BRAND_LABELS[brand],
+              }))}
+            />
+            <p className="text-body-sm text-on-surface-variant">
+              Decide em qual aba do Kit visual a peça aparece — e qual regra de uso acompanha o
+              download.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-xs">
             <span className="font-label text-label-sm text-on-surface-variant">Enquadramento no card</span>
             <Select
               ariaLabel="Enquadramento no card"
@@ -326,7 +351,11 @@ export function VisualAssetsSection() {
                 </p>
                 <p className="text-body-sm text-on-surface-variant">{asset.description}</p>
                 <p className="mt-xs text-label-sm text-on-surface-variant">
-                  {[asset.fileName, CULTURE_VISUAL_ASSET_FIT_LABELS[asset.fit]].join(' · ')}
+                  {[
+                    asset.fileName,
+                    CULTURE_VISUAL_ASSET_BRAND_LABELS[asset.brand],
+                    CULTURE_VISUAL_ASSET_FIT_LABELS[asset.fit],
+                  ].join(' · ')}
                 </p>
               </div>
             </div>

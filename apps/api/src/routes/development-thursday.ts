@@ -12,7 +12,8 @@ import {
 } from '../services/development-thursday-service'
 import { FeedbackError, createFeedback, listFeedbacksForDevelopmentThursdayEvent } from '../services/feedback-service'
 import { syncFeedbackBadgesForUser } from '../services/badge-service'
-import { notifyBadgesEarned, notifyFeedbackReceived } from '../services/notification-service'
+import { notifyFeedbackReceived } from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { toDevelopmentThursdayEventDTO, toFeedbackDTO } from '../lib/serialize'
 
 function clampLimit(raw: string | undefined): number {
@@ -108,7 +109,7 @@ export async function developmentThursdayRoutes(app: FastifyInstance) {
         request.log.error(badgeErr)
       }
       try {
-        await notifyBadgesEarned(request.user.sub, awardedBadges.map((b) => b.badgeId), request.user.companyId)
+        await settleBadgesEarned(request.user.sub, awardedBadges.map((b) => b.badgeId), request.user.companyId)
       } catch (notifyErr) {
         request.log.error(notifyErr)
       }

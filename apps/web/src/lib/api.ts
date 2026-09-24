@@ -27,31 +27,100 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Sessão que morreu de verdade (refresh recusado), avisada para quem cuida do
+ * estado de autenticação — hoje o `AuthProvider`, que zera o `user` e deixa o
+ * `ProtectedRoute` levar ao login.
+ *
+ * Sem esse aviso, o token sumia da memória e mais nada acontecia: a tela
+ * continuava de pé com os dados que já tinham carregado, e toda ação a partir
+ * dali devolvia "Não autorizado" inline, para sempre. Quem estava usando não
+ * tinha como saber que precisava entrar de novo.
+ */
+type SessionExpiredListener = () => void
+const sessionExpiredListeners = new Set<SessionExpiredListener>()
+
+/** Assina o aviso de sessão expirada. Devolve a função que cancela a assinatura. */
+export function onSessionExpired(listener: SessionExpiredListener): () => void {
+  sessionExpiredListeners.add(listener)
+  return () => {
+    sessionExpiredListeners.delete(listener)
+  }
+}
+
 // Single-flight: refreshes concorrentes compartilham a mesma Promise.
 let refreshPromise: Promise<boolean> | null = null
 
-async function runRefresh(): Promise<boolean> {
+/**
+ * `recusado` é o cookie não valer mais (401): a sessão morreu de verdade.
+ * `falhou` é tropeço de rede ou do servidor — o cookie continua valendo, e
+ * provavelmente o access token em memória também.
+ *
+ * A distinção não é preciosismo. `/auth/refresh` é a única chamada que bate no
+ * banco em fluxos que de resto só verificam o JWT (o presign de upload, por
+ * exemplo, é só assinatura local), então é ela que cai sozinha num blip de
+ * banco ou de conexão. Zerar o token nesse caso transformava um tropeço de
+ * segundos numa sequência de "Não autorizado": a requisição seguinte saía sem
+ * `Authorization`, tomava 401 na hora e tentava outro refresh — e assim por
+ * diante até a rede voltar. Num envio de álbum, que é sequencial e longo, isso
+ * queimava uma foto atrás da outra.
+ */
+type RefreshOutcome = 'ok' | 'recusado' | 'falhou'
+
+/** Espera curta entre a primeira e a segunda tentativa de refresh. */
+const REFRESH_RETRY_DELAY_MS = 600
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function runRefresh(): Promise<RefreshOutcome> {
+  let res: Response
   try {
-    const res = await fetch('/api/auth/refresh', {
+    res = await fetch('/api/auth/refresh', {
       method: 'POST',
       credentials: 'same-origin',
     })
-    if (!res.ok) {
-      accessToken = null
-      return false
+  } catch {
+    // Nem chegou a haver resposta: rede caiu. Mantém o token.
+    return 'falhou'
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    // Só avisa quem TINHA sessão nesta aba. Sem token em memória, ou é o
+    // bootstrap de quem nunca entrou (o `AuthProvider` já trata, e o aviso
+    // seria ruído), ou é uma recusa que já avisou — repetir só faria o
+    // `setUser(null)` de novo.
+    const tinhaSessao = accessToken !== null
+    accessToken = null
+    if (tinhaSessao) {
+      for (const listener of [...sessionExpiredListeners]) listener()
     }
+    return 'recusado'
+  }
+  if (!res.ok) return 'falhou'
+
+  try {
     const body = (await res.json()) as RefreshResponse
     accessToken = body.accessToken
-    return true
+    return 'ok'
   } catch {
-    accessToken = null
-    return false
+    return 'falhou'
   }
+}
+
+async function runRefreshWithRetry(): Promise<boolean> {
+  const first = await runRefresh()
+  if (first !== 'falhou') return first === 'ok'
+  // Só o `falhou` merece segunda tentativa: `recusado` é resposta do servidor
+  // dizendo que este cookie acabou, e insistir só atrasaria a ida para o login.
+  await delay(REFRESH_RETRY_DELAY_MS)
+  return (await runRefresh()) === 'ok'
 }
 
 export function refreshAccessToken(): Promise<boolean> {
   if (!refreshPromise) {
-    refreshPromise = runRefresh().finally(() => {
+    refreshPromise = runRefreshWithRetry().finally(() => {
       refreshPromise = null
     })
   }

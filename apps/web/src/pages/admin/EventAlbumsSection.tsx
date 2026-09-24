@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EventAlbumDetailResponse, EventAlbumListResponse } from '@legends/shared'
 import { apiFetch, ApiError } from '../../lib/api'
 import { useAlbumPhotoUpload } from '../../lib/use-album-photos'
+import { AlbumUploadProgress } from '../../components/AlbumUploadProgress'
 import { AlbumFields, albumPayload, emptyAlbumDraft, type AlbumDraft } from '../../components/AlbumFields'
 import { Panel } from './shared'
 
@@ -71,20 +72,7 @@ function AlbumPhotos({ albumId }: { albumId: string }) {
         className="text-body-sm text-on-surface-variant"
       />
 
-      {upload.uploads.length > 0 && (
-        <ul className="flex flex-col gap-1">
-          {upload.uploads.map((u) => (
-            <li key={u.fileName} className="text-body-sm text-on-surface-variant">
-              {u.fileName} —{' '}
-              {u.status === 'erro' ? (
-                <span className="text-error">{u.message}</span>
-              ) : (
-                <span>{u.status === 'pronto' ? 'enviada' : 'enviando…'}</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      <AlbumUploadProgress upload={upload} />
 
       <ul className="grid grid-cols-2 gap-md sm:grid-cols-4">
         {detail.data?.photos.map((photo) => (

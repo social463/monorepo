@@ -1,16 +1,19 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
+  BADGE_CLAIM_STATUS_LABELS,
   BADGE_KINDS,
   BADGE_KIND_LABELS,
   type AwardedBadgeDTO,
   type BadgeCatalogEntryDTO,
+  type BadgeClaimDTO,
   type BadgeKind,
 } from '@legends/shared'
 import { apiFetch } from '../lib/api'
 import { useAuth } from '../auth/AuthContext'
 import { BadgesSkeleton } from './Skeleton'
 import { BadgeEmblem } from './BadgeEmblem'
+import { BadgeClaimDialog } from './BadgeClaimDialog'
 import { Icon } from './Icon'
 
 type KindFilter = BadgeKind | 'ALL'
@@ -22,6 +25,7 @@ type KindFilter = BadgeKind | 'ALL'
 export function BadgesGallery() {
   const { user } = useAuth()
   const [kind, setKind] = useState<KindFilter>('ALL')
+  const [reivindicando, setReivindicando] = useState<BadgeCatalogEntryDTO | null>(null)
 
   const catalogQuery = useQuery({
     queryKey: ['badges'],
@@ -32,8 +36,20 @@ export function BadgesGallery() {
     queryFn: () => apiFetch<{ badges: AwardedBadgeDTO[] }>(`/users/${user!.id}/badges`),
     enabled: Boolean(user),
   })
+  // As reivindicações desta pessoa: é o que troca o botão pelo estado da fila
+  // depois de enviada (Documento 4, seção 11.2).
+  const claimsQuery = useQuery({
+    queryKey: ['badgeClaims', 'me'],
+    queryFn: () => apiFetch<{ claims: BadgeClaimDTO[] }>('/me/badge-claims'),
+    enabled: Boolean(user),
+  })
 
   const earnedSlugs = new Set(earnedQuery.data?.badges.map((entry) => entry.badge.slug))
+  // A mais recente por selo — a lista vem do servidor em ordem decrescente.
+  const claimByBadgeId = new Map<string, BadgeClaimDTO>()
+  for (const claim of claimsQuery.data?.claims ?? []) {
+    if (!claimByBadgeId.has(claim.badge.id)) claimByBadgeId.set(claim.badge.id, claim)
+  }
   const catalog = catalogQuery.data?.badges ?? []
   // Arrays derivados: usados só no JSX, nunca em dep array nem em setState.
   const availableKinds = BADGE_KINDS.filter((option) => catalog.some((badge) => badge.kind === option))
@@ -123,10 +139,46 @@ export function BadgesGallery() {
                     </p>
                   </div>
                 )}
+
+                {/*
+                  Reivindicar só faz sentido no selo que a pessoa ainda não tem.
+                  Solicitação em análise ou aprovada ocupa o lugar do botão — sem
+                  isso, o caminho natural depois de enviar seria enviar de novo.
+                  Recusada volta a oferecer o botão: recusar existe para a pessoa
+                  tentar de novo com uma comprovação melhor.
+                */}
+                {!earned && (() => {
+                  const claim = claimByBadgeId.get(badge.id)
+                  if (claim && claim.status !== 'REJECTED') {
+                    return (
+                      <p className="font-label text-label-sm text-primary">
+                        Solicitação {BADGE_CLAIM_STATUS_LABELS[claim.status].toLowerCase()}
+                      </p>
+                    )
+                  }
+                  return (
+                    <div className="flex flex-col items-center gap-xs">
+                      {claim?.status === 'REJECTED' && claim.rejectionReason && (
+                        <p className="text-body-sm text-error">Recusada: {claim.rejectionReason}</p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setReivindicando(badge)}
+                        className="rounded-full border border-outline-variant/60 px-md py-1 font-label text-label-sm text-primary transition-colors hover:border-primary"
+                      >
+                        {claim?.status === 'REJECTED' ? 'Reivindicar de novo' : 'Reivindicar'}
+                      </button>
+                    </div>
+                  )
+                })()}
               </li>
             )
           })}
         </ul>
+      )}
+
+      {reivindicando && (
+        <BadgeClaimDialog badge={reivindicando} onClose={() => setReivindicando(null)} />
       )}
     </div>
   )

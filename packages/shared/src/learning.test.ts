@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   COURSE_ENROLLMENT_STATUSES,
   COURSE_ENROLLMENT_STATUS_LABELS,
-  COURSE_LESSON_TYPES,
-  COURSE_LESSON_TYPE_LABELS,
   COURSE_LEVELS,
   COURSE_LEVEL_LABELS,
   certificateHoursFor,
@@ -13,7 +11,6 @@ import {
 describe('rótulos de aprendizado', () => {
   it('todo enum tem rótulo em pt-BR', () => {
     for (const level of COURSE_LEVELS) expect(COURSE_LEVEL_LABELS[level]).toBeTruthy()
-    for (const type of COURSE_LESSON_TYPES) expect(COURSE_LESSON_TYPE_LABELS[type]).toBeTruthy()
     for (const status of COURSE_ENROLLMENT_STATUSES) expect(COURSE_ENROLLMENT_STATUS_LABELS[status]).toBeTruthy()
   })
 })

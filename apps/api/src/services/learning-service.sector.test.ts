@@ -1,3 +1,4 @@
+import { DEFAULT_COMPANY_ID } from '@legends/shared'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_SECTOR_ID } from '@legends/shared'
 import { prisma } from '../lib/prisma'
@@ -32,15 +33,23 @@ async function makeCourse(input: {
     data: {
       slug: input.slug,
       title: `Curso ${input.slug}`,
-      category: input.category ?? 'Liderança',
-      competencies: [input.competency ?? 'Liderança'],
-      published: true,
+      status: 'PUBLISHED',
       publishedAt: new Date(),
       // Todos obrigatórios: é o que faz o resumo de pendentes discriminar o recorte.
       mandatory: true,
       sectorId: input.sectorId,
     },
   })
+  // Competência virou catálogo (Documento 4, 9.6): a fixture cadastra e liga,
+  // em vez de escrever a string dentro do curso.
+  const nome = input.competency ?? 'Liderança'
+  const competency = await prisma.competency.upsert({
+    where: { companyId_slug: { companyId: DEFAULT_COMPANY_ID, slug: nome.toLowerCase() } },
+    create: { name: nome, slug: nome.toLowerCase(), companyId: DEFAULT_COMPANY_ID },
+    update: {},
+  })
+  await prisma.courseCompetency.create({ data: { courseId: course.id, competencyId: competency.id } })
+
   const courseModule = await prisma.courseModule.create({ data: { courseId: course.id, title: 'Módulo 1' } })
   const lesson = await prisma.courseLesson.create({
     data: { courseId: course.id, moduleId: courseModule.id, title: 'Aula 1', durationMinutes: 30, sortOrder: 0 },
@@ -84,7 +93,6 @@ describe('recorte por setor na leitura', () => {
     deOutroSetor = await makeCourse({
       slug: 'de-outro-setor',
       sectorId: OUTRO_SETOR,
-      category: 'Categoria do outro setor',
       competency: 'Competência do outro setor',
     })
     await makeTrackWith([semSetor.id, doMeuSetor.id, deOutroSetor.id])

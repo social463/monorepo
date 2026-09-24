@@ -16,6 +16,12 @@ import { Icon } from './Icon'
  * Sem armazenamento configurado (`/uploads/config` com `enabled: false`), o
  * botão some e o campo explica — em vez de deixar a pessoa escolher um arquivo
  * e só então falhar.
+ *
+ * Serve também a imagem que não é de pessoa (fundo e assinatura do modelo de
+ * certificado, por exemplo): `shape='rect'` troca a prévia redonda por uma
+ * retangular e `icon`/`actionLabel` trocam o vocabulário. O que não muda é o
+ * fluxo de envio — duplicá-lo num segundo componente seria manter presign,
+ * erro e input zerado em dois lugares.
  */
 export function PhotoUploadField({
   value,
@@ -23,12 +29,19 @@ export function PhotoUploadField({
   label = 'Foto',
   hint = 'Aparece no perfil e em toda a plataforma.',
   disabled,
+  shape = 'circle',
+  icon = 'person',
+  actionLabel = 'foto',
 }: {
   value: string | null
   onChange: (url: string | null) => void
   label?: string
   hint?: string
   disabled?: boolean
+  shape?: 'circle' | 'rect'
+  icon?: string
+  /** Vai para "Enviar ___" / "Trocar ___". Minúsculo, no singular. */
+  actionLabel?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
@@ -48,7 +61,7 @@ export function PhotoUploadField({
       const image = await uploadImage(file)
       onChange(image.url)
     } catch (err) {
-      setError(err instanceof UploadError ? err.message : 'Não foi possível enviar a foto.')
+      setError(err instanceof UploadError ? err.message : `Não foi possível enviar a ${actionLabel}.`)
     } finally {
       setBusy(false)
       // Zera o input para reescolher o MESMO arquivo depois de um erro — sem
@@ -59,11 +72,17 @@ export function PhotoUploadField({
 
   return (
     <div className="flex items-center gap-md">
-      <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-outline-variant/60 bg-surface-container-highest">
+      <div
+        className={`flex h-16 shrink-0 items-center justify-center overflow-hidden border border-outline-variant/60 bg-surface-container-highest ${
+          shape === 'circle' ? 'w-16 rounded-full' : 'w-24 rounded-md'
+        }`}
+      >
         {value ? (
-          <img src={value} alt="" className="h-full w-full object-cover" />
+          // Fundo e assinatura são desenhados inteiros no certificado; recortar
+          // na prévia mostraria uma coisa e imprimiria outra.
+          <img src={value} alt="" className={`h-full w-full ${shape === 'circle' ? 'object-cover' : 'object-contain'}`} />
         ) : (
-          <Icon name="person" className="text-[28px] text-on-surface-variant" />
+          <Icon name={icon} className="text-[28px] text-on-surface-variant" />
         )}
       </div>
 
@@ -94,7 +113,7 @@ export function PhotoUploadField({
                 onClick={() => inputRef.current?.click()}
                 className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
               >
-                {busy ? 'Enviando…' : value ? 'Trocar foto' : 'Enviar foto'}
+                {busy ? 'Enviando…' : `${value ? 'Trocar' : 'Enviar'} ${actionLabel}`}
               </button>
               {value && (
                 <button

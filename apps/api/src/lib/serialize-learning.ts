@@ -1,16 +1,27 @@
-import type { Certificate, Course, CourseEnrollment, CourseLesson, CourseModule, CourseRating, LearningTrack } from '@prisma/client'
+import type {
+  Certificate,
+  CertificateRequest,
+  Course,
+  CourseEnrollment,
+  CourseLesson,
+  CourseModule,
+  CourseRating,
+  LearningTrack,
+} from '@prisma/client'
 import type {
   CertificateDTO,
   CourseCardDTO,
   CourseDetailDTO,
   CourseEnrollmentSummary,
   CourseLessonDTO,
+  CourseInstructorRef,
   CourseModuleDTO,
   CourseRatingDTO,
   EnrollmentDTO,
   LearningTrackDTO,
   PublicCertificateDTO,
 } from '@legends/shared'
+import { parseCourseLessonBlocks } from '@legends/shared'
 
 /** Lê uma coluna Json que guarda `string[]` (competências, objetivos). */
 export function toStringArray(value: unknown): string[] {
@@ -33,6 +44,14 @@ export interface CourseCardExtras {
   totalStudents: number
   /** Soma da duração das aulas — derivada, o curso não guarda um total próprio. */
   durationMinutes: number
+  /**
+   * Catálogo já resolvido (Documento 4, seções 9.6 e 9.7). Vem de fora porque o
+   * serializer é síncrono e puro: quem consulta é o service, que já carrega o
+   * curso com os includes e evita um N+1 por card.
+   */
+  categoryName: string | null
+  competencies: string[]
+  instructors: CourseInstructorRef[]
 }
 
 function toEnrollmentSummary(enrollment: CourseEnrollment, progressPct: number): CourseEnrollmentSummary {
@@ -51,11 +70,15 @@ export function toCourseCardDTO(course: Course, extras: CourseCardExtras): Cours
     title: course.title,
     shortDescription: course.shortDescription,
     coverUrl: course.coverUrl,
-    category: course.category,
+    icon: course.icon,
+    primaryColor: course.primaryColor,
+    // Nomes, não ids: o card e o detalhe só exibem. Quem trabalha com id é a
+    // autoria (`AdminCourseDTO`), que é formulário.
+    category: extras.categoryName,
     level: course.level,
+    instructorName: extras.instructors[0]?.name ?? null,
     durationMinutes: extras.durationMinutes,
-    instructorName: course.instructorName,
-    competencies: toStringArray(course.competencies),
+    competencies: extras.competencies,
     mandatory: course.mandatory,
     certificateEnabled: course.certificateEnabled,
     averageRating: extras.averageRating,
@@ -73,9 +96,9 @@ export function toCourseLessonDTO(lesson: CourseLesson, completed: boolean, quiz
     moduleId: lesson.moduleId,
     title: lesson.title,
     description: lesson.description,
-    type: lesson.type,
-    videoUrl: lesson.videoUrl,
-    contentHtml: lesson.contentHtml,
+    // `parse` e não cast: `contentBlocks` é Json, e bloco que não casa com o
+    // formato é descartado em vez de derrubar a aula (ver o módulo do bloco).
+    blocks: parseCourseLessonBlocks(lesson.contentBlocks),
     durationMinutes: lesson.durationMinutes,
     sortOrder: lesson.sortOrder,
     completed,
@@ -115,6 +138,8 @@ export function toCourseDetailDTO(
     totalLessons: number
     myRating: CourseRating | null
     certificate: (Certificate & { user: { name: string } }) | null
+    /** Solicitação de certificado desta pessoa neste curso, quando existe. */
+    certificateRequest?: CertificateRequest | null
     /** Aula → id do quiz daquela aula, quando houver. */
     quizByLessonId?: Map<string, string>
     /** Id do quiz final do curso (`lessonId: null`), quando houver. */
@@ -126,7 +151,9 @@ export function toCourseDetailDTO(
     description: course.description,
     objectives: toStringArray(course.objectives),
     prerequisites: course.prerequisites,
-    instructorBio: course.instructorBio,
+    bannerUrl: course.bannerUrl,
+    introVideoUrl: course.introVideoUrl,
+    instructors: extras.instructors,
     modules: course.modules.map((module) =>
       toCourseModuleDTO(module, extras.completedLessonIds, extras.quizByLessonId),
     ),
@@ -134,6 +161,13 @@ export function toCourseDetailDTO(
     completedLessons: extras.completedLessonIds.size,
     myRating: extras.myRating ? toCourseRatingDTO(extras.myRating) : null,
     certificate: extras.certificate ? toCertificateDTO(extras.certificate) : null,
+    certificateRequest: extras.certificateRequest
+      ? {
+          status: extras.certificateRequest.status,
+          rejectionReason: extras.certificateRequest.rejectionReason,
+          createdAt: extras.certificateRequest.createdAt.toISOString(),
+        }
+      : null,
     finalQuizId: extras.finalQuizId ?? null,
   }
 }

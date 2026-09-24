@@ -115,6 +115,14 @@ export interface AnalyticsEventMap {
 
   // Administração — mostra qual bloco do /admin cada empresa realmente usa
   admin_screen_viewed: { screen: string }
+
+  // Guia AI First (Comunidade INOVA) — conteúdo de referência, restrito à EMR.
+  inova_guia_bussola_completada: { caminho: 'ia' | 'ia-pessoa' | 'pessoa' }
+  inova_guia_situacao_aberta: { situacaoId: string }
+  inova_guia_prompt_copiado: { promptId: string }
+  inova_guia_maturidade_respondida: { nivel: number }
+  inova_guia_lideranca_aberta: Record<string, never>
+  inova_guia_seguranca_aberta: Record<string, never>
 }
 
 export type AnalyticsEventName = keyof AnalyticsEventMap
@@ -148,6 +156,12 @@ export const ANALYTICS_EVENT_NAMES = [
   'one_on_one_accepted',
   'office_entered',
   'admin_screen_viewed',
+  'inova_guia_bussola_completada',
+  'inova_guia_situacao_aberta',
+  'inova_guia_prompt_copiado',
+  'inova_guia_maturidade_respondida',
+  'inova_guia_lideranca_aberta',
+  'inova_guia_seguranca_aberta',
 ] as const satisfies readonly AnalyticsEventName[]
 
 /**
@@ -163,6 +177,12 @@ export const WEB_ANALYTICS_EVENT_NAMES = [
   'admin_screen_viewed',
   'highlight_card_shared',
   'office_entered',
+  'inova_guia_bussola_completada',
+  'inova_guia_situacao_aberta',
+  'inova_guia_prompt_copiado',
+  'inova_guia_maturidade_respondida',
+  'inova_guia_lideranca_aberta',
+  'inova_guia_seguranca_aberta',
 ] as const satisfies readonly AnalyticsEventName[]
 
 export type WebAnalyticsEventName = (typeof WEB_ANALYTICS_EVENT_NAMES)[number]
@@ -196,6 +216,12 @@ export const ANALYTICS_EVENT_LABELS: Record<AnalyticsEventName, string> = {
   one_on_one_accepted: '1:1 aceito',
   office_entered: 'Escritório virtual',
   admin_screen_viewed: 'Tela de administração',
+  inova_guia_bussola_completada: 'Bússola do Guia concluída',
+  inova_guia_situacao_aberta: 'Situação do Guia aberta',
+  inova_guia_prompt_copiado: 'Prompt do Guia copiado',
+  inova_guia_maturidade_respondida: 'Autodiagnóstico de maturidade respondido',
+  inova_guia_lideranca_aberta: 'Seção de Liderança do Guia aberta',
+  inova_guia_seguranca_aberta: 'Seção de Segurança do Guia aberta',
 }
 
 /** Rótulo do evento, com fallback para o nome cru — o catálogo pode crescer. */

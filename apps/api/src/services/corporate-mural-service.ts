@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client'
+import type { User } from '@prisma/client'
 import {
   CORPORATE_COMMENT_MAX_LENGTH,
   CORPORATE_POST_AI_PROMPT_MAX_LENGTH,
@@ -9,7 +10,10 @@ import {
   MAX_CORPORATE_POST_ATTACHMENTS,
   MAX_CORPORATE_POST_MENTIONS,
   canAdminister,
+  audienceHasSectors,
   canModerateCorporatePost,
+  isLeaderRole,
+  LEADER_ROLES,
   canPublishCorporatePostDirectly,
   isCollapsibleCorporatePost,
   isGiphyHost,
@@ -27,6 +31,12 @@ import {
   type CorporatePostReactorsResponse,
   type GenerateCorporatePostResponse,
   type RichDoc,
+  CORPORATE_POST_POLL_QUESTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_OPTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_MIN_OPTIONS,
+  CORPORATE_POST_POLL_MAX_OPTIONS,
+  type CreateCorporatePostPollRequest,
+  isInCorporatePostAudience,
 } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { CorporateMuralError } from '../lib/corporate-mural-error'
@@ -40,22 +50,47 @@ import { recordAuditLog } from './audit-log-service'
 import { buildCorporatePostPrompt, parseGeneratedCorporatePost } from '../lib/corporate-post-prompt'
 import { requestAgentCompletion, type AgentCompletionFn } from '../lib/agent-client'
 import { resolveAiCredentials } from './ai-settings-service'
+import { resolveCampaignPromptTemplate } from './campaign-settings-service'
+import { corporateMuralHub } from '../lib/corporate-mural-hub'
+import { notifyCorporatePostMention, notifyCorporatePostPublished } from './notification-service'
 
 // Reexportado para os call sites (rotas e testes) não mudarem de import: a
 // classe mora em `lib/` para o prompt da IA poder lançá-la sem ciclo.
 export { CorporateMuralError } from '../lib/corporate-mural-error'
 
-export const corporatePostInclude = {
-  // `sector` vem junto do autor porque a autoria do card exibe "nome · setor".
-  author: { include: { sector: { select: { id: true, name: true } } } },
-  reactions: { include: { user: true }, orderBy: { createdAt: 'asc' } },
-  mentions: true,
-  sectors: { include: { sector: { select: { id: true, name: true } } } },
-  attachments: { orderBy: { createdAt: 'asc' } },
-  _count: { select: { comments: true } },
-} as const
+/**
+ * Relações que todo post carrega para virar DTO.
+ *
+ * É **função** por causa de `reads`: o que interessa é se QUEM ESTÁ OLHANDO já
+ * leu, não a lista de leitores. Com `@@unique([postId, userId])`, o filtro por
+ * viewer devolve 0 ou 1 linha por post; sem ele, uma página do feed traria todos
+ * os leitores de todos os comunicados só para responder um booleano — e o custo
+ * cresceria com o tamanho da empresa.
+ */
+export function corporatePostInclude(viewerId: string) {
+  return {
+    // `sector` vem junto do autor porque a autoria do card exibe "nome · setor".
+    author: { include: { sector: { select: { id: true, name: true } } } },
+    reactions: { include: { user: true }, orderBy: { createdAt: 'asc' } },
+    mentions: true,
+    sectors: { include: { sector: { select: { id: true, name: true } } } },
+    attachments: { orderBy: { createdAt: 'asc' } },
+    // A enquete traz a contagem agregada por opção e, dos votos, SÓ o do
+    // próprio viewer. É o que impede id de votante alheio de sair daqui — o
+    // resultado é escondido na API, não na tela.
+    poll: {
+      include: {
+        options: { orderBy: { position: 'asc' }, include: { _count: { select: { votes: true } } } },
+        votes: { where: { userId: viewerId }, select: { optionId: true } },
+      },
+    },
+    reads: { where: { userId: viewerId }, select: { readAt: true } },
+    tag: true,
+    _count: { select: { comments: true } },
+  } as const
+}
 export type CorporatePostWithRelations = Prisma.CorporatePostGetPayload<{
-  include: typeof corporatePostInclude
+  include: ReturnType<typeof corporatePostInclude>
 }>
 
 export const corporatePostCommentInclude = {
@@ -165,7 +200,13 @@ export interface CorporateMuralViewer {
 function audienceWhere(viewer: CorporateMuralViewer): Prisma.CorporatePostWhereInput {
   if (canModerateCorporatePost(viewer.role, viewer.adminAccess)) return {}
   return {
-    OR: [{ audienceScope: 'ALL' }, { sectors: { some: { sectorId: viewer.sectorId } } }],
+    OR: [
+      { audienceScope: 'ALL' },
+      { sectors: { some: { sectorId: viewer.sectorId } } },
+      // Comunicado da liderança: alcança pelo PAPEL, não pelo setor. Quem não
+      // lidera nunca casa aqui, e quem modera já entrou pelo atalho acima.
+      ...(isLeaderRole(viewer.role) ? [{ audienceScope: 'LEADERS' as const }] : []),
+    ],
   }
 }
 
@@ -196,7 +237,9 @@ async function resolveAudienceSectors(
   sectorIds: string[] | undefined,
   companyId: string,
 ): Promise<string[]> {
-  if (audience === 'ALL') return []
+  // `ALL` e `LEADERS` não têm setor: o primeiro é a empresa toda, o segundo
+  // recorta por papel. Exigir setor neles seria pedir um dado sem significado.
+  if (!audienceHasSectors(audience)) return []
   const unique = [...new Set(sectorIds ?? [])]
   if (unique.length === 0) {
     throw new CorporateMuralError('Escolha ao menos um setor para o público-alvo.', 400)
@@ -223,6 +266,52 @@ function assertGifHost(gif?: AttachedGif): void {
   if (!isGiphyHost(hostname)) {
     throw new CorporateMuralError('GIF inválido.', 400)
   }
+}
+
+/**
+ * Pergunta e opções da enquete, já limpas — ou `null` quando não há enquete.
+ *
+ * Mesmos limites da enquete da Resenha (`normalizePoll`, em review-service): é
+ * a mesma pergunta feita em outro lugar, e divergir criaria duas regras para o
+ * usuário decorar. Opções iguais depois do trim são recusadas comparando sem
+ * caixa em pt-BR — "Sim" e "sim" na mesma enquete é erro de digitação, não
+ * escolha.
+ */
+function normalizePoll(poll?: CreateCorporatePostPollRequest | null): {
+  question: string
+  options: string[]
+} | null {
+  if (!poll) return null
+  const question = poll.question.trim()
+  if (question.length === 0 || question.length > CORPORATE_POST_POLL_QUESTION_MAX_LENGTH) {
+    throw new CorporateMuralError(
+      `A pergunta precisa ter de 1 a ${CORPORATE_POST_POLL_QUESTION_MAX_LENGTH} caracteres.`,
+      400,
+    )
+  }
+  const options = (poll.options ?? []).map((opt) => opt.trim())
+  if (
+    options.length < CORPORATE_POST_POLL_MIN_OPTIONS ||
+    options.length > CORPORATE_POST_POLL_MAX_OPTIONS
+  ) {
+    throw new CorporateMuralError(
+      `A enquete precisa ter de ${CORPORATE_POST_POLL_MIN_OPTIONS} a ${CORPORATE_POST_POLL_MAX_OPTIONS} opções.`,
+      400,
+    )
+  }
+  for (const option of options) {
+    if (option.length === 0 || option.length > CORPORATE_POST_POLL_OPTION_MAX_LENGTH) {
+      throw new CorporateMuralError(
+        `Cada opção precisa ter de 1 a ${CORPORATE_POST_POLL_OPTION_MAX_LENGTH} caracteres.`,
+        400,
+      )
+    }
+  }
+  const distintas = new Set(options.map((opt) => opt.toLocaleLowerCase('pt-BR')))
+  if (distintas.size !== options.length) {
+    throw new CorporateMuralError('Use opções diferentes.', 400)
+  }
+  return { question, options }
 }
 
 /** Um post/comentário aceita no máximo um anexo: gif OU imagem. */
@@ -295,6 +384,15 @@ export async function createPost(input: {
   attachments?: CorporatePostAttachmentInput[]
   audience?: CorporatePostAudience
   audienceSectorIds?: string[]
+  /** Tipo de comunicação (seção 13). Opcional — comunicado sem tipo é válido. */
+  tagId?: string | null
+  /**
+   * Instante marcado para a publicação (Documento 4, seção 12). Ignorado
+   * quando o autor cai na fila de aprovação: agendar o que ainda pode ser
+   * recusado é prometer uma publicação que não se controla.
+   */
+  publishAt?: Date | null
+  poll?: CreateCorporatePostPollRequest | null
   companyId: string
   /**
    * Cliente de uma transação já aberta pelo chamador. Existe para publicar um
@@ -306,7 +404,10 @@ export async function createPost(input: {
 }): Promise<CorporatePostWithRelations> {
   assertSingleAttachment(input.gif, input.image)
   const attachments = assertAttachments(input.attachments)
-  const hasAttachment = Boolean(input.gif || input.image || attachments.length)
+  const poll = normalizePoll(input.poll)
+  // A enquete conta como conteúdo: post que é só a pergunta é legítimo, e
+  // exigir texto junto obrigaria a escrever a pergunta duas vezes.
+  const hasAttachment = Boolean(input.gif || input.image || attachments.length || poll)
   const { content, contentJson } = assertPostBody(input.body, input.content ?? '', hasAttachment)
   const title = normalizeTitle(input.title)
   assertGifHost(input.gif)
@@ -323,7 +424,9 @@ export async function createPost(input: {
     [...(input.mentionedUserIds ?? []), ...(input.body ? richDocMentionIds(input.body) : [])],
     input.companyId,
   )
-  const status = canPublishCorporatePostDirectly(author.role, author.adminAccess) ? 'PUBLISHED' : 'PENDING'
+  const publicaDireto = canPublishCorporatePostDirectly(author.role, author.adminAccess)
+  const publishAt = publicaDireto ? (input.publishAt ?? null) : null
+  const status = publicaDireto ? (publishAt ? 'SCHEDULED' : 'PUBLISHED') : 'PENDING'
   const db = input.tx ?? scopedPrisma(input.companyId)
   return db.corporatePost.create({
     data: {
@@ -333,16 +436,35 @@ export async function createPost(input: {
       ...(contentJson ? { contentJson: contentJson as unknown as Prisma.InputJsonValue } : {}),
       ...(title ? { title } : {}),
       status,
+      ...(publishAt ? { publishAt } : {}),
       audienceScope,
       ...(input.gif ? { gifUrl: input.gif.url, gifWidth: input.gif.width, gifHeight: input.gif.height } : {}),
       ...(input.image
         ? { imageUrl: input.image.url, imageWidth: input.image.width, imageHeight: input.image.height }
         : {}),
+      ...(input.tagId ? { tagId: input.tagId } : {}),
       ...(sectorIds.length
         ? { sectors: { create: sectorIds.map((sectorId) => ({ sectorId, companyId: input.companyId })) } }
         : {}),
       ...(attachments.length
         ? { attachments: { create: attachments.map((att) => ({ ...att, companyId: input.companyId })) } }
+        : {}),
+      ...(poll
+        ? {
+            poll: {
+              create: {
+                question: poll.question,
+                companyId: input.companyId,
+                options: {
+                  create: poll.options.map((text, position) => ({
+                    text,
+                    position,
+                    companyId: input.companyId,
+                  })),
+                },
+              },
+            },
+          }
         : {}),
       ...(mentions.length
         ? {
@@ -356,8 +478,60 @@ export async function createPost(input: {
           }
         : {}),
     },
-    include: corporatePostInclude,
+    include: corporatePostInclude(input.authorId),
   })
+}
+
+/**
+ * Comunicado no ar: menções, sininho do público-alvo e os dois eventos de
+ * WebSocket. `post:published` é o que vira toast — magro de propósito, só o id:
+ * o hub é canal único e global, então título no broadcast vazaria comunicado de
+ * uma empresa para conexão de outra (ver `corporate-mural-hub.ts`).
+ *
+ * Mora no service, e não na rota, porque quem publica não é só a request:
+ * o scheduler dos agendados (Documento 4, seção 12) publica no tick e precisa
+ * avisar exatamente do mesmo jeito. Duas cópias divergiriam no primeiro ajuste,
+ * e comunicado agendado que sai sem notificação não é comunicado.
+ *
+ * Best-effort dos dois lados: falha de notificação é logada e não desfaz a
+ * publicação.
+ */
+export async function announceCorporatePostPublished(
+  post: {
+    id: string
+    title: string | null
+    authorId: string
+    mentions: { userId: string }[]
+    sectors: { sectorId: string }[]
+    audienceScope: CorporatePostAudience
+  },
+  companyId: string,
+  log: { error: (err: unknown) => void },
+): Promise<void> {
+  try {
+    await notifyCorporatePostMention(
+      { recipientIds: post.mentions.map((m) => m.userId), actorId: post.authorId, postId: post.id },
+      companyId,
+    )
+  } catch (notifyErr) {
+    log.error(notifyErr)
+  }
+  try {
+    await notifyCorporatePostPublished(
+      {
+        postId: post.id,
+        title: post.title,
+        authorId: post.authorId,
+        sectorIds: post.sectors.map((s) => s.sectorId),
+        audience: post.audienceScope,
+      },
+      companyId,
+    )
+  } catch (notifyErr) {
+    log.error(notifyErr)
+  }
+  corporateMuralHub.broadcast({ type: 'feed:changed' })
+  corporateMuralHub.broadcast({ type: 'post:published', postId: post.id })
 }
 
 /**
@@ -383,6 +557,10 @@ export async function updatePost(input: {
   attachments?: CorporatePostAttachmentInput[]
   audience?: CorporatePostAudience
   audienceSectorIds?: string[]
+  /** `null` limpa o tipo; `undefined` não mexe. */
+  tagId?: string | null
+  /** `null` remove a enquete; `undefined` não mexe. Só antes do primeiro voto. */
+  poll?: CreateCorporatePostPollRequest | null
 }): Promise<CorporatePostWithRelations> {
   const db = scopedPrisma(input.companyId)
   const existing = await db.corporatePost.findUnique({
@@ -397,6 +575,7 @@ export async function updatePost(input: {
       gifUrl: true,
       imageUrl: true,
       _count: { select: { attachments: true } },
+      poll: { select: { id: true, _count: { select: { votes: true } } } },
     },
   })
   if (!existing) throw new CorporateMuralError('Publicação não encontrada.', 404)
@@ -410,8 +589,19 @@ export async function updatePost(input: {
   // `attachments` ausente no corpo significa "não mexa nos anexos" — então o
   // que conta para "o post tem anexo?" são os que já estão gravados.
   const attachments = input.attachments === undefined ? null : assertAttachments(input.attachments)
+  // A enquete congela no primeiro voto: trocar a pergunta ou uma opção depois
+  // que alguém votou transforma o resultado em resposta a outra coisa. Antes
+  // disso — post na fila de aprovação, tipicamente — corrigir é legítimo.
+  const poll = input.poll === undefined ? undefined : normalizePoll(input.poll)
+  if (input.poll !== undefined && existing.poll && existing.poll._count.votes > 0) {
+    throw new CorporateMuralError('A enquete não pode mudar depois do primeiro voto.', 409)
+  }
+  const temEnqueteDepois = input.poll === undefined ? Boolean(existing.poll) : poll !== null
   const hasAttachment = Boolean(
-    existing.gifUrl || existing.imageUrl || (attachments === null ? existing._count.attachments : attachments.length),
+    existing.gifUrl ||
+      existing.imageUrl ||
+      (attachments === null ? existing._count.attachments : attachments.length) ||
+      temEnqueteDepois,
   )
   const textChanged = input.body !== undefined || input.content !== undefined
   const { content, contentJson } = textChanged
@@ -444,6 +634,28 @@ export async function updatePost(input: {
         })
       }
     }
+    if (input.poll !== undefined) {
+      // Apaga e recria em vez de casar opção a opção: sem voto gravado não há
+      // nada a preservar, e reconciliar posição por posição só criaria caminhos
+      // para divergir.
+      await tx.corporatePostPoll.deleteMany({ where: { postId: input.postId } })
+      if (poll) {
+        await tx.corporatePostPoll.create({
+          data: {
+            postId: input.postId,
+            question: poll.question,
+            companyId: input.companyId,
+            options: {
+              create: poll.options.map((text, position) => ({
+                text,
+                position,
+                companyId: input.companyId,
+              })),
+            },
+          },
+        })
+      }
+    }
     const updated = await tx.corporatePost.update({
       where: { id: input.postId },
       data: {
@@ -452,22 +664,48 @@ export async function updatePost(input: {
           : {}),
         ...(title !== undefined ? { title } : {}),
         ...(input.audience !== undefined ? { audienceScope } : {}),
+        // `null` limpa o tipo, `undefined` não mexe — trocar a categoria não é
+        // edição de texto, então não carimba `editedAt`.
+        ...(input.tagId !== undefined ? { tagId: input.tagId } : {}),
         ...(titleChanged || contentChanged ? { editedAt: new Date() } : {}),
       },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
     await recordAuditLog({
       actorId: input.actorId,
       entityType: 'CorporatePost',
       entityId: input.postId,
       action: 'UPDATE',
-      before: { title: existing.title, content: existing.content, audienceScope: existing.audienceScope },
-      after: { title: updated.title, content: updated.content, audienceScope: updated.audienceScope },
+      before: {
+        subject: auditPostSubject(existing),
+        title: existing.title,
+        content: existing.content,
+        audienceScope: existing.audienceScope,
+      },
+      after: {
+        subject: auditPostSubject(updated),
+        title: updated.title,
+        content: updated.content,
+        audienceScope: updated.audienceScope,
+      },
       companyId: input.companyId,
       tx: tx as unknown as Prisma.TransactionClient,
     })
     return updated
   })
+}
+
+/**
+ * Rótulo curto do comunicado para a linha da auditoria (`subject`, lido por
+ * `auditSubjectName`) — a maioria dos comunicados não tem título (é só texto
+ * corrido), e sem isso a tela de Auditoria caía no cuid puro do post, o que
+ * ninguém reconhece de cabeça.
+ */
+function auditPostSubject(post: { title: string | null; content: string }): string {
+  const title = post.title?.trim()
+  if (title) return title
+  const trimmed = post.content.trim()
+  return trimmed.length > 60 ? `${trimmed.slice(0, 60)}…` : trimmed
 }
 
 /**
@@ -484,10 +722,16 @@ export async function approvePost(input: {
   const db = scopedPrisma(input.companyId)
   const existing = await db.corporatePost.findUnique({
     where: { id: input.postId },
-    select: { id: true, status: true, authorId: true },
+    select: { id: true, status: true, authorId: true, title: true, content: true },
   })
   if (!existing) throw new CorporateMuralError('Publicação não encontrada.', 404)
   if (existing.status === 'PUBLISHED') throw new CorporateMuralError('Este comunicado já foi publicado.', 409)
+  // A fila existe para um segundo par de olhos ver o que o autor escreveu — o
+  // guard da rota (admin/subadmin) não basta sozinho: um autor com acesso
+  // administrativo delegado passaria nele e aprovaria o próprio comunicado.
+  if (existing.authorId === input.actorId) {
+    throw new CorporateMuralError('Você não pode aprovar o próprio comunicado.', 403)
+  }
 
   return db.$transaction(async (tx) => {
     const claimed = await tx.corporatePost.updateMany({
@@ -506,15 +750,15 @@ export async function approvePost(input: {
     if (claimed.count === 0) throw new CorporateMuralError('Este comunicado já foi revisado.', 409)
     const updated = await tx.corporatePost.findUniqueOrThrow({
       where: { id: input.postId },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
     await recordAuditLog({
       actorId: input.actorId,
       entityType: 'CorporatePost',
       entityId: input.postId,
       action: 'UPDATE',
-      before: { status: existing.status },
-      after: { status: updated.status },
+      before: { subject: auditPostSubject(existing), status: existing.status },
+      after: { subject: auditPostSubject(existing), status: updated.status },
       companyId: input.companyId,
       tx: tx as unknown as Prisma.TransactionClient,
     })
@@ -532,10 +776,13 @@ export async function rejectPost(input: {
   const db = scopedPrisma(input.companyId)
   const existing = await db.corporatePost.findUnique({
     where: { id: input.postId },
-    select: { id: true, status: true, authorId: true },
+    select: { id: true, status: true, authorId: true, title: true, content: true },
   })
   if (!existing) throw new CorporateMuralError('Publicação não encontrada.', 404)
   if (existing.status !== 'PENDING') throw new CorporateMuralError('Este comunicado já foi revisado.', 409)
+  if (existing.authorId === input.actorId) {
+    throw new CorporateMuralError('Você não pode recusar o próprio comunicado.', 403)
+  }
 
   return db.$transaction(async (tx) => {
     const claimed = await tx.corporatePost.updateMany({
@@ -550,15 +797,15 @@ export async function rejectPost(input: {
     if (claimed.count === 0) throw new CorporateMuralError('Este comunicado já foi revisado.', 409)
     const updated = await tx.corporatePost.findUniqueOrThrow({
       where: { id: input.postId },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
     await recordAuditLog({
       actorId: input.actorId,
       entityType: 'CorporatePost',
       entityId: input.postId,
       action: 'UPDATE',
-      before: { status: existing.status },
-      after: { status: updated.status, rejectionReason: updated.rejectionReason },
+      before: { subject: auditPostSubject(existing), status: existing.status },
+      after: { subject: auditPostSubject(existing), status: updated.status, rejectionReason: updated.rejectionReason },
       companyId: input.companyId,
       tx: tx as unknown as Prisma.TransactionClient,
     })
@@ -579,10 +826,12 @@ export async function listPendingPosts(
   const mine = opts.mine || !moderator
   return scopedPrisma(viewer.companyId).corporatePost.findMany({
     where: {
-      status: mine ? { in: ['PENDING', 'REJECTED'] } : 'PENDING',
+      // O agendado entra em "Meus envios": é o único lugar onde quem marcou a
+      // data confere o que marcou. Sem isso, agendar seria publicar num buraco.
+      status: mine ? { in: ['PENDING', 'SCHEDULED', 'REJECTED'] } : 'PENDING',
       ...(mine ? { authorId: viewer.userId } : {}),
     },
-    include: corporatePostInclude,
+    include: corporatePostInclude(viewer.userId),
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: 100,
   })
@@ -596,23 +845,67 @@ export async function listPendingPosts(
  * quebraria em `limit: 1`: o keyset devolveria zero linhas, `nextCursor`
  * não teria de onde sair, e os próximos posts seriam pulados.
  */
+/**
+ * Agendados do feed da empresa numa janela de datas — o que o calendário
+ * editorial mostra ao lado dos itens de campanha.
+ *
+ * Sem recorte por autor, ao contrário de `listPendingPosts`: ali a pergunta é
+ * "o que EU mandei e ainda não saiu", aqui é "o que a empresa vai publicar
+ * neste mês". Quem pode fazer a pergunta é a rota que chama, não esta função.
+ *
+ * `PENDING` fica de fora de propósito: comunicado que ainda pode ser recusado
+ * não tem data marcada (`createPost` ignora `publishAt` de quem cai na fila),
+ * então não teria onde cair na grade.
+ */
+export function listScheduledFeedPosts(
+  companyId: string,
+  range: { from: Date; to: Date },
+): Promise<ScheduledFeedPost[]> {
+  return scopedPrisma(companyId).corporatePost.findMany({
+    where: { status: 'SCHEDULED', publishAt: { gte: range.from, lte: range.to } },
+    select: {
+      id: true,
+      title: true,
+      content: true,
+      publishAt: true,
+      createdAt: true,
+      author: { select: { id: true, name: true } },
+    },
+    orderBy: { publishAt: 'asc' },
+  })
+}
+
+export interface ScheduledFeedPost {
+  id: string
+  title: string | null
+  content: string
+  publishAt: Date | null
+  createdAt: Date
+  author: { id: string; name: string }
+}
+
 export async function listFeed(
   viewer: CorporateMuralViewer,
-  opts: { cursor?: string; limit: number },
+  opts: { cursor?: string; limit: number; tagId?: string },
 ): Promise<{ items: CorporatePostWithRelations[]; nextCursor: string | null }> {
   const db = scopedPrisma(viewer.companyId)
   const decoded = opts.cursor ? decodeCursor(opts.cursor) : null
+  // Filtro por tipo de comunicação (seção 13). É do SERVIDOR, e não do cliente:
+  // o feed pagina por cursor, e filtrar depois de paginar esconderia o
+  // comunicado que está na página seguinte.
+  const tagFilter: Prisma.CorporatePostWhereInput[] = opts.tagId ? [{ tagId: opts.tagId }] : []
 
   // O fixado sai do keyset e entra prefixado só na 1ª página. Ordenar por
   // `pinnedAt` dentro do keyset obrigaria a mudar o formato do cursor sem
   // ganho: no máximo um post fica fixado por vez.
   const pinned = await db.corporatePost.findFirst({
-    where: feedWhere(viewer, [{ pinnedAt: { not: null } }]),
-    include: corporatePostInclude,
+    where: feedWhere(viewer, [{ pinnedAt: { not: null } }, ...tagFilter]),
+    include: corporatePostInclude(viewer.userId),
     orderBy: { pinnedAt: 'desc' },
   })
 
   const where: Prisma.CorporatePostWhereInput = feedWhere(viewer, [
+    ...tagFilter,
     ...(pinned ? [{ id: { not: pinned.id } }] : []),
     ...(decoded
       ? [
@@ -627,7 +920,7 @@ export async function listFeed(
   ])
   const rows = await db.corporatePost.findMany({
     where,
-    include: corporatePostInclude,
+    include: corporatePostInclude(viewer.userId),
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: opts.limit + 1,
   })
@@ -659,7 +952,7 @@ export async function getPost(postId: string, viewer: CorporateMuralViewer): Pro
           : { OR: [{ status: 'PUBLISHED' }, { authorId: viewer.userId }] },
       ],
     },
-    include: corporatePostInclude,
+    include: corporatePostInclude(viewer.userId),
   })
   if (!post) throw new CorporateMuralError('Publicação não encontrada.', 404)
   return post
@@ -672,6 +965,126 @@ export async function getPost(postId: string, viewer: CorporateMuralViewer): Pro
  * Interagir exige post **publicado** — nem o autor comenta o próprio pendente,
  * que ainda não existe para a empresa.
  */
+/**
+ * Voto na enquete do post.
+ *
+ * Três recusas distintas, de propósito — cada uma diz uma coisa diferente para
+ * quem está do outro lado:
+ *
+ * - **404** o post ou a opção não existem no escopo de quem pediu;
+ * - **409** o post existe mas ainda não está publicado (pendente ou agendado):
+ *   não é "não encontrei", é "ainda não abriu";
+ * - **403** quem pede está fora do público-alvo. É o caso do ADMIN moderando um
+ *   comunicado de outro setor: ele enxerga, mas não participa.
+ */
+export async function voteCorporatePostPoll(input: {
+  postId: string
+  optionId: string
+  viewer: CorporateMuralViewer
+}): Promise<CorporatePostWithRelations> {
+  const { viewer } = input
+  const db = scopedPrisma(viewer.companyId)
+  const post = await db.corporatePost.findUnique({
+    where: { id: input.postId },
+    select: {
+      id: true,
+      status: true,
+      audienceScope: true,
+      sectors: { select: { sectorId: true } },
+      poll: { select: { id: true, options: { select: { id: true } } } },
+    },
+  })
+  if (!post || !post.poll) {
+    throw new CorporateMuralError('Enquete não encontrada.', 404)
+  }
+  if (post.status !== 'PUBLISHED') {
+    throw new CorporateMuralError('Esta enquete ainda não está aberta para votos.', 409)
+  }
+  if (!isInCorporatePostAudience(post, viewer)) {
+    throw new CorporateMuralError('Esta enquete é de outro público.', 403)
+  }
+  if (!post.poll.options.some((option) => option.id === input.optionId)) {
+    throw new CorporateMuralError('Opção da enquete não encontrada.', 404)
+  }
+
+  const jaVotou = await prisma.corporatePostPollVote.findUnique({
+    where: { pollId_userId: { pollId: post.poll.id, userId: viewer.userId } },
+    select: { id: true },
+  })
+  if (jaVotou) {
+    throw new CorporateMuralError('Você já votou nesta enquete.', 409)
+  }
+  try {
+    await db.corporatePostPollVote.create({
+      data: {
+        pollId: post.poll.id,
+        optionId: input.optionId,
+        userId: viewer.userId,
+        companyId: viewer.companyId,
+      },
+    })
+  } catch (err) {
+    // A checagem acima cobre o caminho normal; a unique cobre os dois cliques
+    // que chegaram juntos. As duas respondem a mesma coisa.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new CorporateMuralError('Você já votou nesta enquete.', 409)
+    }
+    throw err
+  }
+
+  const atualizado = await db.corporatePost.findUnique({
+    where: { id: input.postId },
+    include: corporatePostInclude(viewer.userId),
+  })
+  if (!atualizado) throw new CorporateMuralError('Publicação não encontrada.', 404)
+  return atualizado
+}
+
+/**
+ * Quem votou em quê. Só para quem já votou — antes disso, ver a lista nominal
+ * seria ver o resultado sem pagar o preço de se posicionar, que é exatamente o
+ * que a enquete esconde.
+ */
+export async function listCorporatePostPollVotes(input: {
+  postId: string
+  viewer: CorporateMuralViewer
+}): Promise<{
+  pollId: string
+  question: string
+  /** `User` cru: quem serializa é a rota, com `toReactorRef` — é ele que
+   *  sanitiza estilo e opções de avatar gravados por versões antigas. */
+  options: { optionId: string; text: string; voters: User[] }[]
+}> {
+  const { viewer } = input
+  const poll = await scopedPrisma(viewer.companyId).corporatePostPoll.findUnique({
+    where: { postId: input.postId },
+    include: {
+      votes: { where: { userId: viewer.userId }, select: { id: true } },
+      options: {
+        orderBy: { position: 'asc' },
+        include: {
+          votes: { orderBy: { createdAt: 'asc' }, include: { user: true } },
+        },
+      },
+    },
+  })
+  if (!poll) {
+    throw new CorporateMuralError('Enquete não encontrada.', 404)
+  }
+  if (poll.votes.length === 0) {
+    throw new CorporateMuralError('Vote na enquete para ver quem votou.', 403)
+  }
+  return {
+    pollId: poll.id,
+    question: poll.question,
+    options: poll.options.map((option) => ({
+      optionId: option.id,
+      text: option.text,
+      voters: option.votes.map((vote) => vote.user),
+    })),
+  }
+}
+
 async function requireVisiblePost(
   postId: string,
   viewer: CorporateMuralViewer,
@@ -700,7 +1113,24 @@ export async function deletePost(input: {
   if (existing.authorId !== input.userId && !canAdminister(input)) {
     throw new CorporateMuralError('Sem permissão para excluir esta publicação.', 403)
   }
-  await db.corporatePost.delete({ where: { id: input.postId } })
+  /**
+   * O item do calendário editorial cai junto (Documento 4, seção 13.2).
+   *
+   * `CampaignPost.publishedPost` está declarado `onDelete: SetNull`, com a
+   * justificativa de que apagar o post do mural não pode derrubar o histórico
+   * editorial. A consequência era a que a G&G viu: apagado o comunicado, a
+   * linha ficava com `status: PUBLISHED` e `publishedPostId: null`, e o
+   * calendário de campanhas seguia mostrando um comunicado que não existe mais.
+   *
+   * A reversão é deliberada: o "histórico" que o `SetNull` preservava é uma
+   * linha órfã afirmando que algo foi publicado quando não foi. O calendário É
+   * a lista dos `CampaignPost` — não há como tirar o item da tela sem tirar a
+   * linha. Cai só o item ligado a este post; o resto da campanha fica.
+   */
+  await db.$transaction([
+    db.campaignPost.deleteMany({ where: { publishedPostId: input.postId } }),
+    db.corporatePost.delete({ where: { id: input.postId } }),
+  ])
   // Só ato de moderação vira log: apagar o próprio post é uso normal do mural.
   if (existing.authorId !== input.userId) {
     await recordAuditLog({
@@ -758,7 +1188,7 @@ export async function pinPost(input: {
     const updated = await tx.corporatePost.update({
       where: { id: input.postId },
       data: { pinnedAt: new Date(), pinnedById: input.actorId },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
     await tx.corporatePost.updateMany({
       where: { pinnedAt: { not: null }, id: { not: input.postId } },
@@ -798,7 +1228,7 @@ export async function unpinPost(input: {
   if (!existing.pinnedAt) {
     return db.corporatePost.findUniqueOrThrow({
       where: { id: input.postId },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
   }
 
@@ -806,7 +1236,7 @@ export async function unpinPost(input: {
     const updated = await tx.corporatePost.update({
       where: { id: input.postId },
       data: { pinnedAt: null, pinnedById: null },
-      include: corporatePostInclude,
+      include: corporatePostInclude(input.actorId),
     })
     await recordAuditLog({
       actorId: input.actorId,
@@ -985,7 +1415,7 @@ export async function togglePostReaction(input: {
   }
   const full = await db.corporatePost.findUniqueOrThrow({
     where: { id: input.postId },
-    include: corporatePostInclude,
+    include: corporatePostInclude(userId),
   })
   const viewerHasReaction = full.reactions.some((r) => r.userId === userId)
   return { post: full, added, postAuthorId: post.authorId, viewerHasReaction }
@@ -1090,11 +1520,14 @@ export async function generateCorporatePost(
       : Promise.resolve([]),
   ])
 
+  // Mesmo modelo do gerador de campanhas (Documento 4, seção 13.4): a voz da
+  // comunicação interna é uma só, e a OBS da seção pede isso explicitamente.
   const prompt = buildCorporatePostPrompt({
     companyName: company?.name ?? 'a empresa',
     authorName: author?.name ?? 'quem publica',
     instructions,
     audienceLabel: sectors.length ? sectors.map((s) => s.name).join(', ') : 'toda a empresa',
+    template: await resolveCampaignPromptTemplate(input.companyId),
   })
 
   const raw = await complete({
@@ -1200,7 +1633,7 @@ export async function getPostReach(
     createdAt: opts.sort === 'date_asc' ? 'asc' : 'desc',
   }
   const where: Prisma.CorporatePostWhereInput = { status: 'PUBLISHED' }
-  const [rows, total, audience, bySector] = await Promise.all([
+  const [rows, total, audience, leaders, bySector] = await Promise.all([
     db.corporatePost.findMany({
       where,
       select: {
@@ -1227,6 +1660,9 @@ export async function getPostReach(
     // terceirizado só vê com a feature na allowlist individual, então contá-lo
     // deixaria o percentual cronicamente subestimado.
     db.user.count({ where: { active: true, role: { not: 'THIRD_PARTY' } } }),
+    // Base do comunicado dirigido à liderança. Sem ela, um post lido por TODOS
+    // os líderes marcaria ~10% de alcance, medido contra a empresa inteira.
+    db.user.count({ where: { active: true, role: { in: [...LEADER_ROLES] } } }),
     // Uma agregação para todos os setores, e não uma contagem por post: a
     // página tem até 100 linhas, e um `count` por post seria N+1.
     db.user.groupBy({
@@ -1242,7 +1678,9 @@ export async function getPostReach(
       const postAudience =
         row.audienceScope === 'ALL'
           ? audience
-          : row.sectors.reduce((sum, s) => sum + (peopleBySector.get(s.sectorId) ?? 0), 0)
+          : row.audienceScope === 'LEADERS'
+            ? leaders
+            : row.sectors.reduce((sum, s) => sum + (peopleBySector.get(s.sectorId) ?? 0), 0)
       return {
         postId: row.id,
         // Título na frente quando existe: é o que a G&G reconhece na tabela.

@@ -21,6 +21,29 @@ export const USER_IMPORT_COLUMNS = [
   'Líder (e-mail)',
   'Na equipe desde',
   'Data de nascimento',
+  // Desde o Documento 3 (seção 4.4) a Situação é LIDA, não ignorada: "Desligado"
+  // desativa a pessoa. Ver `USER_IMPORT_ROW_ACTIONS`.
+  'Situação',
+  'Desligado em',
+  // CLT ou PJ. Vazio mantém o que já está gravado — nunca devolve alguém para
+  // CLT em silêncio, porque regime é fato do contrato e não pode ser apagado
+  // por uma coluna esquecida numa carga de 100 linhas.
+  'Tipo de contrato',
+  // A lista fechada da planilha da G&G — Auxiliar, Assistente, Analista… É ela
+  // que segmenta curso (Documento 4, seção 9.2). Nome próprio, e não 'Cargo',
+  // porque na planilha da G&G AS DUAS colunas se chamam Cargo, e a importação
+  // recusa cabeçalho repetido.
+  //
+  // No FIM da lista de propósito: o casamento é por nome de cabeçalho, então a
+  // posição não muda o comportamento — mas anexar mantém a ordem que quem já
+  // baixou o modelo conhece, e inserir no meio a embaralharia.
+  'Categoria do cargo',
+  // Link da foto do colaborador. A planilha da G&G traz links do Google Drive,
+  // que abrem uma PÁGINA, não a imagem — quem converte para a URL de conteúdo é
+  // `normalizePhotoSourceUrl` na API. Célula vazia mantém a foto gravada: foto
+  // some por ação explícita em Administração › Lendas, nunca por uma coluna que
+  // faltou numa carga de 100 linhas (mesma regra do Tipo de contrato).
+  'Foto (URL)',
 ] as const
 export type UserImportColumn = (typeof USER_IMPORT_COLUMNS)[number]
 
@@ -28,11 +51,13 @@ export type UserImportColumn = (typeof USER_IMPORT_COLUMNS)[number]
 export const USER_IMPORT_REQUIRED_COLUMNS = ['Nome', 'E-mail', 'Setor'] as const
 
 /**
- * Colunas que o export de Lendas produz e a importação **reconhece para
- * ignorar** — a importação nunca desliga nem reativa ninguém. Ignorar em
- * silêncio seria pior: o admin editaria "Situação" achando que surte efeito.
+ * Colunas reconhecidas só para serem ignoradas. Vazia hoje: `Situação` e
+ * `Desligado em` passaram a ter efeito (seção 4.4 do Documento 3).
+ *
+ * A lista fica de pé porque o mecanismo continua útil — coluna reconhecida e
+ * ignorada em silêncio faria o admin editar um campo achando que surte efeito.
  */
-export const USER_IMPORT_IGNORED_COLUMNS = ['Situação', 'Desligado em'] as const
+export const USER_IMPORT_IGNORED_COLUMNS: readonly string[] = []
 
 /**
  * Sinônimos aceitos no cabeçalho. O casamento é feito sem acento, sem caixa e
@@ -42,14 +67,42 @@ export const USER_IMPORT_COLUMN_ALIASES: Record<UserImportColumn, readonly strin
   Nome: ['nome completo'],
   'E-mail': ['email', 'e mail'],
   Cargo: ['posicao', 'position'],
+  // 'Senioridade' e 'Nível do cargo' NÃO são sinônimos: a planilha de
+  // colaboradores da G&G traz as duas colunas lado a lado com dados
+  // diferentes (ex. "Sênior" + "Diretor"), então tratá-las como o mesmo
+  // campo colidia como cabeçalho repetido e/ou sobrescrevia um valor pelo
+  // outro. Senioridade não tem campo próprio no Legends hoje — fica de fora.
+  'Categoria do cargo': ['categoria de cargo'],
   Setor: ['departamento'],
   Squad: ['time', 'equipe'],
-  Papel: ['funcao', 'papel na plataforma'],
+  // 'Função' NÃO é alias direto: na planilha da G&G ela só tem dois valores
+  // (Colaborador/Líder), que não bastam pra decidir entre Líder/Gerente/Head.
+  // A importação deriva o Papel de Função + Categoria do cargo quando a
+  // coluna Papel não vem — ver `user-import-service.ts`.
+  Papel: ['papel na plataforma'],
   Área: ['area de atuacao'],
+  // 'Líder' (sem "(e-mail)") é o nome da coluna na planilha da G&G, mas o
+  // valor lá é o NOME curto da pessoa, não o e-mail. A importação aceita os
+  // dois: se o valor não parece e-mail, resolve por nome — ver
+  // `user-import-service.ts`.
   'Líder (e-mail)': ['lider', 'lider direto', 'gestor', 'email do lider'],
-  'Na equipe desde': ['data de admissao', 'admissao', 'data de entrada'],
+  'Na equipe desde': ['data de admissao', 'admissao', 'data de entrada', 'contratacao'],
   'Data de nascimento': ['nascimento', 'aniversario'],
+  Situação: ['status', 'situacao do colaborador'],
+  'Desligado em': ['data de desligamento', 'desligamento', 'data de saida'],
+  'Tipo de contrato': ['contrato', 'regime', 'regime de contratacao', 'vinculo'],
+  'Foto (URL)': ['foto', 'foto do colaborador', 'link da foto', 'url da foto', 'imagem', 'avatar'],
 }
+
+/**
+ * Valores de `Situação` que **desativam** a pessoa. Qualquer outro valor não
+ * mexe no cadastro: a importação desliga, mas **nunca reativa**.
+ *
+ * Os dois sentidos não têm risco simétrico. Desligar alguém por engano custa um
+ * clique para desfazer em Administração › Lendas; reabrir o acesso de quem saiu
+ * da empresa por causa de uma célula errada não se desfaz.
+ */
+export const USER_IMPORT_INACTIVE_STATUSES = ['desligado', 'inativo', 'desligada'] as const
 
 /**
  * Linha de exemplo do template, na ordem de `USER_IMPORT_COLUMNS`. O líder fica
@@ -67,6 +120,11 @@ export const USER_IMPORT_TEMPLATE_EXAMPLE = [
   '',
   '01/02/2026',
   '15/07/1994',
+  'Ativo',
+  '',
+  'CLT',
+  'Analista',
+  '',
 ] as const
 
 export const USER_IMPORT_TEMPLATE_FILENAME = 'modelo-importacao-lendas.csv'
@@ -96,16 +154,26 @@ export type UserImportRole = (typeof USER_IMPORT_ROLES)[number]
  * - `CREATE`    pessoa nova
  * - `UPDATE`    pessoa que já existe e tem algo a mudar
  * - `UNCHANGED` pessoa que já existe e está igual (é o que prova que reimportar não duplica)
- * - `SKIP`      pessoa desligada/inativa: não bloqueia o arquivo, mas nada é alterado
+ * - `DEACTIVATE` pessoa marcada como "Desligado" na planilha: sai do ar, mas o
+ *   histórico (pontos, coins, feedbacks, selos) fica intacto — desativar não é apagar
+ * - `SKIP`      pessoa já inativa na plataforma: nada é alterado (a importação não reativa)
  * - `ERROR`     linha inválida; qualquer uma delas trava o arquivo inteiro
  */
-export const USER_IMPORT_ROW_ACTIONS = ['CREATE', 'UPDATE', 'UNCHANGED', 'SKIP', 'ERROR'] as const
+export const USER_IMPORT_ROW_ACTIONS = [
+  'CREATE',
+  'UPDATE',
+  'UNCHANGED',
+  'DEACTIVATE',
+  'SKIP',
+  'ERROR',
+] as const
 export type UserImportRowAction = (typeof USER_IMPORT_ROW_ACTIONS)[number]
 
 export const USER_IMPORT_ROW_ACTION_LABELS: Record<UserImportRowAction, string> = {
   CREATE: 'Criar',
   UPDATE: 'Atualizar',
   UNCHANGED: 'Sem mudança',
+  DEACTIVATE: 'Desativar',
   SKIP: 'Ignorada',
   ERROR: 'Erro',
 }
@@ -134,6 +202,12 @@ export interface UserImportRowPreviewDTO {
 export interface UserImportPlanDTO {
   sectorsToCreate: { name: string; roles: UserImportRole[] }[]
   squadsToCreate: { name: string; sectorName: string }[]
+  /**
+   * Squads que já existem e mudam de setor porque a planilha levou a gente
+   * delas para outro lugar. A squad vai junto ou a importação recusa — ver
+   * `2026-09-08-excluir-squad-e-mover-squad-na-importacao-design.md`.
+   */
+  squadsToMove: { name: string; fromSectorName: string; toSectorName: string }[]
 }
 
 export interface UserImportPreviewDTO {
@@ -163,5 +237,14 @@ export interface UserImportResultDTO {
   skipped: number
   sectorsCreated: string[]
   squadsCreated: string[]
+  squadsMoved: string[]
   credentials: UserImportCredentialDTO[]
+  /** Quantas fotos a importação baixou e re-hospedou nesta carga. */
+  photosImported: number
+  /**
+   * Linhas cuja foto não pôde ser baixada. É **aviso**, não erro: o resto do
+   * cadastro entra. Link do Drive que exige login é o caso comum, e travar a
+   * carga inteira por causa de uma permissão de arquivo seria desproporcional.
+   */
+  photoWarnings: string[]
 }

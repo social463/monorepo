@@ -42,6 +42,28 @@ function PendingCard({ post }: { post: PendingCorporatePostDTO }) {
         <p className="whitespace-pre-wrap text-body-sm text-on-surface">{post.content}</p>
       )}
 
+      {/* A enquete aparece como leitura, e não como votação: aqui ninguém vota
+          — o post ainda está pendente, e a rota de voto recusa. O revisor
+          precisa é saber o que está aprovando. */}
+      {post.poll && (
+        <div className="rounded-lg border border-outline-variant/50 bg-surface-container p-sm">
+          <p className="flex items-center gap-xs font-label text-label-sm font-bold text-on-surface">
+            <Icon name="bar_chart" className="text-[16px]" />
+            {post.poll.question}
+          </p>
+          <ul className="mt-xs flex flex-wrap gap-xs">
+            {post.poll.options.map((option) => (
+              <li
+                key={option.id}
+                className="rounded-full border border-outline-variant/60 px-sm py-0.5 text-label-sm text-on-surface-variant"
+              >
+                {option.text}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {post.attachments.length > 0 && (
         <ul className="flex flex-wrap gap-xs">
           {post.attachments.map((att) => (

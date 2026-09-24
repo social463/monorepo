@@ -4,7 +4,8 @@ import { MIN_JUSTIFICATION_LENGTH, MIN_VOTE_CATEGORIES, MAX_VOTE_CATEGORIES } fr
 import { VoteError, createVote, getCurrentOpenPeriod, listVotesByVoter } from '../services/voting-service'
 import { awardCoins } from '../services/coin-service'
 import { evaluateBadgesForUser } from '../services/badge-service'
-import { notifyBadgesEarned, notifyFeedbackReceived } from '../services/notification-service'
+import { notifyFeedbackReceived } from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { prisma } from '../lib/prisma'
 import { awardXp } from '../services/xp-service'
 import { toVoteDTO } from '../lib/serialize'
@@ -36,7 +37,7 @@ export async function voteRoutes(app: FastifyInstance) {
       // persistidos, e selo é recomputável.
       try {
         const earned = await evaluateBadgesForUser(vote.votedId)
-        await notifyBadgesEarned(vote.votedId, earned.map((b) => b.badgeId), request.user.companyId)
+        await settleBadgesEarned(vote.votedId, earned.map((b) => b.badgeId), request.user.companyId)
       } catch (badgeErr) {
         request.log.error(badgeErr)
       }

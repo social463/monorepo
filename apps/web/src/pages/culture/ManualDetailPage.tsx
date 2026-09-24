@@ -1,4 +1,4 @@
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { BackButton } from '../../components/BackButton'
 import { Icon } from '../../components/Icon'
 import { Markdown } from '../../components/Markdown'
@@ -6,6 +6,7 @@ import { ScrollToTopButton } from '../../components/ScrollToTopButton'
 import { Skeleton } from '../../components/Skeleton'
 import { useCultureManuals } from '../../lib/use-culture'
 import { formatSize, useManualDownload } from './manual-file'
+import { useBonusCalculatorManualId } from './bonus-program'
 
 /** Destino quando a tela foi aberta direto pela URL, sem histórico interno. */
 const VOLTAR = '/cultura?aba=manuais'
@@ -22,6 +23,13 @@ export function ManualDetailPage() {
   const { manualId } = useParams<{ manualId: string }>()
   const { data, isLoading, isError } = useCultureManuals()
   const { download, error: downloadError } = useManualDownload()
+  /**
+   * A calculadora do Todos Pelos 9 aparece aqui, e só no manual que a G&G
+   * escolheu em Administração — o mesmo hook que decide o botão no card da
+   * lista, para os dois não discordarem sobre qual manual a abre.
+   */
+  const calculadoraManualId = useBonusCalculatorManualId()
+  const temCalculadora = Boolean(manualId) && calculadoraManualId === manualId
 
   if (isLoading) {
     return (
@@ -86,6 +94,22 @@ export function ManualDetailPage() {
           </button>
         )}
       </header>
+
+      {temCalculadora && (
+        <Link
+          to="/cultura/calculadora-todos-pelos-9"
+          className="flex items-center gap-sm rounded-xl border border-primary/40 bg-primary/10 p-md text-on-surface transition-colors hover:border-primary"
+        >
+          <Icon name="calculate" className="text-[24px] text-primary" />
+          <span className="min-w-0 flex-1">
+            <span className="block font-label text-label-lg text-primary">Simular o meu bônus</span>
+            <span className="block text-body-sm text-on-surface-variant">
+              A calculadora faz a conta deste manual com os seus números.
+            </span>
+          </span>
+          <Icon name="chevron_right" className="text-[20px] text-on-surface-variant" />
+        </Link>
+      )}
 
       {downloadError && (
         <p role="alert" className="text-body-sm text-error">

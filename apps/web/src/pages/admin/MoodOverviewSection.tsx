@@ -7,19 +7,22 @@ import type {
   MoodOverviewResponse,
   MoodReasonSliceDTO,
   MoodTrendPointDTO,
-  SectorDTO,
 } from '@legends/shared'
+import type { AnalyticsWindowRequest } from '@legends/shared'
 import {
   MOOD_ANONYMITY_MIN,
   MOOD_OPTIONS,
+  MOOD_OVERVIEW_MIN_DAYS,
   MOOD_REASON_LABELS,
   MOOD_REASON_UNSET_LABEL,
   MOOD_SCORES,
-  isSectorAdminOnly,} from '@legends/shared'
-import { apiFetch } from '../../lib/api'
-import { useAuth } from '../../auth/AuthContext'
+  PEOPLE_ANALYTICS_RANGE_DAYS,
+} from '@legends/shared'
+import { Link } from 'react-router-dom'
+import { ApiError, apiFetch } from '../../lib/api'
+import { Avatar } from '../../components/Avatar'
 import { Icon } from '../../components/Icon'
-import { Select } from '../../components/Select'
+import { windowKey } from '../../components/analytics/PeriodFilter'
 import { Panel } from './shared'
 
 /**
@@ -39,12 +42,6 @@ const MOOD_COLORS: Record<MoodLevel, string> = {
 // Mesma cor do token `tertiary-container`. O ranking de motivos é uma lista
 // ordenada, não categórica: uma cor só, a identidade vem do rótulo.
 const REASON_BAR_COLOR = '#ffb36d'
-
-const WINDOW_OPTIONS = [
-  { value: '7', label: 'Últimos 7 dias' },
-  { value: '30', label: 'Últimos 30 dias' },
-  { value: '90', label: 'Últimos 90 dias' },
-]
 
 const SUPPRESSED_TEXT = `Poucas respostas para exibir (mínimo de ${MOOD_ANONYMITY_MIN}).`
 
@@ -366,15 +363,16 @@ function ReasonRanking({ reasons }: { reasons: MoodReasonSliceDTO[] }) {
   )
 }
 
-// ----- Comentários anônimos -----
+// ----- Comentários -----
 
-function CommentList({ comments }: { comments: MoodCommentDTO[] }) {
+/**
+ * Os comentários do termômetro, **com autor** (Documento 3, seção 4.6). Serve
+ * as duas caixas: "Causas de alerta" (só humor negativo) e "Comentários" (a
+ * escala inteira); a diferença é só a lista que chega.
+ */
+function CommentList({ comments, emptyMessage }: { comments: MoodCommentDTO[]; emptyMessage: string }) {
   if (comments.length === 0) {
-    return (
-      <p className="py-lg text-center text-body-sm text-on-surface-variant">
-        Sem comentários no período. Quando alguém deixar um relato, ele aparece aqui — sempre sem autor.
-      </p>
-    )
+    return <p className="py-lg text-center text-body-sm text-on-surface-variant">{emptyMessage}</p>
   }
 
   return (
@@ -384,14 +382,36 @@ function CommentList({ comments }: { comments: MoodCommentDTO[] }) {
         return (
           <li key={comment.id} className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-md">
             <div className="flex flex-wrap items-center justify-between gap-xs">
-              <span
-                className="inline-flex items-center gap-xs rounded-full px-sm py-[2px] font-label text-label-sm text-[#0c141b]"
-                style={{ background: MOOD_COLORS[comment.mood] }}
-              >
-                <span aria-hidden>{option?.emoji}</span>
-                {option?.label}
+              <span className="flex min-w-0 items-center gap-sm">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
+                  <Avatar user={comment.author} />
+                </span>
+                <span className="min-w-0">
+                  <Link
+                    to={`/perfil/${comment.author.id}`}
+                    className="block truncate font-label text-label-md text-on-surface hover:text-primary hover:underline"
+                  >
+                    {comment.author.name}
+                  </Link>
+                  {comment.author.sectorName && (
+                    <span className="block truncate text-label-sm text-on-surface-variant">
+                      {comment.author.sectorName}
+                    </span>
+                  )}
+                </span>
               </span>
-              <span className="font-label text-label-sm text-on-surface-variant">{relativeDay(comment.daysAgo)}</span>
+              <span className="flex shrink-0 items-center gap-sm">
+                <span
+                  className="inline-flex items-center gap-xs rounded-full px-sm py-[2px] font-label text-label-sm text-[#0c141b]"
+                  style={{ background: MOOD_COLORS[comment.mood] }}
+                >
+                  <span aria-hidden>{option?.emoji}</span>
+                  {option?.label}
+                </span>
+                <span className="font-label text-label-sm text-on-surface-variant">
+                  {relativeDay(comment.daysAgo)}
+                </span>
+              </span>
             </div>
             {comment.reason && (
               <p className="mt-sm font-label text-label-sm uppercase tracking-wide text-on-surface-variant">
@@ -406,64 +426,127 @@ function CommentList({ comments }: { comments: MoodCommentDTO[] }) {
   )
 }
 
-// ----- Página -----
+/**
+ * Quantos dias o recorte cobre, hoje incluso — a mesma conta que o `moodQuery`
+ * faz para montar a query, isolada porque a tela também precisa saber se a
+ * janela cabe no piso da API (`MOOD_OVERVIEW_MIN_DAYS`) ANTES de consultar.
+ *
+ * Cobre os três casos que caem abaixo do piso: o atalho "Hoje" (1 dia), um
+ * período personalizado curto e "Este ano" nos primeiros dias de janeiro.
+ */
+function moodWindowDays(window: AnalyticsWindowRequest): number {
+  if (window.range === 'custom' && window.from && window.to) {
+    const from = new Date(`${window.from}T00:00:00.000Z`).getTime()
+    const to = new Date(`${window.to}T00:00:00.000Z`).getTime()
+    return Math.floor((to - from) / 86_400_000) + 1
+  }
+  if (window.range === 'ano') {
+    const hoje = new Date()
+    return Math.floor((hoje.getTime() - new Date(hoje.getFullYear(), 0, 1).getTime()) / 86_400_000) + 1
+  }
+  return PEOPLE_ANALYTICS_RANGE_DAYS[window.range as keyof typeof PEOPLE_ANALYTICS_RANGE_DAYS] ?? 0
+}
 
-export function MoodOverviewSection() {
-  const { user } = useAuth()
-  const isSubadmin = isSectorAdminOnly(user)
-  const [days, setDays] = useState('30')
-  const [sectorId, setSectorId] = useState('')
+/**
+ * A query do termômetro. A API dele fala em `days` (e agora `from`/`to`), não em
+ * `range` — daí não dar para reusar o `windowQuery` do People Analytics: o
+ * atalho vira número de dias aqui, do lado do cliente.
+ */
+function moodQuery(window: AnalyticsWindowRequest, sectorId: string): string {
+  const params = new URLSearchParams()
+  if (window.range === 'custom' && window.from && window.to) {
+    params.set('from', window.from)
+    params.set('to', window.to)
+  } else if (window.range === 'ano') {
+    // "Este ano" não tem número fixo de dias; mandamos as pontas explícitas.
+    const hoje = new Date()
+    params.set('from', `${hoje.getFullYear()}-01-01`)
+    params.set(
+      'to',
+      `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}-${String(hoje.getDate()).padStart(2, '0')}`,
+    )
+  } else {
+    params.set('days', String(PEOPLE_ANALYTICS_RANGE_DAYS[window.range as keyof typeof PEOPLE_ANALYTICS_RANGE_DAYS]))
+  }
+  if (sectorId) params.set('sectorId', sectorId)
+  return params.toString()
+}
 
-  const sectorsQuery = useQuery({
-    queryKey: ['admin', 'sectors'],
-    queryFn: () => apiFetch<{ sectors: SectorDTO[] }>('/admin/sectors'),
-    enabled: !isSubadmin,
-  })
+// ----- Painel -----
+
+/**
+ * Termômetro de humor agregado — o painel completo (médias, tendência,
+ * distribuição de hoje, motivos e comentários).
+ *
+ * Morava numa página própria em `/admin/clima`, com filtro de período e setor
+ * próprios. Virou painel **controlado** quando a G&G apontou que o termômetro
+ * existia em dois lugares (Documento 3, seção 6): quem manda no recorte agora é
+ * a aba Clima de People Analytics, que já tem os dois filtros no cabeçalho.
+ * Dois seletores de período na mesma tela — o da aba e o do painel — é
+ * justamente a confusão que a desduplicação veio resolver.
+ *
+ * @param window Recorte de período, o mesmo objeto do filtro da tela — atalho
+ * ou intervalo livre (seção 4.6 do Documento 3).
+ * @param sectorId Setor do recorte; vazio = todos. O SUBADMIN nunca escolhe —
+ * quem recorta é o token, na API.
+ */
+export function MoodOverviewSection({
+  window,
+  sectorId = '',
+}: {
+  window: AnalyticsWindowRequest
+  sectorId?: string
+}) {
+  // A série do termômetro tem piso: abaixo dele a rota responde 400, e o painel
+  // caía num "Erro ao carregar" que não dizia o que fazer. Aqui a consulta nem
+  // sai — o aviso ocupa o lugar dela.
+  //
+  // Com MOOD_OVERVIEW_MIN_DAYS em 1 isto virou guarda de borda: sobra só o
+  // recorte que a tela não soube medir (range desconhecido, janela sem as duas
+  // pontas), que dá 0 dias. Continua valendo a pena — é ela que impede a tela
+  // de pedir à API uma janela que a API recusa.
+  const days = moodWindowDays(window)
+  const janelaCurta = days < MOOD_OVERVIEW_MIN_DAYS
 
   const query = useQuery({
-    queryKey: ['admin', 'mood-overview', days, sectorId],
-    queryFn: () => {
-      const params = new URLSearchParams({ days })
-      if (sectorId) params.set('sectorId', sectorId)
-      return apiFetch<MoodOverviewResponse>(`/admin/mood/overview?${params.toString()}`)
-    },
+    queryKey: ['admin', 'mood-overview', windowKey(window), sectorId],
+    queryFn: () => apiFetch<MoodOverviewResponse>(`/admin/mood/overview?${moodQuery(window, sectorId)}`),
+    enabled: !janelaCurta,
   })
 
   const overview = query.data?.overview ?? null
-  const sectorOptions = [
-    { value: '', label: 'Todos os setores' },
-    ...(sectorsQuery.data?.sectors ?? []).map((sector) => ({ value: sector.id, label: sector.name })),
-  ]
-
   const weekMood = overview?.weekAverage !== null && overview ? nearestMoodOption(overview.weekAverage) : null
 
   return (
     <section className="flex flex-col gap-lg">
-      <header>
-        <h2 className="font-headline text-headline-lg text-on-surface">Termômetro de humor</h2>
-        <p className="mt-2 text-body-md text-on-surface-variant">
-          Visão agregada do clima. Nenhum registro é identificável: recortes com menos de {MOOD_ANONYMITY_MIN}{' '}
-          respostas não são exibidos, e comentários aparecem sem autor.
-        </p>
-      </header>
+      <p className="text-body-md text-on-surface-variant">
+        Médias, tendência e distribuição saem <strong className="font-label text-on-surface">sem piso de
+        volume</strong>: um único registro no dia já aparece, inclusive Estressado(a) e Desanimado(a). Os
+        comentários vêm identificados — trate a tela inteira como conversa reservada de Gente e Gestão.
+      </p>
 
-      <div className="flex flex-wrap items-center gap-md">
-        <div className="w-48">
-          <Select options={WINDOW_OPTIONS} value={days} onChange={setDays} ariaLabel="Janela do período" />
+      {janelaCurta && (
+        <div className="flex items-center gap-sm rounded-lg border border-outline-variant/40 bg-surface-container p-lg text-body-md text-on-surface-variant">
+          <Icon name="info" className="text-[20px] text-on-surface-variant" />
+          <span>
+            Não consegui ler esse recorte de período. Escolha um dos atalhos ou informe as duas
+            datas do período personalizado.
+          </span>
         </div>
-        {!isSubadmin && (
-          <div className="w-64">
-            <Select options={sectorOptions} value={sectorId} onChange={setSectorId} ariaLabel="Filtrar por setor" />
-          </div>
-        )}
-      </div>
+      )}
 
-      {query.isLoading && <p className="text-body-sm text-on-surface-variant">Carregando…</p>}
+      {!janelaCurta && query.isLoading && (
+        <p className="text-body-sm text-on-surface-variant">Carregando…</p>
+      )}
 
       {query.isError && (
         <div className="flex items-center gap-sm rounded-lg border border-error/40 bg-error-container/20 p-lg text-on-error-container">
           <Icon name="error" className="text-[20px]" />
-          Erro ao carregar o termômetro de humor.
+          {/* A mensagem da API na frente do texto fixo: foi o texto genérico que
+              escondeu, por meses, que o erro era o período fora da janela. */}
+          {query.error instanceof ApiError
+            ? query.error.message
+            : 'Erro ao carregar o termômetro de humor.'}
         </div>
       )}
 
@@ -509,18 +592,27 @@ export function MoodOverviewSection() {
             </Panel>
           </div>
 
-          <div className="grid gap-lg lg:grid-cols-5">
-            <div className="lg:col-span-2">
-              <Panel title="Motivos declarados">
-                <ReasonRanking reasons={overview.reasons} />
-              </Panel>
-            </div>
-            <div className="lg:col-span-3">
-              <Panel title="Comentários anônimos">
-                <CommentList comments={overview.comments} />
-              </Panel>
-            </div>
+          {/* Duas caixas, como a seção 4.6 pede: a de alerta traz só o que veio
+              de Estressado(a) e Desanimado(a) — é o que exige ação —, e a outra
+              traz tudo o que foi escrito, da ponta negativa à positiva. */}
+          <div className="grid gap-lg lg:grid-cols-2">
+            <Panel title="Causas de alerta">
+              <CommentList
+                comments={overview.alertComments}
+                emptyMessage="Ninguém registrou desânimo ou estresse com comentário no período."
+              />
+            </Panel>
+            <Panel title="Comentários">
+              <CommentList
+                comments={overview.comments}
+                emptyMessage="Sem comentários no período."
+              />
+            </Panel>
           </div>
+
+          <Panel title="Motivos declarados">
+            <ReasonRanking reasons={overview.reasons} />
+          </Panel>
         </>
       )}
     </section>

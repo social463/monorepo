@@ -3,6 +3,7 @@ import {
   createEmptyMapDocumentV1,
   type MapDocumentV1,
   type OfficeBall,
+  type OfficeOccupant,
   type OfficeRuntimeZone,
 } from '@legends/shared'
 import { officeMapTileFrame } from './officeMapTiles'
@@ -18,32 +19,67 @@ vi.mock('phaser', () => ({
 vi.mock('../media/applause-sound', () => ({ playApplauseSound: vi.fn() }))
 vi.mock('../media/high-five-sound', () => ({ playHighFiveSound: vi.fn() }))
 vi.mock('../media/kick-sound', () => ({ playKickSound: vi.fn() }))
+vi.mock('../media/paintball-sound', () => ({ playPaintballSound: vi.fn() }))
 
 import {
   computeAppliedZoom,
   computeMinCameraZoom,
   computeScreenPosition,
+  highFiveWithinEarshot,
   OfficeScene,
-  confettiLaunchConfig,
-  confettiBurstConfig,
   zoneLabelText,
-  CONFETTI_TEXTURE,
-  CONFETTI_COLORS,
   KART_TEXTURE,
+  PAINT_PELLET_TEXTURE,
+  PAINT_BURST_DROPS,
+  PAINTBALL_MUZZLE_Y,
   NEARBY_SPEECH_BUBBLE_START_Y,
   NEARBY_SPEECH_BUBBLE_END_Y,
   NEARBY_THOUGHT_BUBBLE_Y,
 } from './OfficeScene'
+import {
+  CONFETTI_COLORS,
+  CONFETTI_TEXTURE,
+  confettiBurstConfig,
+  confettiLaunchConfig,
+} from './confettiSprites'
 import { playApplauseSound } from '../media/applause-sound'
 import { playHighFiveSound } from '../media/high-five-sound'
 import { playKickSound } from '../media/kick-sound'
-import { MovementPredictor } from '../MovementPredictor'
+import { playPaintballSound } from '../media/paintball-sound'
+
+/**
+ * Um ponto de TILE em PIXEL, no centro da célula.
+ *
+ * Os cenários continuam sendo escritos em tile — é assim que se pensa alcance
+ * ("ela está a dois tiles") —, mas tudo que entra na cena como occupant tem de
+ * chegar em pixel, que é o que a produção manda desde o movimento livre.
+ */
+function emPixel(tileX: number, tileY: number, tile = 32): { x: number; y: number } {
+  return { x: tileX * tile + tile / 2, y: tileY * tile + tile / 2 }
+}
 
 const scenePrivate = OfficeScene.prototype as unknown as {
+  stepFn(this: unknown): unknown
+  recoverMissingView(this: unknown, userId: string): void
+  reattachCameraIfDetached(this: unknown): void
+  tileAtPixel(this: unknown, point: { x: number; y: number }): { x: number; y: number }
+  updateBalls(this: unknown, dtMs: number): void
+  refreshBallVisuals(this: unknown): void
+  playBallKick(this: unknown, userId: string, ball: unknown, power: string): void
+  placeBody(
+    this: unknown,
+    view: unknown,
+    x: number,
+    y: number,
+    dir: string,
+    moving: boolean,
+    sprint: boolean,
+  ): void
   pressedMove(this: unknown): string | null
-  playBallKick(this: unknown, kick: unknown): void
-  cancelBallTweens(this: unknown, ballId: string): void
-  isWithinEarshot(this: unknown, tile: unknown): boolean
+  update(this: unknown, time: number, delta: number): void
+  earshotLevel(this: unknown, tile: unknown, tiles?: number): number
+  drawRemoteBodies(this: unknown, now: number): void
+  emitRemoteKartSmoke(this: unknown, ...args: unknown[]): void
   emitConfetti(this: unknown, active: boolean): void
   setFloatingReactionsActive(this: unknown, active: boolean): void
   setConfetti(this: unknown, userId: string, active: boolean): void
@@ -52,6 +88,8 @@ const scenePrivate = OfficeScene.prototype as unknown as {
   celebrate(this: unknown): void
   handle(this: unknown, message: unknown): void
   showNearbyBubble(this: unknown, userId: string, text: string, kind: 'speech' | 'thought' | 'reaction'): void
+  clearThoughtBubble(this: unknown, userId: string): void
+  clearBubble(this: unknown, view: unknown): void
   playHighFive(this: unknown, userIds: [string, string], perfect?: boolean): void
   showPerfectClapFlash(this: unknown, x: number, y: number): void
   applyKartVisual(this: unknown, userId: string, active: boolean): void
@@ -65,6 +103,10 @@ const scenePrivate = OfficeScene.prototype as unknown as {
   applyLocalIntent(this: unknown, dir: string, sprint: boolean, seq: number): void
   snapSelfTo(this: unknown, x: number, y: number): unknown
   reanchorStalePrediction(this: unknown): void
+  playPaintballShot(this: unknown, shot: unknown): void
+  applyPaintSplat(this: unknown, splat: unknown): void
+  setPaintMarker(this: unknown, userId: string, active: boolean): void
+  burstPaint(this: unknown, px: number, py: number, color: number): void
 }
 
 const tileset: MapDocumentV1['tilesets'][number] = {
@@ -758,8 +800,10 @@ describe('OfficeScene.playHighFive', () => {
         youId: 'voce',
         document: createEmptyMapDocumentV1({ width: 20, height: 20, tileSize: 32 }),
         bridge: {
+          // Em PIXEL, como o occupant chega desde o movimento livre — o
+          // cenário é escrito em tile e convertido por `emPixel`.
           occupantSnapshot: (userId: string) =>
-            ({ ana: { x: 2, y: 2 }, bruno: { x: 3, y: 2 }, voce: { x: 15, y: 15 } } as Record<
+            ({ ana: emPixel(2, 2), bruno: emPixel(3, 2), voce: emPixel(15, 15) } as Record<
               string,
               { x: number; y: number }
             >)[userId] ?? null,
@@ -818,9 +862,13 @@ describe('OfficeScene.playHighFive — alcance do som', () => {
       youId,
       document: createEmptyMapDocumentV1({ width: 20, height: 20, tileSize: 32 }),
       bridge: {
+        // O cenário é escrito em TILE (é assim que se pensa "ela está a dois
+        // tiles"), e o occupant fala PIXEL desde o movimento livre. Converter
+        // aqui é o que faz o teste exercitar a mesma unidade da produção — o
+        // fixture em tile puro é justamente o que deixou o bug do som passar.
         occupantSnapshot: (userId: string) => {
           const position = posicoes[userId]
-          return position ? { userId, ...position } : null
+          return position ? { userId, ...emPixel(position.x, position.y) } : null
         },
       },
     }
@@ -904,6 +952,34 @@ describe("OfficeScene.handle('nearby-message') — reaction", () => {
       ['ana', 'oi', 'speech'],
       ['ana', 'foco', 'thought'],
     ])
+  })
+})
+
+describe("OfficeScene.handle('thought-cleared')", () => {
+  it('tira o balão de pensamento de quem o servidor diz que se mexeu', () => {
+    const view = { userId: 'ana', bubbleKind: 'thought' }
+    const scene = {
+      characters: new Map([['ana', view]]),
+      clearThoughtBubble: scenePrivate.clearThoughtBubble,
+      clearBubble: vi.fn(),
+    }
+
+    scenePrivate.handle.call(scene, { type: 'thought-cleared', userId: 'ana' })
+
+    expect(scene.clearBubble).toHaveBeenCalledWith(view)
+  })
+
+  it('não encosta em balão de fala nem de reação — esses somem por conta própria', () => {
+    const view = { userId: 'ana', bubbleKind: 'speech' }
+    const scene = {
+      characters: new Map([['ana', view]]),
+      clearThoughtBubble: scenePrivate.clearThoughtBubble,
+      clearBubble: vi.fn(),
+    }
+
+    scenePrivate.handle.call(scene, { type: 'thought-cleared', userId: 'ana' })
+
+    expect(scene.clearBubble).not.toHaveBeenCalled()
   })
 })
 
@@ -993,6 +1069,12 @@ describe("OfficeScene.handle('welcome') com confettiUserIds/handRaisedUserIds", 
       setConfetti: vi.fn(),
       setHandRaised: vi.fn(),
       predictor: { reset: vi.fn() },
+      // O `welcome` monta a grade fina de colisão para semear a predição — e ela
+      // sai do documento, que a cena real sempre tem (é parâmetro do construtor).
+      document: createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 }),
+      // …e injeta o passo, que troca conforme a pessoa esteja a pé ou de kart.
+      stepFn: scenePrivate.stepFn,
+      isRiding: () => false,
       applyCameraFocus: vi.fn(),
       ridingUserIds: new Set<string>(),
       kartStates: new Map(),
@@ -1022,6 +1104,12 @@ describe("OfficeScene.handle('welcome') com confettiUserIds/handRaisedUserIds", 
       setConfetti: vi.fn(),
       setHandRaised: vi.fn(),
       predictor: { reset: vi.fn() },
+      // O `welcome` monta a grade fina de colisão para semear a predição — e ela
+      // sai do documento, que a cena real sempre tem (é parâmetro do construtor).
+      document: createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 }),
+      // …e injeta o passo, que troca conforme a pessoa esteja a pé ou de kart.
+      stepFn: scenePrivate.stepFn,
+      isRiding: () => false,
       applyCameraFocus: vi.fn(),
       ridingUserIds: new Set<string>(),
       kartStates: new Map(),
@@ -1051,6 +1139,12 @@ describe("OfficeScene.handle('welcome') com confettiUserIds/handRaisedUserIds", 
       setConfetti: vi.fn(),
       setHandRaised: vi.fn(),
       predictor: { reset: vi.fn() },
+      // O `welcome` monta a grade fina de colisão para semear a predição — e ela
+      // sai do documento, que a cena real sempre tem (é parâmetro do construtor).
+      document: createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 }),
+      // …e injeta o passo, que troca conforme a pessoa esteja a pé ou de kart.
+      stepFn: scenePrivate.stepFn,
+      isRiding: () => false,
       applyCameraFocus: vi.fn(),
       ridingUserIds: new Set<string>(),
       kartStates: new Map(),
@@ -1436,65 +1530,102 @@ describe('OfficeScene.handleMapRightClick (clique direito no mapa)', () => {
   })
 })
 
-describe('OfficeScene.step — auto-recuperação de CharacterView sumida', () => {
-  function fakeDocument(): MapDocumentV1 {
+describe('OfficeScene — câmera solta por arraste/zoom', () => {
+  const DETACHED = '::camera-detached::'
+
+  function fakeScene(over: Record<string, unknown> = {}) {
     return {
-      map: { width: 10, height: 10, tileWidth: 32, tileHeight: 32 },
-      tilesets: [],
-      objects: [],
-    } as unknown as MapDocumentV1
+      youId: 'ana',
+      focusUserId: null,
+      panGesture: null,
+      focusedCameraUserId: DETACHED,
+      applyCameraFocus: vi.fn(),
+      reattachCameraIfDetached: scenePrivate.reattachCameraIfDetached,
+      ...over,
+    }
   }
 
-  it('sem view local mas com occupant conhecido no bridge, recria a view (spawn) e segue o passo — não descarta', () => {
-    const occupant = { userId: 'ana', name: 'Ana', x: 6, y: 5, dir: 'right', avatarSeed: null, avatarOptions: null }
-    const spawnedView = {
-      container: { setDepth: vi.fn() },
-      body: {},
-      bodyBaseY: 0,
-      lastDir: 'down',
-      tile: { x: 5, y: 5 },
-      textureKey: null,
-      tween: undefined,
-      bobTween: undefined,
-    }
+  it('volta a seguir quando o personagem focado anda', () => {
+    // Arrastar e dar zoom soltam a câmera de propósito; ela volta no próximo
+    // passo. Isso morava no `step()` do modelo de grade — sem religar, a câmera
+    // ficava solta para sempre depois do primeiro zoom.
+    const scene = fakeScene()
+    scenePrivate.reattachCameraIfDetached.call(scene)
+    expect(scene.applyCameraFocus).toHaveBeenCalledWith(false)
+  })
+
+  it('não religa no meio de um arraste', () => {
+    const scene = fakeScene({ panGesture: { pointerX: 0, pointerY: 0, scrollX: 0, scrollY: 0 } })
+    scenePrivate.reattachCameraIfDetached.call(scene)
+    expect(scene.applyCameraFocus).not.toHaveBeenCalled()
+  })
+
+  it('não religa quando a câmera está focada em OUTRA pessoa', () => {
+    const scene = fakeScene({ focusUserId: 'bruno' })
+    scenePrivate.reattachCameraIfDetached.call(scene)
+    expect(scene.applyCameraFocus).not.toHaveBeenCalled()
+  })
+
+  it('não faz nada se a câmera já está acompanhando', () => {
+    const scene = fakeScene({ focusedCameraUserId: 'ana' })
+    scenePrivate.reattachCameraIfDetached.call(scene)
+    expect(scene.applyCameraFocus).not.toHaveBeenCalled()
+  })
+})
+
+describe('OfficeScene — auto-recuperação de CharacterView sumida', () => {
+  it('snapshot com userId sem view recria a view a partir do bridge', () => {
+    // Não deveria acontecer (welcome/joined criam a view antes), mas se
+    // acontecer a pessoa fica INVISÍVEL para sempre neste cliente:
+    // `drawRemoteBodies` pula quem não tem view, e nada mais ressincroniza
+    // `characters` fora de welcome/joined.
+    const occupant = { userId: 'ana', name: 'Ana', x: 208, y: 176, dir: 'right' }
     const characters = new Map<string, unknown>()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    const fakeScene = {
+    const scene = {
       characters,
       bridge: { occupantSnapshot: vi.fn(() => occupant) },
-      spawn: vi.fn(() => characters.set('ana', spawnedView)),
-      document: fakeDocument(),
-      tweens: { add: vi.fn(() => ({})) },
-      face: vi.fn(),
-      updateConfettiDirection: vi.fn(),
-      clearBubble: vi.fn(),
-      ridingUserIds: new Set<string>(),
+      spawn: vi.fn(() => characters.set('ana', {})),
+      recoverMissingView: scenePrivate.recoverMissingView,
     }
 
-    scenePrivate.step.call(fakeScene, 'ana', 6, 5, 'right', false)
+    scenePrivate.recoverMissingView.call(scene, 'ana')
 
-    expect(fakeScene.bridge.occupantSnapshot).toHaveBeenCalledWith('ana')
-    expect(fakeScene.spawn).toHaveBeenCalledWith(occupant)
-    expect(fakeScene.face).toHaveBeenCalledWith(spawnedView, 'right')
-    expect(warnSpy).toHaveBeenCalled()
-
+    expect(scene.spawn).toHaveBeenCalledWith(occupant)
+    expect(characters.has('ana')).toBe(true)
     warnSpy.mockRestore()
   })
 
-  it('sem view local e sem occupant conhecido no bridge, descarta silenciosamente (com aviso no console)', () => {
+  it('sem occupant conhecido, avisa e desiste — não inventa personagem', () => {
+    const characters = new Map<string, unknown>()
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const fakeScene = {
-      characters: new Map<string, unknown>(),
+    const scene = {
+      characters,
       bridge: { occupantSnapshot: vi.fn(() => null) },
       spawn: vi.fn(),
+      recoverMissingView: scenePrivate.recoverMissingView,
     }
 
-    expect(() => scenePrivate.step.call(fakeScene, 'fantasma', 6, 5, 'right', false)).not.toThrow()
-    expect(fakeScene.spawn).not.toHaveBeenCalled()
-    expect(warnSpy).toHaveBeenCalled()
+    scenePrivate.recoverMissingView.call(scene, 'fantasma')
 
+    expect(scene.spawn).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalled()
     warnSpy.mockRestore()
+  })
+
+  it('com view existente, não recria nada', () => {
+    const characters = new Map<string, unknown>([['ana', {}]])
+    const scene = {
+      characters,
+      bridge: { occupantSnapshot: vi.fn() },
+      spawn: vi.fn(),
+      recoverMissingView: scenePrivate.recoverMissingView,
+    }
+
+    scenePrivate.recoverMissingView.call(scene, 'ana')
+
+    expect(scene.bridge.occupantSnapshot).not.toHaveBeenCalled()
+    expect(scene.spawn).not.toHaveBeenCalled()
   })
 })
 
@@ -1533,18 +1664,6 @@ describe('OfficeScene — kart (#22253)', () => {
       },
     }
   }
-
-  it('de kart o passo é mais rápido que correndo a pé', () => {
-    const aPe = fakeSceneComKart()
-    scenePrivate.step.call(aPe.scene, 'ana', 6, 5, 'right', true)
-    const duracaoCorrendo = aPe.scene.tweens.add.mock.calls[0][0].duration
-
-    const deKart = fakeSceneComKart(['ana'])
-    scenePrivate.step.call(deKart.scene, 'ana', 6, 5, 'right', false)
-    const duracaoDeKart = deKart.scene.tweens.add.mock.calls[0][0].duration
-
-    expect(duracaoDeKart).toBeLessThan(duracaoCorrendo)
-  })
 
   it('o kart vira para a direção que a pessoa está encarando', () => {
     // A textura é desenhada apontando pra cima; sem girar, o kart anda de lado
@@ -1839,417 +1958,662 @@ describe('zoneLabelText (mesma regra de desempate da MediaBar via officeZoneDisp
   })
 })
 
-describe('predição local vs. estado autoritativo do kart (#22253)', () => {
+describe('OfficeScene — movimento livre', () => {
   const document = createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 })
 
-  it('não prevê passo para o tile de um kart estacionado', () => {
-    // Regressão do teleporte: o servidor recusa o passo (kart bloqueia o
-    // tile) e o cliente previa mesmo assim — a divergência acumulava até o
-    // primeiro eco divergente reancorar tudo de uma vez.
-    const kartStates = new Map([['kart-1', { id: 'kart-1', x: 4, y: 3, dir: 'up' as const }]])
-    const predictor = new MovementPredictor(document, { karts: () => [...kartStates.values()] })
-    predictor.reset({ x: 3, y: 3 })
-    const view = { lastDir: 'down' as const }
+  /** Uma cena mínima, só com o que o caminho do movimento toca. */
+  function fakeScene(over: Record<string, unknown> = {}) {
+    const view = {
+      userId: 'you',
+      container: { setPosition: vi.fn(), setDepth: vi.fn(), depth: 0 },
+      body: {},
+      lastDir: 'down' as string,
+      tile: { x: 0, y: 0 },
+      pos: { x: 0, y: 0 },
+    }
     const s = {
       youId: 'you',
       document,
-      predictor,
       characters: new Map([['you', view]]),
-      bridge: { isConnected: () => true },
-      step: vi.fn(),
+      placeBody: scenePrivate.placeBody,
       face: vi.fn(),
       updateConfettiDirection: vi.fn(),
+      ...over,
     }
-
-    scenePrivate.applyLocalIntent.call(s, 'right', false, 1)
-
-    expect(s.step).not.toHaveBeenCalled()
-    expect(s.face).toHaveBeenCalledWith(view, 'right')
-  })
-
-  it('kart montado não bloqueia: o passo volta a ser previsto', () => {
-    const kartStates = new Map([
-      ['kart-1', { id: 'kart-1', x: 4, y: 3, dir: 'up' as const, riderUserId: 'you' }],
-    ])
-    const predictor = new MovementPredictor(document, { karts: () => [...kartStates.values()] })
-    predictor.reset({ x: 3, y: 3 })
-    const s = {
-      youId: 'you',
-      document,
-      predictor,
-      characters: new Map([['you', { lastDir: 'down' as const }]]),
-      bridge: { isConnected: () => true },
-      step: vi.fn(),
-      face: vi.fn(),
-      updateConfettiDirection: vi.fn(),
-    }
-
-    scenePrivate.applyLocalIntent.call(s, 'right', false, 1)
-
-    expect(s.step).toHaveBeenCalledWith('you', 4, 3, 'right', false)
-  })
-})
-
-describe("OfficeScene.handle('sync') — re-ancoragem por seq", () => {
-  const document = createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 })
-
-  function fakeSceneWithVerdict(verdict: 'ignore' | 'reanchor') {
-    const view = { container: { setPosition: vi.fn() }, tween: { stop: vi.fn() }, lastDir: 'down' }
-    return {
-      view,
-      s: {
-        youId: 'you',
-        document,
-        predictor: { confirmSync: vi.fn(() => verdict) },
-        characters: new Map([['you', view]]),
-        snapSelfTo: scenePrivate.snapSelfTo,
-        updateConfettiDirection: vi.fn(),
-        face: vi.fn(),
-      },
-    }
+    return { s, view }
   }
 
-  it('repassa o seq do servidor ao predictor e re-ancora quando o passo foi recusado', () => {
-    const { s, view } = fakeSceneWithVerdict('reanchor')
-
-    scenePrivate.handle.call(s, { type: 'sync', x: 2, y: 3, dir: 'right', seq: 9 })
-
-    expect(s.predictor.confirmSync).toHaveBeenCalledWith(2, 3, 9)
-    expect(view.tween.stop).toHaveBeenCalled()
-    expect(view.container.setPosition).toHaveBeenCalledWith(2 * 32 + 16, 3 * 32 + 16)
+  it('desenha em pixel INTEIRO — float faz a arte tremer entre texels', () => {
+    const { s, view } = fakeScene()
+    scenePrivate.placeBody.call(s, view, 100.7, 200.2, 'right', false, false)
+    expect(view.container.setPosition).toHaveBeenCalledWith(101, 200)
   })
 
-  it("veredito 'ignore' (eco de parede) não mexe no personagem", () => {
-    const { s, view } = fakeSceneWithVerdict('ignore')
-
-    scenePrivate.handle.call(s, { type: 'sync', x: 2, y: 3, dir: 'right', seq: 9 })
-
-    expect(view.container.setPosition).not.toHaveBeenCalled()
+  it('mantém a posição CONTÍNUA no estado, mesmo desenhando arredondado', () => {
+    // O arredondamento é só de desenho: o estado precisa continuar float, senão
+    // a reconciliação divergiria do servidor a cada quadro.
+    const { s, view } = fakeScene()
+    scenePrivate.placeBody.call(s, view, 100.7, 200.2, 'right', false, false)
+    expect(view.pos).toEqual({ x: 100.7, y: 200.2 })
   })
-})
 
-describe('OfficeScene.update — predição que nunca foi confirmada', () => {
-  const document = createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 })
+  it('reordena a profundidade pelo TILE ao andar', () => {
+    // Sem isto o personagem para de reordenar frente/trás: fica sempre atrás
+    // (ou sempre na frente) de quem estava lá quando ele nasceu. E o tile, não o
+    // pixel, porque é a escala que a mobília usa.
+    const { s, view } = fakeScene()
+    scenePrivate.placeBody.call(s, view, 100, 200, 'down', false, false)
+    expect(view.container.setDepth).toHaveBeenCalledWith(1000 + 6)
+    expect(view.tile).toEqual({ x: 3, y: 6 })
+  })
 
-  it('expira e re-ancora o personagem na última posição confirmada pelo servidor', () => {
-    // Passo que some no caminho (rate limit do hub descarta em silêncio,
-    // pacote perdido): sem isto a divergência fica pendurada para sempre.
-    const view = { container: { setPosition: vi.fn() }, tween: { stop: vi.fn() }, lastDir: 'down' }
+  it('andar apaga o balão de PENSAMENTO na hora, sem esperar a volta do servidor', () => {
+    const clearBubble = vi.fn()
+    const { s, view } = fakeScene({ clearBubble })
+
+    const andando = { ...view, bubbleKind: 'thought' }
+    scenePrivate.placeBody.call(s, andando, 10, 10, 'down', true, false)
+    expect(clearBubble).toHaveBeenCalledWith(andando)
+
+    // Pensar é o que se faz PARADO: quem não se mexeu mantém o balão.
+    clearBubble.mockClear()
+    const parado = { ...view, bubbleKind: 'thought' }
+    scenePrivate.placeBody.call(s, parado, 10, 10, 'down', false, false)
+    expect(clearBubble).not.toHaveBeenCalled()
+  })
+
+  it('só vira o personagem quando a pose muda de verdade', () => {
+    const { s, view } = fakeScene()
+    view.lastDir = 'right'
+    scenePrivate.placeBody.call(s, view, 10, 10, 'right', false, false)
+    expect(s.face).not.toHaveBeenCalled()
+
+    scenePrivate.placeBody.call(s, view, 10, 10, 'left', false, false)
+    expect(s.face).toHaveBeenCalledWith(view, 'left')
+  })
+
+  /** Só o caminho de amostragem de input do `update`. */
+  function fakeSceneAndando(over: Record<string, unknown> = {}) {
+    const predicted = { x: 112.5, y: 144.25 }
+    const bridge = { isMovementLocked: () => false, emitInput: vi.fn(), emitSelfBody: vi.fn() }
     const s = {
-      youId: 'you',
-      document,
+      bodyPredictor: {
+        predict: vi.fn((dx: number, dy: number, dtMs: number, sprint: boolean) => ({
+          seq: 1,
+          dx,
+          dy,
+          dtMs,
+          sprint,
+        })),
+        current: () => predicted,
+      },
+      bridge,
       inputLocked: false,
-      lastInputAt: 0,
-      predictor: { pruneStale: vi.fn(() => ({ x: 1, y: 2 })) },
-      characters: new Map([['you', view]]),
-      snapSelfTo: scenePrivate.snapSelfTo,
-      reanchorStalePrediction: scenePrivate.reanchorStalePrediction,
-      bridge: { isMovementLocked: () => false, emitMoveIntent: vi.fn(), nextMoveSeq: () => 1 },
-      pressedMove: () => null,
-      isRiding: () => false,
+      sinceInput: 0,
       shiftKey: { isDown: false },
-      applyLocalIntent: vi.fn(),
-      updateConfettiDirection: vi.fn(),
-      face: vi.fn(),
+      autoMove: null as string | null,
+      pressedMove: () => null,
+      drawRemoteBodies: vi.fn(),
+      updateBalls: vi.fn(),
+      drawOwnBody: vi.fn(),
+      ...over,
     }
+    return { s, bridge, predicted }
+  }
 
-    OfficeScene.prototype.update.call(s as unknown as OfficeScene, 1_000)
+  it('a caminhada automática vira input, como se a tecla estivesse segurada', () => {
+    // O Seguir não manda mais passo: ele segura uma direção, e é ESTA amostragem
+    // que a transforma em deslocamento — um caminho só até o servidor, passando
+    // pela predição.
+    const { s, bridge } = fakeSceneAndando({ autoMove: 'right' })
+    scenePrivate.update.call(s, 1000, 40)
+    // E vai marcado como 'auto': quem cancela o Seguir ao ver alguém assumir o
+    // controle precisa distinguir isto da tecla de uma pessoa, senão o Seguir se
+    // autocancela no primeiro quadro — um passo e para.
+    expect(bridge.emitInput).toHaveBeenCalledWith(expect.objectContaining({ dx: 1, dy: 0 }), 'auto')
+  })
 
-    expect(view.container.setPosition).toHaveBeenCalledWith(1 * 32 + 16, 2 * 32 + 16)
+  it('o teclado ganha da caminhada automática', () => {
+    const { s, bridge } = fakeSceneAndando({ autoMove: 'right', pressedMove: () => 'up' })
+    scenePrivate.update.call(s, 1000, 40)
+    expect(bridge.emitInput).toHaveBeenCalledWith(expect.objectContaining({ dx: 0, dy: -1 }), 'keyboard')
+  })
+
+  it('publica a posição PREVISTA — é por ela que o Seguir vira a esquina e solta a tecla', () => {
+    const { s, bridge, predicted } = fakeSceneAndando({ autoMove: 'right' })
+    scenePrivate.update.call(s, 1000, 40)
+    expect(bridge.emitSelfBody).toHaveBeenCalledWith({ x: predicted.x, y: predicted.y })
   })
 })
 
+function mapaComSala() {
+  const document = createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 })
+  document.objects.push({
+    id: 'room-1',
+    layerKey: 'meeting-rooms',
+    type: 'meeting-room',
+    geometry: { kind: 'rectangle', x: 96, y: 96, width: 128, height: 128 },
+    properties: {
+      externalKey: 'aurora',
+      name: 'Aurora',
+      status: 'OPEN',
+      capacity: 4,
+      voiceEnabled: true,
+      accessPolicy: 'OPEN',
+    },
+  })
+  return document
+}
 
 describe('OfficeScene — bola chutável', () => {
-  function fakeSceneComBola() {
+  const bola = (over: Partial<OfficeBall> = {}): OfficeBall => ({
+    id: 'ball-1',
+    x: 96,
+    y: 96,
+    vx: 0,
+    vy: 0,
+    memberIds: ['ball-1'],
+    ...over,
+  })
+
+  function fakeSceneComBola(over: Record<string, unknown> = {}) {
+    const scene = {
+      youId: 'ana',
+      document: createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 }),
+      ballStates: new Map<string, OfficeBall>([['ball-1', bola()]]),
+      editing: false,
+      bodyPredictor: undefined,
+      autoMove: null,
+      shiftKey: { isDown: false },
+      pressedMove: () => null,
+      refreshBallVisuals: vi.fn(),
+      // O giro da bola escreve na imagem publicada — sem o mapa, `updateBalls`
+      // estoura ao tentar rodá-la.
+      publishedObjectImages: new Map<string, unknown>(),
+      ballFlights: new Map(),
+      earshotLevel: () => 0,
+      applyPaintSplat: vi.fn(),
+      tileAtPixel: scenePrivate.tileAtPixel,
+      updateBalls: scenePrivate.updateBalls,
+      playBallKick: scenePrivate.playBallKick,
+      ...over,
+    }
+    return scene
+  }
+
+  /** Uma cena com a peça publicada, para medir o que o arco escreve na imagem. */
+  function fakeSceneComImagem(over: Record<string, unknown> = {}) {
     const image = {
-      rotation: 0,
+      x: 0,
       y: 0,
-      depth: 30,
+      rotation: 0,
+      depth: 0,
       scaleX: 1,
       scaleY: 1,
-      setPosition: vi.fn().mockReturnThis(),
+      setPosition: vi.fn(function (this: unknown, x: number, y: number) {
+        Object.assign(image, { x, y })
+        return image
+      }),
+      setDepth: vi.fn(function (this: unknown, d: number) {
+        image.depth = d
+        return image
+      }),
+      setScale: vi.fn(function (this: unknown, sx: number, sy: number) {
+        Object.assign(image, { scaleX: sx, scaleY: sy })
+        return image
+      }),
       setVisible: vi.fn().mockReturnThis(),
       setRotation: vi.fn().mockReturnThis(),
-      setDepth: vi.fn().mockReturnThis(),
-      setScale: vi.fn().mockReturnThis(),
     }
-    return {
-      image,
-      scene: {
-        youId: 'ana',
-        bridge: { occupantSnapshot: vi.fn(() => ({ userId: 'ana', x: 1, y: 1 })) },
-        document: createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 }),
-        ballStates: new Map<string, OfficeBall>([['ball-1', { id: 'ball-1', x: 1, y: 2 }]]),
-        ballTweens: new Map(),
-        publishedObjectImages: new Map<string, unknown>([['ball-1', image]]),
-        tweens: {
-          add: vi.fn((_config: { x: number[]; y: number[]; duration: number; rotation?: number }) => ({
-            remove: vi.fn(),
-            on: vi.fn(),
-          })),
-        },
-        refreshBallVisuals: vi.fn(),
-        isWithinEarshot: scenePrivate.isWithinEarshot,
-        cancelBallTweens: scenePrivate.cancelBallTweens,
-        // O layout sai do documento publicado (`mapBalls`); aqui basta o
-        // resultado: a bola nasceu no tile (1,2), com um slice só, e com o
-        // estado de CHÃO gravado (é para onde o voo devolve).
-        ballLayout: () =>
-          new Map([
-            [
-              'ball-1',
-              {
-                originX: 1,
-                originY: 2,
-                slices: [{ id: 'ball-1', px: 48, py: 80, depth: 30, scaleX: 1, scaleY: 1 }],
-              },
-            ],
-          ]),
-      },
+    const scene = {
+      document: createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 }),
+      editing: false,
+      publishedObjectImages: new Map<string, unknown>([['ball-1', image]]),
+      hiddenPublishedIds: new Set<string>(),
+      ballStates: new Map<string, OfficeBall>(),
+      ballFlights: new Map<string, { totalMs: number; lift: number }>(),
+      ballLayout: () =>
+        new Map([
+          [
+            'ball-1',
+            { originX: 96, originY: 96, slices: [{ id: 'ball-1', px: 96, py: 96, depth: 5, scaleX: 1, scaleY: 1 }] },
+          ],
+        ]),
+      refreshBallVisuals: scenePrivate.refreshBallVisuals,
+      ...over,
     }
+    return { scene, image }
   }
 
-  const kick = {
-    ballId: 'ball-1',
-    path: [
-      { x: 1, y: 3 },
-      { x: 1, y: 4 },
-    ],
-    durationMs: 160,
-    power: 'kick' as const,
-    grazed: false,
-    bounces: 0,
-  }
+  it('o chute alto SOBE: no ápice a bola está mais alta, maior e acima de tudo', () => {
+    // A mecânica (atravessar a mobília) já existia; o que faltava era a bola
+    // PARECER que está no ar — sem isso o chute alto sai visualmente rasteiro.
+    const { scene, image } = fakeSceneComImagem()
+    scene.ballFlights.set('ball-1', { totalMs: 700, lift: 40 })
+    // Metade do prazo restante = ápice da meia-senóide.
+    scene.ballStates.set('ball-1', { id: 'ball-1', x: 96, y: 96, vx: 300, vy: 0, airborneMs: 350 })
 
-  it('anima a rolagem pelo caminho recebido e para no tile do servidor', () => {
-    const { scene } = fakeSceneComBola()
+    scenePrivate.refreshBallVisuals.call(scene)
 
-    scenePrivate.playBallKick.call(scene, kick)
-
-    const config = scene.tweens.add.mock.calls[0][0]
-    // Um alvo por tile — a bola passa pelas quinas em vez de cortar reto.
-    expect(config.x).toEqual([48, 48])
-    expect(config.y).toEqual([112, 144])
-    expect(config.duration).toBe(160)
-    expect(config.rotation).toBeGreaterThan(0)
-    expect(scene.ballStates.get('ball-1')).toEqual({ id: 'ball-1', x: 1, y: 4 })
-    expect(playKickSound).toHaveBeenCalledWith({ power: 'kick', grazed: false })
+    expect(image.y).toBeLessThan(96)
+    expect(image.scaleX).toBeGreaterThan(1)
+    expect(image.depth).toBeGreaterThan(5)
   })
 
-  it('bola entalada (caminho vazio) não anima, mas a batida sai', () => {
-    const { scene } = fakeSceneComBola()
-    vi.mocked(playKickSound).mockClear()
+  it('ao pousar, volta à altura, à escala e à profundidade de CHÃO', () => {
+    // A base é sempre a escala do layout, nunca a viva: partir da inflada faria
+    // a bola crescer a cada chute, sem nunca voltar.
+    const { scene, image } = fakeSceneComImagem()
+    scene.ballStates.set('ball-1', { id: 'ball-1', x: 96, y: 96, vx: 0, vy: 0 })
 
-    scenePrivate.playBallKick.call(scene, { ...kick, path: [], durationMs: 0 })
+    scenePrivate.refreshBallVisuals.call(scene)
 
-    expect(scene.tweens.add).not.toHaveBeenCalled()
-    expect(playKickSound).toHaveBeenCalled()
-    expect(scene.ballStates.get('ball-1')).toEqual({ id: 'ball-1', x: 1, y: 2 })
+    expect(image.y).toBe(96)
+    expect(image.scaleX).toBe(1)
+    expect(image.depth).toBe(5)
   })
 
-  it('bola de 2×2 move os quatro slices juntos e não gira', () => {
-    const { scene } = fakeSceneComBola()
-    const slices = [
-      { id: 'p__0-0', px: 48, py: 80, depth: 30, scaleX: 1, scaleY: 1 },
-      { id: 'p__1-0', px: 80, py: 80, depth: 30, scaleX: 1, scaleY: 1 },
-      { id: 'p__0-1', px: 48, py: 112, depth: 30, scaleX: 1, scaleY: 1 },
-      { id: 'p__1-1', px: 80, py: 112, depth: 30, scaleX: 1, scaleY: 1 },
-    ]
-    for (const slice of slices) {
-      scene.publishedObjectImages.set(slice.id, {
-        rotation: 0,
-        y: 0,
-        depth: 30,
-        scaleX: 1,
-        scaleY: 1,
-        setPosition: vi.fn().mockReturnThis(),
-        setVisible: vi.fn().mockReturnThis(),
-        setRotation: vi.fn().mockReturnThis(),
-        setDepth: vi.fn().mockReturnThis(),
-        setScale: vi.fn().mockReturnThis(),
-      })
-    }
-    scene.ballStates.set('pilates', { id: 'pilates', x: 1, y: 2, w: 2, h: 2, memberIds: slices.map((s) => s.id) })
-    scene.ballLayout = () => new Map([['pilates', { originX: 1, originY: 2, slices }]])
+  it('no começo e no fim do voo a bola está rente ao chão', () => {
+    const { scene, image } = fakeSceneComImagem()
+    scene.ballFlights.set('ball-1', { totalMs: 700, lift: 40 })
+    scene.ballStates.set('ball-1', { id: 'ball-1', x: 96, y: 96, vx: 300, vy: 0, airborneMs: 700 })
 
-    scenePrivate.playBallKick.call(scene, { ...kick, ballId: 'pilates', path: [{ x: 2, y: 2 }] })
+    scenePrivate.refreshBallVisuals.call(scene)
 
-    const configs = scene.tweens.add.mock.calls.map((call) => call[0])
-    expect(configs).toHaveLength(4)
-    // Todos deslocam o MESMO tile: a peça anda inteira, sem se desmontar.
-    expect(configs.map((config) => config.x[0])).toEqual([80, 112, 80, 112])
-    expect(configs.map((config) => config.y[0])).toEqual([80, 80, 112, 112])
-    expect(configs.every((config) => config.rotation === undefined)).toBe(true)
-
-    // O bug: guardando só o último tween, os outros três seguiam correndo
-    // quando um chute novo chegava — e a peça se partia na tela.
-    const tweens = scene.tweens.add.mock.results.map((result) => result.value)
-    scenePrivate.playBallKick.call(scene, { ...kick, ballId: 'pilates', path: [{ x: 3, y: 2 }] })
-    for (const tween of tweens) expect(tween.remove).toHaveBeenCalled()
+    expect(image.y).toBeCloseTo(96, 5)
   })
 
-  it('chute alto sobe: arco no onUpdate e bola por cima de tudo', () => {
-    const { scene, image } = fakeSceneComBola()
-    const depthInicial = image.depth
+  it('o chute guarda a VELOCIDADE, não uma trajetória', () => {
+    // O evento deixou de trazer o caminho resolvido: ele traz o estado da bola,
+    // e a cena integra a mesma física do servidor a partir dali.
+    const scene = fakeSceneComBola()
+    const chutada = bola({ vx: 0, vy: 380 })
 
-    scenePrivate.playBallKick.call(scene, { ...kick, power: 'lob' })
+    scenePrivate.playBallKick.call(scene, 'ana', chutada, 'kick')
 
-    const config = scene.tweens.add.mock.calls[0][0] as unknown as {
-      ease: string
-      onUpdate?: (tween: { progress: number }) => void
-    }
-    // No ar a bola vai em velocidade constante; quem dá o ritmo é o arco.
-    expect(config.ease).toBe('Linear')
-    expect(image.setDepth).toHaveBeenCalledWith(9_000)
-
-    // No meio do voo o `y` sobe em relação ao chão que o tween escreveu…
-    image.y = 100
-    config.onUpdate?.({ progress: 0.5 })
-    expect(image.y).toBeLessThan(100)
-    expect(image.setScale).toHaveBeenLastCalledWith(1.3, 1.3)
-
-    // …e o fim do voo devolve profundidade e escala pelo layout.
-    scenePrivate.cancelBallTweens.call(scene, 'ball-1')
-    expect(image.setDepth).toHaveBeenLastCalledWith(depthInicial)
-    expect(image.setScale).toHaveBeenLastCalledWith(1, 1)
+    expect(scene.ballStates.get('ball-1')).toMatchObject({ vx: 0, vy: 380 })
   })
 
-  // O bug: a escala do voo era lida da imagem VIVA, então um chute novo antes
-  // do pouso tomava a escala já inflada como base — e a bola crescia a cada
-  // chute, sem nunca voltar.
-  it('chute novo durante o voo não deixa a bola crescer', () => {
-    const { scene, image } = fakeSceneComBola()
-
-    scenePrivate.playBallKick.call(scene, { ...kick, power: 'lob' })
-    const primeiro = scene.tweens.add.mock.calls[0][0] as unknown as {
-      onUpdate?: (tween: { progress: number }) => void
-    }
-    primeiro.onUpdate?.({ progress: 0.5 })
-    // A imagem viva está inflada quando o segundo chute chega.
-    image.scaleX = 1.3
-    image.scaleY = 1.3
-
-    scenePrivate.playBallKick.call(scene, { ...kick, power: 'lob' })
-    const segundo = scene.tweens.add.mock.calls[1][0] as unknown as {
-      onUpdate?: (tween: { progress: number }) => void
-    }
-    segundo.onUpdate?.({ progress: 0.5 })
-
-    // Mesmo ápice do primeiro voo: a base é a escala de chão do layout.
-    expect(image.setScale).toHaveBeenLastCalledWith(1.3, 1.3)
-  })
-
-  it('chute rasteiro não tem arco', () => {
-    const { scene } = fakeSceneComBola()
-
-    scenePrivate.playBallKick.call(scene, kick)
-
-    const config = scene.tweens.add.mock.calls[0][0] as unknown as { ease: string; onUpdate?: unknown }
-    expect(config.ease).toBe('Quad.easeOut')
-    expect(config.onUpdate).toBeUndefined()
-  })
-
-  it('conduzir não faz barulho: um poc por passo viraria metralhadora', () => {
-    const { scene } = fakeSceneComBola()
-    vi.mocked(playKickSound).mockClear()
-
-    scenePrivate.playBallKick.call(scene, { ...kick, power: 'dribble', path: [{ x: 1, y: 3 }] })
-
-    expect(playKickSound).not.toHaveBeenCalled()
-    // …mas a bola anda: a condução é movimento como qualquer outro.
-    expect(scene.tweens.add).toHaveBeenCalled()
-    expect(scene.ballStates.get('ball-1')).toMatchObject({ x: 1, y: 3 })
-  })
-
-  it('chute do outro lado do escritório não faz barulho aqui', () => {
-    const { scene } = fakeSceneComBola()
-    vi.mocked(playKickSound).mockClear()
-
-    scenePrivate.playBallKick.call(scene, {
-      ...kick,
-      path: [{ x: 9, y: 9 }],
+  it('integra a bola no quadro e redesenha quando ela se mexe', () => {
+    const scene = fakeSceneComBola({
+      ballStates: new Map<string, OfficeBall>([['ball-1', bola({ vy: 300 })]]),
     })
 
-    expect(playKickSound).not.toHaveBeenCalled()
+    scenePrivate.updateBalls.call(scene, 33)
+
+    expect(scene.ballStates.get('ball-1')!.y).toBeGreaterThan(96)
+    expect(scene.refreshBallVisuals).toHaveBeenCalled()
+  })
+
+  it('bola parada não redesenha nada — quadro parado tem de custar zero', () => {
+    const scene = fakeSceneComBola()
+
+    scenePrivate.updateBalls.call(scene, 33)
+
+    expect(scene.refreshBallVisuals).not.toHaveBeenCalled()
+  })
+
+  it('no modo de edição a bola não roda: é mobília sendo arrastada', () => {
+    const scene = fakeSceneComBola({
+      editing: true,
+      ballStates: new Map<string, OfficeBall>([['ball-1', bola({ vy: 300 })]]),
+    })
+
+    scenePrivate.updateBalls.call(scene, 33)
+
+    expect(scene.ballStates.get('ball-1')!.y).toBe(96)
   })
 })
 
-
-describe('OfficeScene — movimento em oito direções', () => {
-  function teclas(pressionadas: string[]) {
-    const key = (nome: string) => ({ isDown: pressionadas.includes(nome) })
+describe('OfficeScene — paintball', () => {
+  function fakeImage() {
     return {
-      modifierKeyDown: false,
-      keys: {
-        up: [key('up')],
-        down: [key('down')],
-        left: [key('left')],
-        right: [key('right')],
-      },
+      scene: {},
+      scale: 1,
+      alpha: 1,
+      setTint: vi.fn().mockReturnThis(),
+      setDepth: vi.fn().mockReturnThis(),
+      setAlpha: vi.fn().mockReturnThis(),
+      destroy: vi.fn(),
     }
   }
 
-  it('compõe vertical + horizontal numa diagonal', () => {
-    expect(scenePrivate.pressedMove.call(teclas(['up', 'right']))).toBe('up-right')
-    expect(scenePrivate.pressedMove.call(teclas(['down', 'left']))).toBe('down-left')
-  })
-
-  it('uma tecla só continua sendo passo reto', () => {
-    expect(scenePrivate.pressedMove.call(teclas(['left']))).toBe('left')
-    expect(scenePrivate.pressedMove.call(teclas([]))).toBeNull()
-  })
-
-  // Segurar A e D ao mesmo tempo não anda de lado nenhum: os opostos se
-  // anulam, o que também evita mandar passo quando o dedo troca de direção
-  // sem soltar a tecla anterior.
-  it('eixos opostos se anulam', () => {
-    expect(scenePrivate.pressedMove.call(teclas(['left', 'right']))).toBeNull()
-    expect(scenePrivate.pressedMove.call(teclas(['left', 'right', 'up']))).toBe('up')
-  })
-
-  function cenaComPersonagem() {
+  function fakeScene(overrides: Record<string, unknown> = {}) {
+    const container = { add: vi.fn() }
+    const images: ReturnType<typeof fakeImage>[] = []
+    const delayedCalls: Array<() => void> = []
     const view = {
-      container: { setDepth: vi.fn(), x: 0, y: 0 },
-      body: {},
-      bodyBaseY: 0,
-      lastDir: 'down',
-      textureKey: null,
-      tween: undefined,
-      bobTween: undefined,
-      kart: undefined as unknown,
-      tile: { x: 5, y: 5 },
+      userId: 'bruno',
+      container,
+      avatar: {
+        userId: 'bruno',
+        avatarStyle: null,
+        avatarSeed: null,
+        avatarOptions: null,
+      } as Pick<OfficeOccupant, 'userId' | 'avatarStyle' | 'avatarSeed' | 'avatarOptions' | 'paintMarker'>,
+      paintSplats: undefined as Map<string, unknown> | undefined,
     }
-    return {
+    const scene = {
       view,
-      scene: {
-        characters: new Map<string, unknown>([['ana', view]]),
-        ridingUserIds: new Set<string>(),
-        kartStates: new Map(),
-        bridge: { occupantSnapshot: vi.fn(() => null), emitClientMessage: vi.fn() },
-        document: createEmptyMapDocumentV1({ width: 10, height: 10, tileSize: 32 }),
-        tweens: { add: vi.fn((_config: { duration: number }) => ({})) },
-        add: { image: vi.fn(() => ({ setDepth: vi.fn().mockReturnThis(), setOrigin: vi.fn().mockReturnThis(), destroy: vi.fn() })) },
-        face: vi.fn(),
-        updateConfettiDirection: vi.fn(),
-        clearBubble: vi.fn(),
-        applyKartVisual: vi.fn(),
-        refreshKartVisuals: vi.fn(),
-        isRiding: scenePrivate.isRiding,
-        youId: 'ana',
+      images,
+      tileAtPixel: scenePrivate.tileAtPixel,
+      delayedCalls,
+      youId: 'ana',
+      bridge: { occupantSnapshot: vi.fn(() => ({ userId: 'ana', ...emPixel(1, 1) })) },
+      document: createEmptyMapDocumentV1({ width: 20, height: 20, tileSize: 32 }),
+      characters: new Map<string, unknown>([['bruno', view]]),
+      add: {
+        image: vi.fn(() => {
+          const image = fakeImage()
+          images.push(image)
+          return image
+        }),
       },
+      tweens: { add: vi.fn((config: Record<string, unknown>) => config) },
+      time: { delayedCall: vi.fn((_ms: number, fn: () => void) => delayedCalls.push(fn)) },
+      loadCharacterSprite: vi.fn(),
+      earshotLevel: scenePrivate.earshotLevel,
+      applyPaintSplat: scenePrivate.applyPaintSplat,
+      burstPaint: scenePrivate.burstPaint,
+      ...overrides,
+    }
+    return scene
+  }
+
+  // De/para em PIXEL: o disparo vem resolvido do servidor (`fireBodyShot`), e a
+  // cena só anima. Antes era uma lista de tiles, e a cena convertia cada um em
+  // centro — com posição contínua isso faria o tiro sair do lugar errado.
+  const shot = {
+    shooterId: 'ana',
+    from: { x: 48, y: 48 },
+    to: { x: 48, y: 112 },
+    durationMs: 56,
+    color: 0xff3b7b,
+    splat: null,
+  }
+
+  it('anima a bolinha do atirador até o tile onde o servidor disse que ela estoura', () => {
+    const scene = fakeScene()
+
+    scenePrivate.playPaintballShot.call(scene, shot)
+
+    const config = scene.tweens.add.mock.calls[0][0] as { x: number; y: number; duration: number }
+    // Um alvo só, e não um por tile: o tiro é reto e não passa por quina
+    // nenhuma — diferente do chute, que rebate.
+    expect(config.x).toBe(48)
+    expect(config.y).toBe(112 + PAINTBALL_MUZZLE_Y)
+    expect(config.duration).toBe(56)
+    expect(scene.add.image).toHaveBeenCalledWith(48, 48 + PAINTBALL_MUZZLE_Y, PAINT_PELLET_TEXTURE)
+    expect(playPaintballSound).toHaveBeenCalledWith({ hit: false, volume: 1 })
+  })
+
+  it('tiro contra a parede colada (caminho vazio) não anima, mas o disparo soa', () => {
+    const scene = fakeScene()
+    vi.mocked(playPaintballSound).mockClear()
+
+    scenePrivate.playPaintballShot.call(scene, { ...shot, to: shot.from, durationMs: 0 })
+
+    expect(scene.tweens.add).not.toHaveBeenCalled()
+    expect(playPaintballSound).toHaveBeenCalledWith({ hit: false, volume: 1 })
+  })
+
+  // O pedido que originou a regra: paintball é brincadeira do espaço público.
+  // Quem está numa chamada a poucos tiles dali não pode ouvir o tiro.
+  it('tiro na área aberta não vaza para quem está em sala de chamada', () => {
+    const scene = fakeScene({
+      bridge: { occupantSnapshot: vi.fn(() => ({ userId: 'ana', ...emPixel(4, 4) })) },
+      document: mapaComSala(),
+    })
+    vi.mocked(playPaintballSound).mockClear()
+
+    scenePrivate.playPaintballShot.call(scene, { ...shot, from: { x: 272, y: 144 }, to: { x: 272, y: 208 } })
+
+    expect(playPaintballSound).not.toHaveBeenCalled()
+  })
+
+  it('tiro do outro lado do escritório não chega aqui', () => {
+    const scene = fakeScene({ document: mapaComSala() })
+    vi.mocked(playPaintballSound).mockClear()
+
+    scenePrivate.playPaintballShot.call(scene, { ...shot, from: { x: 656, y: 656 }, to: { x: 656, y: 720 } })
+
+    expect(playPaintballSound).not.toHaveBeenCalled()
+  })
+
+  it('tiro perto, mas não em cima, chega mais baixo', () => {
+    const scene = fakeScene({ document: mapaComSala() })
+    vi.mocked(playPaintballSound).mockClear()
+
+    scenePrivate.playPaintballShot.call(scene, { ...shot, from: { x: 208, y: 48 }, to: { x: 208, y: 112 } })
+
+    const { volume } = vi.mocked(playPaintballSound).mock.calls[0][0] as { volume: number }
+    expect(volume).toBeGreaterThan(0)
+    expect(volume).toBeLessThan(1)
+  })
+
+  it('acerto gruda a mancha em quem levou, com a cor de quem atirou', () => {
+    const scene = fakeScene()
+    const splat = { id: 'ana:bruno:1', userId: 'bruno', byUserId: 'ana', color: 0x2ec4b6, ttlMs: 25_000 }
+
+    scenePrivate.playPaintballShot.call(scene, { ...shot, splat })
+
+    expect(scene.view.container.add).toHaveBeenCalledTimes(1)
+    expect(scene.view.paintSplats?.size).toBe(1)
+    const image = scene.images.find((candidate) => candidate.setTint.mock.calls[0]?.[0] === 0x2ec4b6)
+    expect(image).toBeDefined()
+  })
+
+  // O `welcome` sintético do bridge repete as marcas vivas a cada remontagem
+  // da cena; repor a mesma imagem duplicaria a tinta e o timer dela.
+  it('a mesma marca não é aplicada duas vezes', () => {
+    const scene = fakeScene()
+    const splat = { id: 'ana:bruno:1', userId: 'bruno', byUserId: 'ana', color: 0x2ec4b6, ttlMs: 25_000 }
+
+    scenePrivate.applyPaintSplat.call(scene, splat)
+    scenePrivate.applyPaintSplat.call(scene, splat)
+
+    expect(scene.view.container.add).toHaveBeenCalledTimes(1)
+  })
+
+  it('a mancha some sozinha quando o ttl acaba', () => {
+    const scene = fakeScene()
+    const splat = { id: 'ana:bruno:1', userId: 'bruno', byUserId: 'ana', color: 0x2ec4b6, ttlMs: 25_000 }
+
+    scenePrivate.applyPaintSplat.call(scene, splat)
+    expect(scene.view.paintSplats?.size).toBe(1)
+
+    // O timer do fade dispara; o `onComplete` do tween é quem apaga de fato.
+    scene.delayedCalls.forEach((fn) => fn())
+    const fade = scene.tweens.add.mock.calls
+      .map((call) => call[0] as { alpha?: number; onComplete?: () => void })
+      .find((config) => config.alpha === 0)
+    fade?.onComplete?.()
+
+    expect(scene.view.paintSplats?.size).toBe(0)
+  })
+
+  it('marca para quem ainda não tem personagem na cena é ignorada, sem quebrar', () => {
+    const scene = fakeScene()
+    const splat = { id: 'ana:fantasma:1', userId: 'fantasma', byUserId: 'ana', color: 0x2ec4b6, ttlMs: 1_000 }
+
+    expect(() => scenePrivate.applyPaintSplat.call(scene, splat)).not.toThrow()
+    expect(scene.view.container.add).not.toHaveBeenCalled()
+  })
+
+  // O borrão único que crescia lia como fumaça: escalar reamostra a arte sob
+  // `pixelArt`, e no meio do fade sobrava um cinza sem forma sobre o piso claro.
+  it('o estouro do impacto são respingos em tamanho real, que somem sozinhos', () => {
+    const scene = fakeScene()
+
+    scenePrivate.burstPaint.call(scene, 10, 20, 0xffd23f)
+
+    expect(scene.images).toHaveLength(PAINT_BURST_DROPS)
+    expect(scene.add.image).toHaveBeenCalledWith(10, 20, PAINT_PELLET_TEXTURE)
+    const configs = scene.tweens.add.mock.calls.map(
+      (call) => call[0] as { alpha: number; x: number; y: number; onComplete: () => void },
+    )
+    expect(configs).toHaveLength(PAINT_BURST_DROPS)
+    // Saem em direções diferentes — respingo simétrico não lê como estouro.
+    expect(new Set(configs.map((c) => `${Math.round(c.x)},${Math.round(c.y)}`)).size).toBe(PAINT_BURST_DROPS)
+    for (const config of configs) {
+      expect(config.alpha).toBe(0)
+      config.onComplete()
+    }
+    expect(scene.images.every((image) => image.destroy.mock.calls.length === 1)).toBe(true)
+  })
+
+  // A mancha não pode ser escalada nem girada: a máscara já vem no tamanho de
+  // desenho, e transformar reamostra a arte (é o que serrilhava a tinta).
+  it('a mancha entra por alfa, sem escala nem giro', () => {
+    const scene = fakeScene()
+    const splat = { id: 'ana:bruno:1', userId: 'bruno', byUserId: 'ana', color: 0x2ec4b6, ttlMs: 25_000 }
+
+    scenePrivate.applyPaintSplat.call(scene, splat)
+
+    const image = scene.images[0]
+    expect(image.setAlpha).toHaveBeenCalledWith(0)
+    expect(image).not.toHaveProperty('setAngle')
+    const entrada = scene.tweens.add.mock.calls[0][0] as { alpha: number }
+    expect(entrada.alpha).toBe(1)
+    // A textura escolhida é a da variante derivada do id.
+    const usada = (scene.add.image.mock.calls[0] as unknown as [number, number, string])[2]
+    expect(usada).toMatch(/^office-paint-splat-\d$/)
+  })
+
+  it('equipar recompõe o sprite preservando o personagem escolhido', () => {
+    const scene = fakeScene()
+    scene.view.avatar = {
+      userId: 'bruno',
+      avatarStyle: null,
+      avatarSeed: 'semente',
+      avatarOptions: null,
+    }
+
+    scenePrivate.setPaintMarker.call(scene, 'bruno', true)
+
+    expect(scene.loadCharacterSprite).toHaveBeenCalledWith(
+      expect.objectContaining({ avatarSeed: 'semente', paintMarker: true }),
+      scene.view,
+    )
+  })
+
+  it('equipar de novo quem já está armado não recompõe nada', () => {
+    const scene = fakeScene()
+    scene.view.avatar = { ...scene.view.avatar, paintMarker: true }
+
+    scenePrivate.setPaintMarker.call(scene, 'bruno', true)
+
+    expect(scene.loadCharacterSprite).not.toHaveBeenCalled()
+  })
+})
+
+describe('OfficeScene — a unidade de quem OUVE', () => {
+  const document = createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 })
+
+  /** Occupant como ele chega do bridge desde o movimento livre: em PIXEL. */
+  function ocupante(userId: string, tileX: number, tileY: number): OfficeOccupant {
+    return {
+      userId,
+      name: userId,
+      x: tileX * 32 + 16,
+      y: tileY * 32 + 16,
+      dir: 'down',
+      avatarSeed: null,
+      avatarOptions: null,
     }
   }
 
-  it('o passo diagonal dura √2 vezes o reto — mesma velocidade em qualquer direção', () => {
-    const reto = cenaComPersonagem()
-    scenePrivate.step.call(reto.scene, 'ana', 6, 5, 'right', false)
-    const duracaoReta = reto.scene.tweens.add.mock.calls[0][0].duration
+  function cena(you: OfficeOccupant) {
+    return {
+      youId: you.userId,
+      document,
+      bridge: { occupantSnapshot: (id: string) => (id === you.userId ? you : null) },
+      tileAtPixel: scenePrivate.tileAtPixel,
+    }
+  }
 
-    const diagonal = cenaComPersonagem()
-    scenePrivate.step.call(diagonal.scene, 'ana', 6, 6, 'right', false)
-    const duracaoDiagonal = diagonal.scene.tweens.add.mock.calls[0][0].duration
+  it('a batida da bola ao lado chega inteira — o ouvinte é convertido para TILE', () => {
+    // O ouvinte vem do bridge em PIXEL e `officeSoundLevel` cobra TILE. Sem a
+    // conversão toda distância estourava o raio e a bola ficava muda: o gesto
+    // acontecia na sua frente e não saía som nenhum.
+    const you = ocupante('you', 10, 10)
+    const nivel = scenePrivate.earshotLevel.call(cena(you), { x: 11, y: 10 })
+    expect(nivel).toBeGreaterThan(0)
+  })
 
-    expect(duracaoDiagonal / duracaoReta).toBeCloseTo(Math.SQRT2, 3)
+  it('do outro lado do mapa continua mudo', () => {
+    const you = ocupante('you', 2, 2)
+    expect(scenePrivate.earshotLevel.call(cena(you), { x: 25, y: 25 })).toBe(0)
+  })
+
+  it('sem snapshot seu ainda, o som sai inteiro', () => {
+    const cenaSemVoce = { youId: 'you', document, bridge: { occupantSnapshot: () => null }, tileAtPixel: scenePrivate.tileAtPixel }
+    expect(scenePrivate.earshotLevel.call(cenaSemVoce, { x: 25, y: 25 })).toBe(1)
+  })
+
+  it('a palma do high-five é ouvida por quem está a um tile — não a um PIXEL', () => {
+    // Os três occupants entram em PIXEL. Sem converter, o raio de 3 tiles virava
+    // um raio de 3 pixels e só quem batia a mão ouvia a própria palma.
+    const you = ocupante('you', 10, 10)
+    const ana = ocupante('ana', 11, 10)
+    const bia = ocupante('bia', 12, 10)
+    const todos = new Map([you, ana, bia].map((o) => [o.userId, o]))
+
+    expect(
+      highFiveWithinEarshot(document, 'you', (id) => todos.get(id) ?? null, ['ana', 'bia']),
+    ).toBe(true)
+  })
+
+  it('a palma de quem está longe não vaza', () => {
+    const you = ocupante('you', 2, 2)
+    const ana = ocupante('ana', 25, 25)
+    const bia = ocupante('bia', 26, 25)
+    const todos = new Map([you, ana, bia].map((o) => [o.userId, o]))
+
+    expect(
+      highFiveWithinEarshot(document, 'you', (id) => todos.get(id) ?? null, ['ana', 'bia']),
+    ).toBe(false)
+  })
+})
+
+describe('OfficeScene — o kart dos OUTROS', () => {
+  const document = createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 })
+
+  function cena(amostra: { x: number; y: number; dir: string; heading?: number }, over: Record<string, unknown> = {}) {
+    const view = { userId: 'ana', kart: {}, lastDir: 'down' }
+    const placeBody = vi.fn()
+    const s = {
+      youId: 'you',
+      document,
+      characters: new Map([['ana', view]]),
+      bodyInterpolator: { at: () => amostra },
+      lastRemoteDraw: new Map<string, { x: number; y: number; heading?: number; at: number }>(),
+      remoteSprint: new Set<string>(),
+      isRiding: () => true,
+      emitRemoteKartSmoke: vi.fn(),
+      placeBody,
+      ...over,
+    }
+    return { s, placeBody }
+  }
+
+  it('entrega o RUMO interpolado ao desenho — sem ele o kart desliza apontado para onde nasceu', () => {
+    const { s, placeBody } = cena({ x: 100, y: 100, dir: 'right', heading: 1.2 })
+    scenePrivate.drawRemoteBodies.call(s, 1000)
+    expect(placeBody).toHaveBeenCalledWith(expect.anything(), 100, 100, 'right', false, false, 1.2)
+  })
+
+  it('o rumo é PEGAJOSO: amostra sem rumo mantém o último, em vez de saltar para zero', () => {
+    const { s, placeBody } = cena({ x: 100, y: 100, dir: 'right' })
+    s.lastRemoteDraw.set('ana', { x: 90, y: 100, heading: 1.2, at: 980 })
+    scenePrivate.drawRemoteBodies.call(s, 1000)
+    expect(placeBody).toHaveBeenCalledWith(expect.anything(), 100, 100, 'right', true, false, 1.2)
+  })
+
+  it('quem está a pé não recebe rumo — senão um rumo velho giraria o kart seguinte', () => {
+    const { s, placeBody } = cena({ x: 100, y: 100, dir: 'right', heading: 1.2 }, { isRiding: () => false })
+    s.lastRemoteDraw.set('ana', { x: 90, y: 100, heading: 1.2, at: 980 })
+    scenePrivate.drawRemoteBodies.call(s, 1000)
+    expect(placeBody).toHaveBeenCalledWith(expect.anything(), 100, 100, 'right', true, false, undefined)
   })
 })

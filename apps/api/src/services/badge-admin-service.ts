@@ -7,7 +7,9 @@ export class BadgeAdminError extends Error {
   constructor(message: string, public status: number) { super(message); this.name = 'BadgeAdminError' }
 }
 
-export const badgeInclude = { sectors: true } as const
+// `badgeCategory` entra no include porque o DTO do admin mostra o NOME do tema
+// na gaveta; sem ele a tela teria de cruzar a lista de temas por conta própria.
+export const badgeInclude = { sectors: true, badgeCategory: { select: { name: true } } } as const
 export type BadgeWithSectors = Prisma.BadgeGetPayload<{ include: typeof badgeInclude }>
 
 async function assertSectorsBelongToCompany(
@@ -41,7 +43,13 @@ interface CreateBadgeInput {
   kind: BadgeKind
   iconKey: string
   threshold?: number
+  /** `slug` da RecognitionCategory — só para selos de tipo CATEGORY. */
   categorySlug?: string | null
+  /** Tema do catálogo (Documento 4, 11.4). Outro conceito, outro campo. */
+  badgeCategoryId?: string | null
+  /** Recompensa ao conquistar; `null` não concede. */
+  rewardPoints?: number | null
+  rewardCoins?: number | null
   global: boolean
   sectorIds: string[]
 }
@@ -60,6 +68,9 @@ export async function createBadgeAdmin(input: CreateBadgeInput, actorId: string,
           iconKey: input.iconKey,
           threshold: input.threshold ?? 0,
           categorySlug: input.categorySlug ?? null,
+          badgeCategoryId: input.badgeCategoryId ?? null,
+          rewardPoints: input.rewardPoints ?? null,
+          rewardCoins: input.rewardCoins ?? null,
           global: input.global,
           sectors: input.sectorIds.length > 0 ? { create: input.sectorIds.map((sectorId) => ({ sectorId })) } : undefined,
         },
@@ -89,6 +100,9 @@ interface UpdateBadgeInput {
   iconKey?: string
   threshold?: number
   categorySlug?: string | null
+  badgeCategoryId?: string | null
+  rewardPoints?: number | null
+  rewardCoins?: number | null
   global?: boolean
   sectorIds?: string[]
 }

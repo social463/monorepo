@@ -120,7 +120,31 @@ export const MOOD_REASON_UNSET_LABEL = 'Não informado'
 // Piso de anonimato: nenhum recorte (dia, setor, período) com menos de
 // MOOD_ANONYMITY_MIN respostas é exibido ou devolvido pela API — abaixo disso
 // o número seria pequeno o bastante para apontar uma pessoa.
-export const MOOD_ANONYMITY_MIN = 3
+//
+// Em 08/09/2026 a G&G desligou o piso, baixando-o de 3 para 1: o termômetro
+// existe para a pessoa estressada ser vista, e o time pequeno — ou o dia de
+// pouca resposta — era exatamente onde ela sumia. O que se troca é real e foi
+// aceito: com 1 registro no recorte, o humor deixa de ser anônimo por dedução
+// (num setor de duas pessoas, "um Estressado hoje" aponta para alguém).
+//
+// O piso continua sendo o mecanismo, e não código morto: subir este número de
+// volta para 3 restaura a supressão inteira — série, distribuição de hoje,
+// média da semana e ranking de motivos — sem tocar em mais nada.
+export const MOOD_ANONYMITY_MIN = 1
+
+// Janela mínima/máxima da série do termômetro: fora disso `/admin/mood/overview`
+// devolve 400. Moram aqui, e não só no service, porque o filtro de período da
+// aba Clima precisa da MESMA regra para não oferecer um recorte que a API
+// recusa — era o que fazia o atalho "Hoje" (1 dia) virar "Erro ao carregar o
+// termômetro de humor" na tela.
+//
+// O mínimo era 7 por dois motivos: recorte curto não forma tendência e não
+// protegia o anonimato. O segundo caiu junto com o piso (ver
+// MOOD_ANONYMITY_MIN), e o primeiro nunca foi motivo para RECUSAR a consulta —
+// a G&G pediu para ver o dia de hoje, e uma série de um ponto é um gráfico
+// pobre, não um erro. Daí 1: o atalho "Hoje" volta a responder.
+export const MOOD_OVERVIEW_MIN_DAYS = 1
+export const MOOD_OVERVIEW_MAX_DAYS = 90
 
 // `day` em YYYY-MM-DD (data civil em America/Sao_Paulo).
 // `mood` é null quando o usuário ainda não registrou hoje.

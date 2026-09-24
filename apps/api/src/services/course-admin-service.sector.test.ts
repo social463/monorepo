@@ -42,7 +42,6 @@ async function makeCourseWithContent(sectorId: string | null) {
     data: {
       slug: `curso-${Math.random().toString(36).slice(2)}`,
       title: 'Curso de teste',
-      category: 'Liderança',
       sectorId,
     },
   })
@@ -50,7 +49,7 @@ async function makeCourseWithContent(sectorId: string | null) {
     data: { courseId: course.id, title: 'Módulo 1', sortOrder: 0 },
   })
   const lesson = await prisma.courseLesson.create({
-    data: { courseId: course.id, moduleId: courseModule.id, title: 'Aula 1', type: 'TEXT', sortOrder: 0 },
+    data: { courseId: course.id, moduleId: courseModule.id, title: 'Aula 1', sortOrder: 0 },
   })
   return { course, courseModule, lesson }
 }
@@ -107,12 +106,12 @@ describe('course-admin-service — recorte por setor na escrita', () => {
     it('SUBADMIN recebe 404 ao publicar curso sem setor (da empresa toda)', async () => {
       const { course, courseModule } = await makeCourseWithContent(null)
       await prisma.courseLesson.create({
-        data: { courseId: course.id, moduleId: courseModule.id, title: 'Aula extra', type: 'TEXT', sortOrder: 1 },
+        data: { courseId: course.id, moduleId: courseModule.id, title: 'Aula extra', sortOrder: 1 },
       })
       const actor = await makeActor()
 
       await expect(
-        updateCourse({ courseId: course.id, data: { published: true }, actor }),
+        updateCourse({ courseId: course.id, data: { status: 'PUBLISHED' }, actor }),
       ).rejects.toMatchObject({ status: 404 })
     })
 
@@ -195,7 +194,7 @@ describe('course-admin-service — recorte por setor na escrita', () => {
       const actor = await makeActor()
 
       await expect(
-        createLesson({ moduleId: courseModule.id, data: { title: 'Aula intrusa', type: 'TEXT' }, actor }),
+        createLesson({ moduleId: courseModule.id, data: { title: 'Aula intrusa' }, actor }),
       ).rejects.toMatchObject({ status: 404 })
     })
 
@@ -220,7 +219,7 @@ describe('course-admin-service — recorte por setor na escrita', () => {
       const actor = await makeActor()
 
       await expect(
-        createLesson({ moduleId: courseModule.id, data: { title: 'X', type: 'TEXT' }, actor }),
+        createLesson({ moduleId: courseModule.id, data: { title: 'X' }, actor }),
       ).rejects.toMatchObject({ status: 404 })
       await expect(
         updateLesson({ lessonId: lesson.id, data: { title: 'X' }, actor }),
@@ -234,7 +233,7 @@ describe('course-admin-service — recorte por setor na escrita', () => {
 
       const created = await createLesson({
         moduleId: courseModule.id,
-        data: { title: 'Aula nova', type: 'TEXT' },
+        data: { title: 'Aula nova' },
         actor,
       })
       const newLessonId = created.modules[0].lessons.find((l) => l.title === 'Aula nova')!.id
@@ -252,7 +251,7 @@ describe('course-admin-service — recorte por setor na escrita', () => {
       const actor = await makeActor()
 
       const dto = await createCourse({
-        data: { title: 'Curso do subadmin', category: 'Liderança', sectorId: OUTRO_SETOR },
+        data: { title: 'Curso do subadmin', sectorId: OUTRO_SETOR },
         actor,
       })
 
@@ -263,7 +262,7 @@ describe('course-admin-service — recorte por setor na escrita', () => {
     it('curso criado por SUBADMIN sem sectorId no payload nasce no setor dele', async () => {
       const actor = await makeActor()
 
-      const dto = await createCourse({ data: { title: 'Curso simples', category: 'Liderança' }, actor })
+      const dto = await createCourse({ data: { title: 'Curso simples' }, actor })
 
       const stored = await prisma.course.findUniqueOrThrow({ where: { id: dto.id } })
       expect(stored.sectorId).toBe(DEFAULT_SECTOR_ID)
@@ -273,15 +272,15 @@ describe('course-admin-service — recorte por setor na escrita', () => {
       const admin = await makeActor({ role: 'ADMIN' })
 
       const withSector = await createCourse({
-        data: { title: 'Curso setorial', category: 'Liderança', sectorId: OUTRO_SETOR },
+        data: { title: 'Curso setorial', sectorId: OUTRO_SETOR },
         actor: admin,
       })
       const companyWide = await createCourse({
-        data: { title: 'Curso geral', category: 'Liderança', sectorId: null },
+        data: { title: 'Curso geral', sectorId: null },
         actor: admin,
       })
       const implicitNull = await createCourse({
-        data: { title: 'Curso sem setor por omissão', category: 'Liderança' },
+        data: { title: 'Curso sem setor por omissão' },
         actor: admin,
       })
 
@@ -344,7 +343,7 @@ describe('course-admin-service — sectorId precisa ser da mesma empresa', () =>
     const foreign = await makeSectorOfAnotherCompany('curso-create')
 
     await expect(
-      createCourse({ data: { title: 'Curso', category: 'Liderança', sectorId: foreign.id }, actor }),
+      createCourse({ data: { title: 'Curso', sectorId: foreign.id }, actor }),
     ).rejects.toMatchObject({ status: 404, message: 'Setor não encontrado.' })
     expect(await prisma.course.count({ where: { title: 'Curso' } })).toBe(0)
   })
@@ -353,7 +352,7 @@ describe('course-admin-service — sectorId precisa ser da mesma empresa', () =>
     const actor = await makeActor({ role: 'ADMIN' })
 
     await expect(
-      createCourse({ data: { title: 'Curso', category: 'Liderança', sectorId: 'setor-que-nao-existe' }, actor }),
+      createCourse({ data: { title: 'Curso', sectorId: 'setor-que-nao-existe' }, actor }),
     ).rejects.toMatchObject({ status: 404, message: 'Setor não encontrado.' })
   })
 
@@ -372,7 +371,7 @@ describe('course-admin-service — sectorId precisa ser da mesma empresa', () =>
   it('setor da própria empresa continua sendo aceito na criação e na atualização', async () => {
     const actor = await makeActor({ role: 'ADMIN' })
 
-    const created = await createCourse({ data: { title: 'Curso local', category: 'Liderança', sectorId: OUTRO_SETOR }, actor })
+    const created = await createCourse({ data: { title: 'Curso local', sectorId: OUTRO_SETOR }, actor })
     expect(created.sectorId).toBe(OUTRO_SETOR)
 
     const updated = await updateCourse({ courseId: created.id, data: { sectorId: DEFAULT_SECTOR_ID }, actor })

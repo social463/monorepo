@@ -6,7 +6,7 @@
  * Datas são civis (YYYY-MM-DD) do começo ao fim: entram como string, viram
  * `Date` à meia-noite UTC no banco (`@db.Date`) e voltam a string na saída.
  */
-import { overlaps, type TeamVacationsResponse, type VacationDTO } from '@legends/shared'
+import { canAdminister, overlaps, type TeamVacationsResponse, type VacationDTO } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { scopedPrisma } from '../lib/tenant-scope'
 import { dayFromYmd, todayInSaoPaulo, ymdOf } from '../lib/sao-paulo-date'
@@ -30,19 +30,24 @@ const SECTOR_ROLES_EXCLUDED = ['ADMIN', 'SUBADMIN', 'THIRD_PARTY'] as const
 
 /**
  * Só o gestor direto do alvo — ou um admin da mesma empresa — mexe nas férias
- * de alguém. ADMIN/SUBADMIN não passam pelo team-scope: eles não gerenciam
- * ninguém no sentido de squad, mas administram a empresa inteira.
+ * de alguém. Quem administra não passa pelo team-scope: não gerencia ninguém no
+ * sentido de squad, mas administra a empresa inteira.
+ *
+ * A pergunta aqui é "pode administrar?", então quem responde é `canAdminister`
+ * e não `role` cru: o acesso administrativo delegado vale (ver
+ * `@legends/shared/permissions`). Sem isso, a conta delegada de Gente e Gestão
+ * abre a tela e leva 403 ao lançar as férias de quem não é liderado dela.
  */
 async function assertCanManage(actorId: string, targetUserId: string): Promise<void> {
   const [actor, target] = await Promise.all([
-    prisma.user.findUnique({ where: { id: actorId }, select: { role: true, companyId: true } }),
+    prisma.user.findUnique({ where: { id: actorId }, select: { role: true, companyId: true, adminAccess: true } }),
     prisma.user.findUnique({ where: { id: targetUserId }, select: { companyId: true } }),
   ])
   if (!actor || !target) throw new VacationError('Usuário não encontrado.', 404)
   if (actor.companyId !== target.companyId) {
     throw new VacationError('Sem permissão para lançar férias desta pessoa.', 403)
   }
-  if (actor.role === 'ADMIN' || actor.role === 'SUBADMIN') return
+  if (canAdminister(actor)) return
   if (await managesUser(actorId, targetUserId)) return
   throw new VacationError('Sem permissão para lançar férias desta pessoa.', 403)
 }

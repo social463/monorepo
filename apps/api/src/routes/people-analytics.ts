@@ -1,16 +1,41 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ACCESS_LOG_PATH_MAX_LENGTH, PEOPLE_ANALYTICS_RANGES } from '@legends/shared'
-import { getEngagementOverview, getPeopleOverview, recordAccess } from '../services/people-analytics-service'
+import { getCommunicationOverview } from '../services/communication-analytics-service'
+import { getTrainingOverview, listPositions } from '../services/training-analytics-service'
+import {
+  AnalyticsWindowError,
+  getAccessHeatmap,
+  getEngagementOverview,
+  getInovaOverview,
+  getPeopleOverview,
+  recordAccess,
+} from '../services/people-analytics-service'
 import { touchPresence } from '../services/presence-service'
 
 const accessLogSchema = z.object({
   path: z.string().min(1).max(ACCESS_LOG_PATH_MAX_LENGTH),
 })
 
+/** Data civil `YYYY-MM-DD`, o mesmo formato que o resto do módulo usa. */
+const ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use o formato AAAA-MM-DD.')
+
 const analyticsQuerySchema = z.object({
-  range: z.enum(PEOPLE_ANALYTICS_RANGES).default('30d'),
+  // `custom` não está em PEOPLE_ANALYTICS_RANGES: ele não é atalho de N dias, é
+  // o par from/to. O par só é exigido quando o range é esse — validar no service
+  // (`resolveWindow`) mantém a regra num lugar só, com mensagem em português.
+  range: z.union([z.enum(PEOPLE_ANALYTICS_RANGES), z.literal('custom')]).default('30d'),
+  from: ymd.optional(),
+  to: ymd.optional(),
   sectorId: z.string().min(1).optional(),
+  /** Categoria de comunicado — só o painel de Comunicação Interna usa. */
+  tagId: z.string().min(1).optional(),
+  /**
+   * Cargo (`User.position`) — só a aba de Treinamentos usa (Documento 4, seção
+   * 9.5). Acrescentá-lo aos outros painéis mudaria o contrato de quatro telas
+   * por causa de uma.
+   */
+  position: z.string().min(1).max(120).optional(),
 })
 
 export async function peopleAnalyticsRoutes(app: FastifyInstance) {
@@ -69,13 +94,19 @@ export async function peopleAnalyticsRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
     }
-    return reply.send({
-      overview: await getPeopleOverview({
-        companyId: request.user.companyId,
-        sectorId: resolveSectorId(request, parsed.data.sectorId),
-        range: parsed.data.range,
-      }),
-    })
+    const { range, from, to, sectorId } = parsed.data
+    try {
+      return reply.send({
+        overview: await getPeopleOverview({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          window: { range, from, to },
+        }),
+      })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
   })
 
   app.get('/admin/people/engagement', adminOrSubadmin, async (request, reply) => {
@@ -83,13 +114,123 @@ export async function peopleAnalyticsRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
     }
-    return reply.send({
-      engagement: await getEngagementOverview({
-        companyId: request.user.companyId,
-        sectorId: resolveSectorId(request, parsed.data.sectorId),
-        range: parsed.data.range,
-      }),
-    })
+    const { range, from, to, sectorId } = parsed.data
+    try {
+      return reply.send({
+        engagement: await getEngagementOverview({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          window: { range, from, to },
+        }),
+      })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Painel de Comunicação Interna (Documento 3, seção 4.8). Mora na aba
+   * Engajamento e substitui o bloco simples de alcance do Feed.
+   */
+  app.get('/admin/communication/overview', adminOrSubadmin, async (request, reply) => {
+    const parsed = analyticsQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    const { range, from, to, sectorId, tagId } = parsed.data
+    try {
+      return reply.send({
+        communication: await getCommunicationOverview({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          window: { range, from, to },
+          tagId,
+        }),
+      })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Mapa de calor + tempo médio de sessão. Endpoint próprio, e não um campo do
+   * overview, porque o bloco tem filtro de período e setor **independente** do
+   * cabeçalho da tela (seção 4.2 do Documento 3).
+   */
+  /**
+   * Analytics de Treinamento e Desenvolvimento (Documento 4, seção 9.5).
+   *
+   * Mesmo gate e mesmo recorte de setor das abas vizinhas: subadmin continua
+   * preso ao próprio setor por `resolveSectorId`, e não pelo que mandou na
+   * query.
+   */
+  app.get('/admin/people/training', adminOrSubadmin, async (request, reply) => {
+    const parsed = analyticsQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    const { range, from, to, sectorId, position } = parsed.data
+    try {
+      const [training, positions] = await Promise.all([
+        getTrainingOverview({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          position: position ?? null,
+          window: { range, from, to },
+        }),
+        listPositions(request.user.companyId),
+      ])
+      return reply.send({ training, positions })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Analytics de acesso ao Guia AI First (Comunidade INOVA), sub-aba de
+   * Desenvolvimento. Mesmo gate e mesmo recorte das abas vizinhas.
+   */
+  app.get('/admin/people/inova', adminOrSubadmin, async (request, reply) => {
+    const parsed = analyticsQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    const { range, from, to, sectorId } = parsed.data
+    try {
+      return reply.send({
+        inova: await getInovaOverview({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          window: { range, from, to },
+        }),
+      })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
+  })
+
+  app.get('/admin/people/heatmap', adminOrSubadmin, async (request, reply) => {
+    const parsed = analyticsQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    const { range, from, to, sectorId } = parsed.data
+    try {
+      return reply.send({
+        heatmap: await getAccessHeatmap({
+          companyId: request.user.companyId,
+          sectorId: resolveSectorId(request, sectorId),
+          window: { range, from, to },
+        }),
+      })
+    } catch (err) {
+      if (err instanceof AnalyticsWindowError) return reply.code(400).send({ message: err.message })
+      throw err
+    }
   })
 }
 

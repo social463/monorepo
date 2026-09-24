@@ -14,6 +14,7 @@ import {
   NEGATIVE_MOOD_LEVELS,
 } from '@legends/shared'
 import { scopedPrisma } from '../lib/tenant-scope'
+import { toPublicUser } from '../lib/serialize'
 import { addDays, dayFromYmd, todayInSaoPaulo, ymdInSaoPaulo, ymdOf } from '../lib/sao-paulo-date'
 
 export class MoodOverviewError extends Error {
@@ -26,9 +27,9 @@ export class MoodOverviewError extends Error {
   }
 }
 
-/** Janela mínima/máxima da série. Fora disso a rota devolve 400. */
-export const MOOD_OVERVIEW_MIN_DAYS = 7
-export const MOOD_OVERVIEW_MAX_DAYS = 90
+/** Janela padrão quando a rota não recebe `days` nem `from`/`to`. O piso e o
+ * teto vivem em `@legends/shared` — a tela precisa deles para não oferecer um
+ * recorte que a rota recusa. */
 export const MOOD_OVERVIEW_DEFAULT_DAYS = 30
 
 /** Teto de comentários devolvidos por consulta — a lista é um recorte recente, não um export. */
@@ -46,6 +47,12 @@ export interface MoodOverviewParams {
   viewerRole: string
   viewerSectorId: string
   days?: number
+  /**
+   * Período personalizado (datas civis `YYYY-MM-DD`), vindo do mesmo filtro da
+   * tela de People Analytics. Quando os dois vêm preenchidos, ganham de `days`.
+   */
+  from?: string
+  to?: string
   /** Setor pedido no filtro; undefined/null = empresa inteira (só ADMIN). */
   sectorId?: string | null
   /** Injetável nos testes para fixar "hoje". */
@@ -80,6 +87,7 @@ function emptyOverview(days: number, sectorId: string | null, trendDays: string[
     trend: trendDays.map((day) => ({ day, average: null, count: 0, suppressed: false })),
     todayDistribution: [],
     reasons: [],
+    alertComments: [],
     comments: [],
   }
 }
@@ -96,21 +104,33 @@ function percentOf(part: number, total: number): number {
  * Painel agregado de clima. Nenhuma consulta aqui seleciona `userId`: o DTO é
  * anônimo por construção, não por omissão na UI. Todo recorte com menos de
  * `MOOD_ANONYMITY_MIN` respostas sai suprimido.
+ *
+ * Desde 08/09/2026 esse piso vale 1, a pedido da G&G: na prática nada é
+ * suprimido, e um único registro no dia já aparece na série e na distribuição.
+ * Os `if` abaixo continuam aqui de propósito — são eles que voltam a valer
+ * quando o piso subir, e apagá-los custaria reescrever a função inteira.
  */
 export async function getMoodOverview(params: MoodOverviewParams): Promise<MoodOverviewDTO> {
   const sectorId = resolveSectorId(params)
-  const days = params.days ?? MOOD_OVERVIEW_DEFAULT_DAYS
   const db = scopedPrisma(params.companyId)
 
   // Todo recorte de dia é a data civil de São Paulo — quem registra às 23h de
   // SP conta no dia de SP, não no dia UTC que já virou.
   const todayYmd = params.now ? ymdInSaoPaulo(params.now) : todayInSaoPaulo().ymd
-  const startYmd = addDays(todayYmd, -(days - 1))
+  // Janela personalizada ganha de `days` quando as duas pontas vêm (seção 4.6).
+  // O fim é limitado a hoje: "participação de hoje" e "distribuição de hoje" não
+  // teriam sentido numa janela que termina no futuro.
+  const custom = params.from && params.to && params.from <= params.to
+  const endYmd = custom ? (params.to! < todayYmd ? params.to! : todayYmd) : todayYmd
+  const startYmd = custom
+    ? params.from!
+    : addDays(endYmd, -((params.days ?? MOOD_OVERVIEW_DEFAULT_DAYS) - 1))
   const windowDays: string[] = []
-  for (let i = 0; i < days; i += 1) windowDays.push(addDays(startYmd, i))
+  for (let ymd = startYmd; ymd <= endYmd; ymd = addDays(ymd, 1)) windowDays.push(ymd)
+  const days = windowDays.length
 
   const userScope = sectorId ? { user: { sectorId } } : {}
-  const windowWhere = { day: { gte: dayFromYmd(startYmd), lte: dayFromYmd(todayYmd) }, ...userScope }
+  const windowWhere = { day: { gte: dayFromYmd(startYmd), lte: dayFromYmd(endYmd) }, ...userScope }
 
   // Uma passada só: contagem por (dia, humor) alimenta tendência, média da
   // semana e distribuição de hoje.
@@ -205,26 +225,32 @@ export async function getMoodOverview(params: MoodOverviewParams): Promise<MoodO
           .sort((a, b) => b.count - a.count)
       : []
 
-  // Comentários anônimos. Além do select sem `userId`, só entram notas de dias
-  // que atingiram o piso: numa data com uma única resposta, o comentário seria
-  // atribuível a quem registrou naquele dia.
+  // Duas caixas (seção 4.6): "Causas de alerta" traz só o humor negativo,
+  // "Comentários" traz a escala inteira. Uma consulta só, da escala inteira, e a
+  // Caixa 1 é recorte dela — buscar duas vezes leria as mesmas linhas.
+  //
+  // O comentário sai IDENTIFICADO. O piso de anonimato deixou de filtrá-lo: ele
+  // existia para o comentário não ser atribuível por dedução, e não faz sentido
+  // esconder por dedução o que agora vem com nome. O piso continua valendo para
+  // os agregados, acima.
   const commentRows = await db.moodEntry.findMany({
-    where: { ...negativeWhere, note: { not: null } },
-    select: { id: true, day: true, mood: true, reason: true, note: true },
+    where: { ...windowWhere, note: { not: null } },
+    select: { id: true, day: true, mood: true, reason: true, note: true, user: true },
     orderBy: [{ day: 'desc' }, { createdAt: 'desc' }],
     take: COMMENT_LIMIT,
   })
   const todayDate = dayFromYmd(todayYmd)
-  const comments: MoodCommentDTO[] = commentRows
-    .filter((row) => (totalsByDay.get(ymdOf(row.day))?.count ?? 0) >= MOOD_ANONYMITY_MIN)
-    .map((row) => ({
-      id: row.id,
-      day: ymdOf(row.day),
-      daysAgo: Math.round((todayDate.getTime() - row.day.getTime()) / 86_400_000),
-      mood: row.mood as MoodLevel,
-      reason: (row.reason as MoodReason | null) ?? null,
-      note: row.note as string,
-    }))
+  const comments: MoodCommentDTO[] = commentRows.map((row) => ({
+    id: row.id,
+    day: ymdOf(row.day),
+    daysAgo: Math.round((todayDate.getTime() - row.day.getTime()) / 86_400_000),
+    mood: row.mood as MoodLevel,
+    reason: (row.reason as MoodReason | null) ?? null,
+    note: row.note as string,
+    author: toPublicUser(row.user),
+  }))
+  const negativeLevels = new Set<MoodLevel>(NEGATIVE_MOOD_LEVELS)
+  const alertComments = comments.filter((comment) => negativeLevels.has(comment.mood))
 
   return {
     days,
@@ -235,6 +261,7 @@ export async function getMoodOverview(params: MoodOverviewParams): Promise<MoodO
     trend,
     todayDistribution,
     reasons,
+    alertComments,
     comments,
   }
 }

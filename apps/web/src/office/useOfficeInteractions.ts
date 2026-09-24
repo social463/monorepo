@@ -19,14 +19,6 @@ import type { OfficeBridge } from './OfficeBridge'
 import { FollowController, type FollowOptions } from './FollowController'
 
 const CALL_TIMEOUT_MS = 30_000
-/**
- * Cadência mínima entre passos do Seguir/caminhar-até-a-mesa — mesmo valor do
- * `INPUT_COOLDOWN_MS` do teclado em `OfficeScene`. Sem isso, num round-trip
- * rápido a confirmação de `moved` libera o próximo passo antes da animação do
- * anterior terminar (mesma duração de tween do teclado, `STEP_MS`), e o
- * personagem "pula" de tile em tile em vez de andar no ritmo normal.
- */
-const FOLLOW_STEP_INTERVAL_MS = 160
 const NO_DESK_REMINDERS: OfficeDeskReminderSummaryDTO[] = []
 
 /** Default estável — literal na assinatura nasceria novo a cada render (ver `sameDesks`). */
@@ -271,41 +263,14 @@ export function useOfficeInteractions(
   // guarda se foi um follow de pessoa, uma caminhada até a própria mesa ou
   // até um tile clicado no mapa, pra escolher a mensagem de erro certa.
   const followKindRef = useRef<'person' | 'desk' | 'point'>('person')
-  // Pacing do passo real (ver `FOLLOW_STEP_INTERVAL_MS`) — não mexe no
-  // relógio interno do FollowController (a confirmação `moved` continua
-  // liberando o próximo passo na hora); só atrasa o envio de fato pra
-  // respeitar a mesma cadência visual do teclado.
-  const pendingStepTimeoutRef = useRef<number | null>(null)
-  /** Quando o último passo foi (ou será) de fato enviado — base da cadência. */
-  const lastStepAtRef = useRef(0)
-  const clearPendingStep = useCallback(() => {
-    if (pendingStepTimeoutRef.current !== null) {
-      window.clearTimeout(pendingStepTimeoutRef.current)
-      pendingStepTimeoutRef.current = null
-    }
-  }, [])
   if (followRef.current === null) {
     followRef.current = new FollowController({
-      emitMove: (dir) => {
-        const now = Date.now()
-        const sendAt = Math.max(now, lastStepAtRef.current + FOLLOW_STEP_INTERVAL_MS)
-        // No máximo UM passo em voo. Cada recálculo (o alvo andou, o servidor
-        // recusou o passo) SUBSTITUI o passo que ainda não saiu, em vez de
-        // enfileirar mais um: a fila fazia o personagem executar direções de
-        // uma rota que já tinha sido descartada — andar para o lado errado,
-        // voltar, e nunca chegar. A cadência é preservada porque o substituto
-        // herda o horário de envio do que foi descartado.
-        clearPendingStep()
-        lastStepAtRef.current = sendAt
-        if (sendAt === now) {
-          bridge.emitClientMessage({ type: 'move', dir })
-          return
-        }
-        pendingStepTimeoutRef.current = window.setTimeout(() => {
-          pendingStepTimeoutRef.current = null
-          bridge.emitClientMessage({ type: 'move', dir })
-        }, sendAt - now)
-      },
+      // Sem cadência nenhuma no meio: direção é INTENÇÃO, não passo. O que
+      // antes precisava ser espaçado (um `move` por tile, senão o personagem
+      // pulava de tile em tile) hoje é só "a tecla que está segurada" — e
+      // atrasar a troca de direção faria o corpo passar da esquina antes de
+      // virar.
+      steer: (dir) => bridge.emitAutoWalk(dir),
       onArrived: () => {},
       onFailed: (reason) => {
         const kind = followKindRef.current
@@ -317,13 +282,15 @@ export function useOfficeInteractions(
         else if (kind === 'point') showToast('Não foi possível chegar até esse ponto.')
         else showToast('Não foi possível chegar até a pessoa.')
       },
-      setTimer: (cb, ms) => window.setTimeout(cb, ms),
-      clearTimer: (id) => window.clearTimeout(id),
       pathfinder: makePathfinder(document, kartsRef),
+      tileSize: document?.map.tileWidth,
     })
   }
   useEffect(() => {
-    followRef.current?.setPathfinder(makePathfinder(document, kartsRef))
+    followRef.current?.configure({
+      pathfinder: makePathfinder(document, kartsRef),
+      tileSize: document?.map.tileWidth,
+    })
     // `kartsKey` (conteúdo), não o array: a lista vem nova a cada mensagem do
     // servidor, e re-instalar o pathfinder recalcula a rota do Seguir em curso
     // — refazer isso a cada render seria um loop de passos.
@@ -334,11 +301,15 @@ export function useOfficeInteractions(
       const target = occupantsRef.current.find((o) => o.userId === userId)
       if (!me || !target) return
       followKindRef.current = 'person'
-      clearPendingStep()
+      // `me` e `target` são ocupantes, ou seja, PIXEL — que é o que o
+      // controlador espera desde o movimento livre. Mandar tile aqui é o bug
+      // que deixou todos os atalhos de caminhada mudos: o Dijkstra recebia
+      // (112, 150) como coordenada de grade, saía do mapa e devolvia "sem
+      // caminho" antes de o personagem dar um passo.
       followRef.current!.start({ selfId: me.userId, targetId: userId }, me, target)
       setSelectedId(null)
     },
-    [clearPendingStep],
+    [],
   )
 
   /** Atalho Ctrl/Cmd+D — anda até a própria mesa reivindicada, se houver. */
@@ -355,14 +326,12 @@ export function useOfficeInteractions(
     )
     if (!object || object.type !== 'desk') return
     const { x, y, width, height } = object.geometry
-    const target = {
-      x: Math.floor((x + width / 2) / document.map.tileWidth),
-      y: Math.floor((y + height / 2) / document.map.tileHeight),
-    }
+    // O centro da mesa, em pixel — a mesma unidade de `me`. Antes daqui saía o
+    // tile, e o controlador comparava tile com pixel.
+    const target = { x: x + width / 2, y: y + height / 2 }
     followKindRef.current = 'desk'
-    clearPendingStep()
     followRef.current!.start({ selfId: me.userId, targetId: `desk:${myDesk.externalKey}` }, me, target)
-  }, [deskState, document, showToast, clearPendingStep])
+  }, [deskState, document, showToast])
 
   /** Clique direito no mapa — anda até o próprio tile clicado (não só adjacente, diferente de seguir/mesa). */
   const walkToTile = useCallback(
@@ -370,17 +339,21 @@ export function useOfficeInteractions(
       const me = occupantsRef.current.find((o) => o.userId === youIdRef.current)
       if (!me || !document) return
       followKindRef.current = 'point'
-      clearPendingStep()
       followRef.current!.start(
         { selfId: me.userId, targetId: `point:${target.x},${target.y}` },
         me,
-        target,
+        // O clique chega em TILE (é de um tile do mapa que se trata); o
+        // controlador anda em pixel, então o alvo é o centro dele.
+        {
+          x: (target.x + 0.5) * document.map.tileWidth,
+          y: (target.y + 0.5) * document.map.tileHeight,
+        },
         // Clicar em cima de uma mesa, de uma parede ou de uma sala fechada é
         // pedido legítimo: vai o mais perto que der em vez de não sair do lugar.
         { exact: true, fallback: 'closest' },
       )
     },
-    [document, clearPendingStep],
+    [document],
   )
 
   // --- Ações do card --------------------------------------------------------
@@ -446,11 +419,23 @@ export function useOfficeInteractions(
 
   // Eventos do servidor + cancelamento do follow por teclado.
   useEffect(() => {
-    const offMove = bridge.onMoveIntent(() => {
+    const offMove = bridge.onInput((input, source) => {
+      // Só a TECLA de uma pessoa cancela o Seguir. A caminhada automática viaja
+      // pelo mesmo `input` desde o movimento livre — sem olhar a procedência, o
+      // Seguir se autocancelaria no primeiro quadro de esterço.
+      if (source !== 'keyboard') return
+      // Tecla apertada, não input parado: o input contínuo é mandado sempre,
+      // inclusive parado (é ele que confirma que a tecla soltou).
+      if (input.dx === 0 && input.dy === 0) return
       followRef.current?.cancel()
-      clearPendingStep()
       setSelectedId(null)
     })
+    // O heartbeat da caminhada automática: é por ele que o controlador sabe
+    // onde o corpo está, quando virar a esquina, quando chegou e quando parou
+    // de sair do lugar (a recusa que o servidor não avisa). Só corre enquanto a
+    // cena corre — caminhada sem heartbeat simplesmente para, em vez de ficar
+    // recalculando sozinha num timer.
+    const offSelfBody = bridge.onSelfBody(({ x, y }) => followRef.current?.onSelfBody(x, y))
     const offClick = bridge.onCharacterClick((userId) => setSelectedId(userId))
     const offDeskClick = bridge.onDeskClick((externalKey) => setSelectedDeskExternalKey(externalKey))
     const offDeskHover = bridge.onDeskHover((externalKey) => setHoveredDeskExternalKey(externalKey))
@@ -459,11 +444,15 @@ export function useOfficeInteractions(
     const offServer = bridge.onServerMessage((msg) => {
       const follow = followRef.current
       switch (msg.type) {
-        case 'moved':
-          follow?.onMoved(msg.userId, msg.x, msg.y, msg.dir)
-          break
-        case 'sync':
-          follow?.onSync(msg.x, msg.y)
+        case 'snapshot':
+          // Só quem NÃO é você: a sua posição o controlador toma da predição
+          // (`onSelfBody`), que é a que o corpo está desenhando. O snapshot
+          // chega um round-trip atrasado — esterçar por ele viraria a esquina
+          // tarde demais.
+          for (const player of msg.players) {
+            if (player.userId === youIdRef.current) continue
+            follow?.onOccupantMoved(player.userId, player.x, player.y)
+          }
           break
         case 'left':
           follow?.onTargetLeft(msg.userId)
@@ -496,6 +485,12 @@ export function useOfficeInteractions(
           )
           break
         case 'room-entry-denied':
+          // A caminhada automática aprende AQUI que aquele tile está fechado
+          // para você — é o único aviso de recusa que sobreviveu ao movimento
+          // livre (o `sync`, que desfazia um passo, deixou de existir com o
+          // passo). Sem isso a rota devolveria a mesma porta e o personagem
+          // ficaria empurrando até o detector de travamento desistir.
+          follow?.refuseTile({ x: msg.x, y: msg.y })
           // Só a tranca da sessão tem a quem pedir; o resto é informativo.
           if (msg.reason === 'locked') {
             setEntryDenied({
@@ -557,6 +552,7 @@ export function useOfficeInteractions(
     })
     return () => {
       offMove()
+      offSelfBody()
       offClick()
       offDeskClick()
       offDeskHover()
@@ -564,7 +560,7 @@ export function useOfficeInteractions(
       offMapRightClick()
       offServer()
     }
-  }, [bridge, showToast, clearPendingStep, walkToTile, addDeskReminder, removeDeskReminder, queryClient])
+  }, [bridge, showToast, walkToTile, addDeskReminder, removeDeskReminder, queryClient])
 
   // Timeout de 30s do popup recebido → auto-recusa.
   useEffect(() => {
@@ -591,13 +587,12 @@ export function useOfficeInteractions(
     if (selectedId && !occupants.some((o) => o.userId === selectedId)) setSelectedId(null)
   }, [occupants, selectedId])
 
-  // Ao desmontar, encerra qualquer follow em andamento — senão o timer de passo
-  // (500ms) segue recalculando o BFS para sempre, já que as confirmações de
-  // `moved` deixam de chegar quando os handlers do bridge são desinscritos.
+  // Ao desmontar, encerra qualquer caminhada em andamento — o `cancel` é o que
+  // SOLTA a tecla. Sem ele o último esterço ficaria valendo na cena e o
+  // personagem sairia andando sozinho até bater em alguma coisa.
   useEffect(() => () => {
     followRef.current?.cancel()
-    clearPendingStep()
-  }, [clearPendingStep])
+  }, [])
 
   return {
     // Lista viva das mesas (claim/release chegam por WS) — a página usa pra

@@ -6,8 +6,10 @@ import { recordAuditLog } from './audit-log-service'
 export const PDI_LEADER_APPROVAL_KEY = 'pdi_leader_approval_required'
 /** URL do ImpulseUP (Avaliações e Pesquisas). Sem valor, o item some do menu. */
 export const IMPULSEUP_URL_KEY = 'impulseup_url'
-/** URL da Comunidade INOVA. Mesma mecânica do ImpulseUP: sem valor, sem item. */
-export const INOVA_COMMUNITY_URL_KEY = 'inova_community_url'
+/** Liga o módulo nativo do INOVA (por empresa; ver EMR_SLUG em inova-service.ts). */
+export const INOVA_MODULE_ENABLED_KEY = 'inova_module_enabled'
+/** Webhook do Teams para notificação de projeto do INOVA criado/editado. */
+export const INOVA_TEAMS_WEBHOOK_KEY = 'inova_teams_webhook_url'
 
 const PDI_LEADER_APPROVAL_DEFAULT = true
 
@@ -28,15 +30,17 @@ async function writeSetting(key: string, companyId: string, value: string | null
 }
 
 export async function getDevelopmentSettings(companyId: string): Promise<DevelopmentSettingsDTO> {
-  const [approval, impulseUpUrl, inovaCommunityUrl] = await Promise.all([
+  const [approval, impulseUpUrl, inovaModuleEnabled, inovaTeamsWebhookUrl] = await Promise.all([
     readSetting(PDI_LEADER_APPROVAL_KEY, companyId),
     readSetting(IMPULSEUP_URL_KEY, companyId),
-    readSetting(INOVA_COMMUNITY_URL_KEY, companyId),
+    readSetting(INOVA_MODULE_ENABLED_KEY, companyId),
+    readSetting(INOVA_TEAMS_WEBHOOK_KEY, companyId),
   ])
   return {
     leaderApprovalRequired: approval == null ? PDI_LEADER_APPROVAL_DEFAULT : approval === 'true',
     impulseUpUrl: impulseUpUrl?.trim() || null,
-    inovaCommunityUrl: inovaCommunityUrl?.trim() || null,
+    inovaModuleEnabled: inovaModuleEnabled === 'true',
+    inovaTeamsWebhookUrl: inovaTeamsWebhookUrl?.trim() || null,
   }
 }
 
@@ -47,7 +51,8 @@ export async function leaderApprovalRequired(companyId: string): Promise<boolean
 export async function updateDevelopmentSettings(input: {
   leaderApprovalRequired?: boolean
   impulseUpUrl?: string | null
-  inovaCommunityUrl?: string | null
+  inovaModuleEnabled?: boolean
+  inovaTeamsWebhookUrl?: string | null
   actorId: string
   companyId: string
 }): Promise<DevelopmentSettingsDTO> {
@@ -59,8 +64,11 @@ export async function updateDevelopmentSettings(input: {
   if (input.impulseUpUrl !== undefined) {
     await writeSetting(IMPULSEUP_URL_KEY, input.companyId, input.impulseUpUrl?.trim() || null)
   }
-  if (input.inovaCommunityUrl !== undefined) {
-    await writeSetting(INOVA_COMMUNITY_URL_KEY, input.companyId, input.inovaCommunityUrl?.trim() || null)
+  if (input.inovaModuleEnabled !== undefined) {
+    await writeSetting(INOVA_MODULE_ENABLED_KEY, input.companyId, String(input.inovaModuleEnabled))
+  }
+  if (input.inovaTeamsWebhookUrl !== undefined) {
+    await writeSetting(INOVA_TEAMS_WEBHOOK_KEY, input.companyId, input.inovaTeamsWebhookUrl?.trim() || null)
   }
 
   const after = await getDevelopmentSettings(input.companyId)

@@ -24,6 +24,17 @@ async function seedDays(userId: string, ymds: string[]) {
   })
 }
 
+async function seedHoliday(ymd: string, title: string, createdById: string) {
+  const type = await prisma.calendarEventType.upsert({
+    where: { companyId_slug: { companyId: DEFAULT_COMPANY_ID, slug: 'feriado' } },
+    create: { name: 'Feriado', slug: 'feriado', companyId: DEFAULT_COMPANY_ID },
+    update: {},
+  })
+  await prisma.calendarEvent.create({
+    data: { title, date: dayFromYmd(ymd), typeId: type.id, createdById, companyId: DEFAULT_COMPANY_ID },
+  })
+}
+
 // Semana de referência (2026): 06-01 seg ... 06-05 sex, 06-06 sáb, 06-07 dom,
 // 06-08 seg. "today" é injetado para deixar o cálculo determinístico.
 describe('streak-service (dias úteis)', () => {
@@ -95,6 +106,22 @@ describe('streak-service (dias úteis)', () => {
     expect(cal.ref).toBe('2026-06')
     expect(cal.days).toEqual(['2026-06-05', '2026-06-08'])
     expect(cal.count).toBe(2)
+  })
+
+  it('feriado nacional é ponte, igual fim de semana: não quebra a sequência de quem não marcou humor', async () => {
+    const userId = await makeUser('j@empresa.com')
+    // segunda (07/09, feriado) e terça (08/09) com boost; segunda sem marcação.
+    await seedDays(userId, ['2026-09-04', '2026-09-08']) // sexta + terça
+    await seedHoliday('2026-09-07', 'Independência do Brasil', userId)
+    const s = await getStreakSummary(userId, DEFAULT_COMPANY_ID, '2026-09-08') // terça
+    expect(s.currentStreak).toBe(2)
+  })
+
+  it('sem feriado cadastrado, o mesmo dia útil vazio quebra a sequência', async () => {
+    const userId = await makeUser('k@empresa.com')
+    await seedDays(userId, ['2026-09-04', '2026-09-08'])
+    const s = await getStreakSummary(userId, DEFAULT_COMPANY_ID, '2026-09-08')
+    expect(s.currentStreak).toBe(1)
   })
 
   it('não conta entrada com companyId divergente do próprio usuário (defesa em profundidade)', async () => {

@@ -27,6 +27,13 @@ export interface CorporatePostPromptInput {
   authorName: string
   /** Setores do público-alvo, quando o comunicado é segmentado. */
   audienceLabel: string
+  /**
+   * Modelo padrão de comunicado da empresa (Documento 4, seção 13.4) — a
+   * mesma configuração que o gerador de campanhas usa. É o que o
+   * `TODO(tom-de-voz)` daqui esperava: um modelo por empresa, não um por tela,
+   * porque a voz da comunicação interna é uma só.
+   */
+  template?: string | null
 }
 
 /**
@@ -37,6 +44,8 @@ export interface CorporatePostPromptInput {
 const PROMPT_BODY_MAX_LENGTH = 1_200
 
 export function buildCorporatePostPrompt(input: CorporatePostPromptInput): string {
+  const modelo = input.template?.trim()
+
   return [
     `Você é o time de comunicação interna da empresa ${input.companyName}, escrevendo em português do Brasil.`,
     `Escreva UM comunicado para o feed interno da empresa, a partir das instruções de ${input.authorName}.`,
@@ -45,6 +54,9 @@ export function buildCorporatePostPrompt(input: CorporatePostPromptInput): strin
     `INSTRUÇÕES DE QUEM VAI PUBLICAR`,
     input.instructions.trim(),
     ``,
+    // O modelo entra ANTES das regras: é instrução de estrutura e tom, e as
+    // regras abaixo são as que não se negociam (limites e formato da resposta).
+    ...(modelo ? [`MODELO PADRÃO DE COMUNICADO`, modelo, ``] : []),
     `REGRAS`,
     `- O título tem no máximo ${CORPORATE_POST_TITLE_MAX_LENGTH} caracteres e aparece em destaque no card.`,
     `- O corpo tem no máximo ${PROMPT_BODY_MAX_LENGTH} caracteres. Este limite é rígido.`,
@@ -52,8 +64,6 @@ export function buildCorporatePostPrompt(input: CorporatePostPromptInput): strin
     `- Não invente número, data, nome de pessoa, benefício ou política que não esteja nas instruções.`,
     `- Não escreva saudação de e-mail ("Prezados", "Att") nem assinatura: é um post de feed.`,
     `- Tom caloroso e profissional. Sem markdown de formatação, sem aspas ao redor do texto.`,
-    // TODO(tom-de-voz): plugar aqui o manual de tom de voz da G&G quando existir
-    // — é o único ponto do prompt que precisa mudar para isso.
     ``,
     `FORMATO DA RESPOSTA`,
     `Responda APENAS com um objeto JSON, sem texto antes ou depois:`,

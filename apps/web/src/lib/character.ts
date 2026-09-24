@@ -5,6 +5,7 @@ import {
   CHARACTER_SHEET_WIDTH,
   characterLayers,
   characterSignature,
+  type CharacterLayer,
   type CharacterOptions,
 } from "@legends/shared";
 
@@ -53,19 +54,39 @@ export function __clearCharacterCaches(): void {
 }
 
 /**
+ * Assinatura de uma composição — o guarda-roupa mais as camadas extras. É a
+ * chave do cache e, via `occupantTextureKey`, a key da textura no Phaser:
+ * equipar algo que não é guarda-roupa (o marcador de paintball) precisa
+ * mudá-la, senão o personagem armado reusaria a textura do desarmado.
+ */
+export function characterSheetKey(
+  options: CharacterOptions,
+  extraLayers: readonly CharacterLayer[] = [],
+): string {
+  return [characterSignature(options), ...extraLayers.map((layer) => layer.path)].join("|");
+}
+
+/**
  * Compõe o spritesheet do personagem (576×256, 9 frames × 4 direções):
  * desenha cada camada LPC em ordem de zPos num canvas. Cacheado por opções.
+ *
+ * `extraLayers` são camadas que NÃO vêm do guarda-roupa: hoje, o marcador de
+ * paintball (`PAINTBALL_MARKER_LAYERS`). Elas entram por caminho, e não por
+ * item do catálogo, porque são estado de JOGO — não persistem em
+ * `avatarOptions`, não aparecem no editor de personagem e valem para todo tipo
+ * de corpo, inclusive os que o catálogo do estilingue não lista.
  */
 export function composeCharacterSheet(
   options: CharacterOptions,
   deps: CharacterRenderDeps = defaultDeps,
+  extraLayers: readonly CharacterLayer[] = [],
 ): Promise<HTMLCanvasElement> {
-  const key = characterSignature(options);
+  const key = characterSheetKey(options, extraLayers);
   const cached = sheetCache.get(key);
   if (cached) return cached;
 
   const promise = (async () => {
-    const layers = characterLayers(options);
+    const layers = [...characterLayers(options), ...extraLayers].sort((a, b) => a.zPos - b.zPos);
     const images = await Promise.all(
       layers.map((l) => deps.loadImage(characterAssetUrl(l.path))),
     );

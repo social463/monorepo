@@ -17,6 +17,7 @@ import {
   type SectorOption,
 } from '../../components/CalendarEventForm'
 import { useAuth } from '../../auth/AuthContext'
+import { CalendarImportDialog } from './CalendarImportDialog'
 import { apiFetch } from '../../lib/api'
 import { Panel, errorMessage, inputCls } from './shared'
 import { Icon } from '../../components/Icon'
@@ -66,6 +67,7 @@ export function CalendarEventsSection() {
   const [form, setForm] = useState<UpsertCalendarEventRequest | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [newType, setNewType] = useState('')
+  const [importing, setImporting] = useState(false)
 
   const data = useQuery({
     queryKey: QUERY_KEY,
@@ -137,15 +139,28 @@ export function CalendarEventsSection() {
       <Panel
         title="Eventos do calendário"
         action={
-          <button
-            type="button"
-            onClick={startCreate}
-            disabled={types.length === 0}
-            className="inline-flex items-center gap-sm rounded-md bg-primary px-lg py-sm font-label text-label-md font-bold text-on-primary transition-colors hover:bg-primary-container hover:text-on-primary-container disabled:bg-surface-container disabled:text-on-surface-variant"
-          >
-            <Icon name="add" className="text-[18px]" />
-            Novo evento
-          </button>
+          <div className="flex flex-wrap items-center gap-sm">
+            {/* A importação existe porque o calendário do ano nasce numa planilha
+                da G&G, não no formulário: cadastrar 140 eventos à mão é o que
+                fazia o calendário do produto ficar sempre atrás do arquivo. */}
+            <button
+              type="button"
+              onClick={() => setImporting(true)}
+              className="inline-flex items-center gap-sm rounded-md border border-outline-variant/60 px-lg py-sm font-label text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+            >
+              <Icon name="upload_file" className="text-[18px]" />
+              Importar planilha
+            </button>
+            <button
+              type="button"
+              onClick={startCreate}
+              disabled={types.length === 0}
+              className="inline-flex items-center gap-sm rounded-md bg-primary px-lg py-sm font-label text-label-md font-bold text-on-primary transition-colors hover:bg-primary-container hover:text-on-primary-container disabled:bg-surface-container disabled:text-on-surface-variant"
+            >
+              <Icon name="add" className="text-[18px]" />
+              Novo evento
+            </button>
+          </div>
         }
       >
         {error && (
@@ -156,9 +171,12 @@ export function CalendarEventsSection() {
 
         {types.length === 0 && (
           <p className="mb-md text-body-sm text-on-surface-variant">
-            Cadastre um tipo antes de criar eventos — é o tipo que vira filtro no calendário.
+            Cadastre um tipo antes de criar eventos — é o tipo que vira filtro no calendário. Pela importação por
+            planilha, o tipo que faltar nasce junto.
           </p>
         )}
+
+        {importing && <CalendarImportDialog onClose={() => setImporting(false)} />}
 
         {form && (
           <CalendarEventForm
@@ -194,6 +212,11 @@ export function CalendarEventsSection() {
                         <Icon name={event.type.icon} className="text-[18px]" />
                       </span>
                       {event.title}
+                      {event.tag && event.tag !== event.type.name && (
+                        <span className="rounded-full border border-outline-variant/60 px-2 py-0.5 font-label text-label-sm text-on-surface-variant">
+                          {event.tag}
+                        </span>
+                      )}
                       <span
                         className="rounded-full px-2 py-0.5 font-label text-label-sm"
                         style={{ backgroundColor: `${event.color ?? event.type.color}26` }}

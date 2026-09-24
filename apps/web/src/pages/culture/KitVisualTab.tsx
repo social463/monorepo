@@ -1,6 +1,13 @@
 import { useState } from 'react'
 import type { CulturePersonalAssetDTO, CultureVisualAssetDTO } from '@legends/shared'
-import { BRAND_SCHEMES, type BrandScheme } from '@legends/shared'
+import {
+  BRAND_SCHEMES,
+  CULTURE_VISUAL_ASSET_BRANDS,
+  CULTURE_VISUAL_ASSET_BRAND_LABELS,
+  CULTURE_VISUAL_ASSET_BRAND_RULES,
+  type BrandScheme,
+  type CultureVisualAssetBrand,
+} from '@legends/shared'
 import { useBrand } from '../../brand/BrandContext'
 import { Icon } from '../../components/Icon'
 import { Markdown } from '../../components/Markdown'
@@ -71,16 +78,7 @@ export function KitVisualTab() {
         </section>
       )}
 
-      {assets.length > 0 && (
-        <section>
-          <h2 className="mb-md font-headline text-headline-sm text-on-surface">Peças para baixar</h2>
-          <div className="grid gap-lg md:grid-cols-2">
-            {assets.map((asset) => (
-              <VisualAssetCard key={asset.id} asset={asset} />
-            ))}
-          </div>
-        </section>
-      )}
+      {assets.length > 0 && <PecasParaBaixar assets={assets} />}
 
       <section>
         <h2 className="mb-md font-headline text-headline-sm text-on-surface">Logos</h2>
@@ -160,6 +158,72 @@ export function KitVisualTab() {
  * feita para claro some no escuro, e o kit existe justamente para a pessoa ver
  * o arquivo como ele é. `COVER` não precisa: arte que sangra cobre o card.
  */
+/**
+ * As peças, separadas pelas duas identidades visuais que convivem na EMR
+ * (Documento 4, seção 7).
+ *
+ * A regra de uso mora **dentro** da aba, acima da grade, e não em tooltip: o
+ * problema relatado não foi "não dá pra achar a peça", foi a marca nova indo
+ * para fora da empresa porque ninguém lembrava do combinado.
+ *
+ * Aba sem peça mostra estado vazio em vez de sumir. Aba que some leva a regra
+ * junto — e a regra é metade do que esta separação entrega.
+ */
+function PecasParaBaixar({ assets }: { assets: CultureVisualAssetDTO[] }) {
+  const [aba, setAba] = useState<CultureVisualAssetBrand>('CURRENT')
+  const daAba = assets.filter((asset) => asset.brand === aba)
+
+  return (
+    <section>
+      <h2 className="mb-md font-headline text-headline-sm text-on-surface">Peças para baixar</h2>
+
+      <div
+        role="tablist"
+        aria-label="Identidade visual"
+        className="mb-md flex gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-low p-1"
+      >
+        {CULTURE_VISUAL_ASSET_BRANDS.map((brand) => {
+          const ativa = aba === brand
+          return (
+            <button
+              key={brand}
+              type="button"
+              role="tab"
+              aria-selected={ativa}
+              onClick={() => setAba(brand)}
+              className={[
+                'flex flex-1 items-center justify-center rounded-lg px-md py-sm font-label text-label-md transition-colors',
+                ativa
+                  ? 'bg-primary/10 font-bold text-primary'
+                  : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface',
+              ].join(' ')}
+            >
+              {CULTURE_VISUAL_ASSET_BRAND_LABELS[brand]}
+            </button>
+          )
+        })}
+      </div>
+
+      <p className="mb-md flex items-start gap-sm rounded-xl border border-outline-variant/40 bg-surface-container-low p-md text-body-sm text-on-surface-variant">
+        <Icon name="info" className="mt-0.5 shrink-0 text-[18px] text-primary" />
+        {CULTURE_VISUAL_ASSET_BRAND_RULES[aba]}
+      </p>
+
+      {daAba.length > 0 ? (
+        <div className="grid gap-lg md:grid-cols-2">
+          {daAba.map((asset) => (
+            <VisualAssetCard key={asset.id} asset={asset} />
+          ))}
+        </div>
+      ) : (
+        <p className="text-body-sm text-on-surface-variant">
+          Nenhuma peça publicada nesta identidade ainda.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function VisualAssetCard({ asset }: { asset: CultureVisualAssetDTO }) {
   return (
     <article className="flex flex-col overflow-hidden rounded-2xl border border-outline-variant/40 bg-surface-container-low">

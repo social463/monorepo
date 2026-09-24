@@ -1672,7 +1672,6 @@ export function MapCanvas(props: MapCanvasProps) {
                   externalKey: `room-${token}`,
                   name: "Nova sala",
                   status: "OPEN",
-                  capacity: 8,
                   voiceEnabled: true,
                   accessPolicy: "OPEN",
                 },

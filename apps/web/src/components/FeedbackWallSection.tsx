@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { FEEDBACK_WALL_PREVIEW_SIZE } from '@legends/shared'
 import { Icon } from './Icon'
+import { NewBadge } from './NewBadge'
 import { FeedbackListSkeleton } from './Skeleton'
 import { SharedFeedbackCard } from '../pages/mural-feedbacks/SharedFeedbackCard'
 import {
@@ -21,11 +22,14 @@ export function FeedbackWallSection() {
   })
   const toggleReaction = useToggleSharedReaction()
   const feedbacks = data?.feedbacks ?? []
+  // "Novo" é por ABA: é novo o que foi compartilhado depois da última vez que a
+  // pessoa abriu `/mural-feedbacks`. Sem nunca ter aberto (`null`), tudo é novo.
+  const wallSeenAt = data?.wallSeenAt ?? null
 
   return (
     <section
       aria-labelledby="mural-feedbacks-heading"
-      className="flex flex-col gap-md rounded-xl border border-outline-variant/40 bg-surface-container p-lg"
+      className="flex min-w-0 flex-col gap-md rounded-xl border border-outline-variant/40 bg-surface-container p-lg"
     >
       <div className="flex items-center justify-between gap-md">
         <h2
@@ -71,6 +75,9 @@ export function FeedbackWallSection() {
               key={feedback.id}
               feedback={feedback}
               clamp
+              // Comparação de ISO 8601 como string: os dois vêm do servidor no
+              // mesmo formato UTC, então a ordem lexicográfica é a cronológica.
+              badge={wallSeenAt === null || feedback.sharedAt > wallSeenAt ? <NewBadge /> : undefined}
               onToggleReaction={(emoji) => toggleReaction.mutate({ feedbackId: feedback.id, emoji })}
             />
           ))}

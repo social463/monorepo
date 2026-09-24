@@ -21,6 +21,8 @@ import {
   togglePostReaction,
   unpinPost,
   updatePost,
+  voteCorporatePostPoll,
+  listCorporatePostPollVotes,
   type CorporateMuralViewer,
 } from './corporate-mural-service'
 
@@ -287,6 +289,37 @@ describe('corporate-mural-service: aprovação', () => {
     expect(aprovado.status).toBe('PUBLISHED')
     expect(aprovado.reviewedById).toBe(admin.id)
     expect((await listFeed(viewerOf(autor), { limit: 10 })).items.map((p) => p.content)).toContain('da lenda')
+  })
+
+  it('autor não pode aprovar o próprio comunicado, mesmo com acesso administrativo', async () => {
+    const autor = await prisma.user.create({
+      data: {
+        name: 'auto-aprovador',
+        email: 'auto-aprovador@empresa.com',
+        passwordHash: 'x',
+        role: 'LEGEND',
+        adminAccess: true,
+      },
+    })
+    // `createPost` publicaria direto para este autor — força PENDING para testar a aprovação isoladamente.
+    const post = await prisma.corporatePost.create({
+      data: { authorId: autor.id, content: 'auto aprovação', status: 'PENDING' },
+    })
+
+    await expect(
+      approvePost({ postId: post.id, actorId: autor.id, companyId: DEFAULT_COMPANY_ID }),
+    ).rejects.toMatchObject({ status: 403 })
+
+    expect((await prisma.corporatePost.findUniqueOrThrow({ where: { id: post.id } })).status).toBe('PENDING')
+  })
+
+  it('autor não pode recusar o próprio comunicado', async () => {
+    const autor = await makeUser('auto-recusa@empresa.com', 'LEGEND')
+    const post = await createPost({ authorId: autor.id, content: 'auto recusa', companyId: DEFAULT_COMPANY_ID })
+
+    await expect(
+      rejectPost({ postId: post.id, actorId: autor.id, companyId: DEFAULT_COMPANY_ID }),
+    ).rejects.toMatchObject({ status: 403 })
   })
 
   it('duas aprovações concorrentes: uma vence, a outra é 409', async () => {
@@ -840,6 +873,32 @@ describe('corporate-mural-service: auditoria da moderação', () => {
     expect(await prisma.adminAuditLog.count({ where: { entityId: post.id } })).toBe(0)
   })
 
+  it('a auditoria da aprovação carrega um rótulo legível, mesmo sem título', async () => {
+    const autor = await makeUser('sem-titulo@empresa.com', 'LEGEND')
+    const admin = await makeAdminActor()
+    const post = await createPost({
+      authorId: autor.id,
+      content: 'Olá pessoal, boa tarde! espero que vocês estejam bem',
+      companyId: DEFAULT_COMPANY_ID,
+    })
+
+    await approvePost({ postId: post.id, actorId: admin.id, companyId: DEFAULT_COMPANY_ID })
+
+    const log = await prisma.adminAuditLog.findFirstOrThrow({ where: { entityId: post.id } })
+    expect((log.after as { subject: string }).subject).toBe('Olá pessoal, boa tarde! espero que vocês estejam bem')
+  })
+
+  it('trunca o rótulo de auditoria quando o comunicado é longo', async () => {
+    const autor = await makeUser('longo@empresa.com', 'LEGEND')
+    const admin = await makeAdminActor()
+    const post = await createPost({ authorId: autor.id, content: 'x'.repeat(200), companyId: DEFAULT_COMPANY_ID })
+
+    await approvePost({ postId: post.id, actorId: admin.id, companyId: DEFAULT_COMPANY_ID })
+
+    const log = await prisma.adminAuditLog.findFirstOrThrow({ where: { entityId: post.id } })
+    expect((log.after as { subject: string }).subject).toBe(`${'x'.repeat(60)}…`)
+  })
+
   it('grava auditoria quando o admin apaga comentário de outro autor', async () => {
     const autor = await makeUser('autor-post-c@empresa.com', 'ADMIN')
     const comentarista = await makeUser('comentarista@empresa.com', 'LEGEND')
@@ -877,5 +936,208 @@ describe('createPost dentro de transação', () => {
     ).rejects.toThrow('falha proposital')
 
     expect(await prisma.corporatePost.count()).toBe(0)
+  })
+})
+
+
+describe('corporate-mural-service: enquete', () => {
+  const enquete = { question: 'Qual logo?', options: ['Azul', 'Verde'] }
+
+  async function postComEnquete() {
+    const autor = await makeUser(`enq-autor-${Math.random()}@empresa.com`, 'ADMIN')
+    const post = await createPost({
+      authorId: autor.id,
+      content: 'Escolha aí',
+      companyId: DEFAULT_COMPANY_ID,
+      poll: enquete,
+    })
+    return { autor, post }
+  }
+
+  it('cria a enquete junto do post, com as opções na ordem digitada', async () => {
+    const { post } = await postComEnquete()
+
+    expect(post.poll?.question).toBe('Qual logo?')
+    expect(post.poll?.options.map((o) => o.text)).toEqual(['Azul', 'Verde'])
+    expect(post.poll?.options.map((o) => o.position)).toEqual([0, 1])
+  })
+
+  // A enquete NÃO disputa vaga com anexo: "banner + enquete" é o formato normal
+  // de comunicação interna, e é o que a regra da Resenha proibiria.
+  it('convive com GIF no mesmo post', async () => {
+    const autor = await makeUser(`enq-gif-${Math.random()}@empresa.com`, 'ADMIN')
+    const post = await createPost({
+      authorId: autor.id,
+      content: 'Com gif e enquete',
+      companyId: DEFAULT_COMPANY_ID,
+      gif: { url: 'https://media.giphy.com/media/x/giphy.gif', width: 1, height: 1 },
+      poll: enquete,
+    })
+
+    expect(post.poll).not.toBeNull()
+    expect(post.gifUrl).toBeTruthy()
+  })
+
+  it('post que é só a enquete é válido, sem texto', async () => {
+    const autor = await makeUser(`enq-so-${Math.random()}@empresa.com`, 'ADMIN')
+    const post = await createPost({
+      authorId: autor.id,
+      content: '',
+      companyId: DEFAULT_COMPANY_ID,
+      poll: enquete,
+    })
+
+    expect(post.poll?.question).toBe('Qual logo?')
+  })
+
+  it.each([
+    [{ question: '', options: ['A', 'B'] }, /pergunta/i],
+    [{ question: 'Q', options: ['A'] }, /opções/i],
+    [{ question: 'Q', options: ['Sim', 'sim'] }, /diferentes/i],
+  ])('recusa enquete inválida (%#)', async (poll, mensagem) => {
+    const autor = await makeUser(`enq-inv-${Math.random()}@empresa.com`, 'ADMIN')
+
+    await expect(
+      createPost({ authorId: autor.id, content: 'x', companyId: DEFAULT_COMPANY_ID, poll }),
+    ).rejects.toThrow(mensagem)
+  })
+
+  it('vota uma vez, e o segundo voto é 409', async () => {
+    const { post } = await postComEnquete()
+    const votante = await makeUser(`enq-voto-${Math.random()}@empresa.com`)
+    const viewer = viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID })
+    const opcao = post.poll!.options[0].id
+
+    const depois = await voteCorporatePostPoll({ postId: post.id, optionId: opcao, viewer })
+    expect(depois.poll?.votes).toHaveLength(1)
+
+    await expect(
+      voteCorporatePostPoll({ postId: post.id, optionId: opcao, viewer }),
+    ).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('opção de outra enquete é 404', async () => {
+    const { post } = await postComEnquete()
+    const outro = await postComEnquete()
+    const votante = await makeUser(`enq-outra-${Math.random()}@empresa.com`)
+
+    await expect(
+      voteCorporatePostPoll({
+        postId: post.id,
+        optionId: outro.post.poll!.options[0].id,
+        viewer: viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID }),
+      }),
+    ).rejects.toMatchObject({ status: 404 })
+  })
+
+  // 409 e não 404: o post existe e a pessoa até o vê na fila; o que ainda não
+  // existe é a votação.
+  it('post pendente não aceita voto', async () => {
+    const autor = await makeUser(`enq-pend-${Math.random()}@empresa.com`, 'LEAD')
+    const post = await createPost({
+      authorId: autor.id,
+      content: 'aguardando',
+      companyId: DEFAULT_COMPANY_ID,
+      poll: enquete,
+    })
+    expect(post.status).toBe('PENDING')
+    const votante = await makeUser(`enq-pend-v-${Math.random()}@empresa.com`)
+
+    await expect(
+      voteCorporatePostPoll({
+        postId: post.id,
+        optionId: post.poll!.options[0].id,
+        viewer: viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID }),
+      }),
+    ).rejects.toMatchObject({ status: 409 })
+  })
+
+  // Moderar não é participar: o ADMIN enxerga o post de outro setor, mas o voto
+  // dele sujaria uma enquete dirigida àquele setor.
+  it('quem está fora do público-alvo não vota, nem sendo ADMIN', async () => {
+    const autor = await makeUser(`enq-alvo-${Math.random()}@empresa.com`, 'ADMIN')
+    const deFora = await makeUserInOtherSector(`enq-fora-${Math.random()}@empresa.com`)
+    const post = await createPost({
+      authorId: autor.id,
+      content: 'só para um setor',
+      companyId: DEFAULT_COMPANY_ID,
+      poll: enquete,
+      audience: 'SECTORS',
+      audienceSectorIds: [SECTOR],
+    })
+
+    await expect(
+      voteCorporatePostPoll({
+        postId: post.id,
+        optionId: post.poll!.options[0].id,
+        viewer: { ...viewerOf({ ...deFora, companyId: DEFAULT_COMPANY_ID }), role: 'ADMIN' },
+      }),
+    ).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('ver votantes exige ter votado', async () => {
+    const { post } = await postComEnquete()
+    const votante = await makeUser(`enq-lista-${Math.random()}@empresa.com`)
+    const viewer = viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID })
+
+    await expect(listCorporatePostPollVotes({ postId: post.id, viewer })).rejects.toMatchObject({
+      status: 403,
+    })
+
+    await voteCorporatePostPoll({ postId: post.id, optionId: post.poll!.options[1].id, viewer })
+    const lista = await listCorporatePostPollVotes({ postId: post.id, viewer })
+
+    expect(lista.options[0].voters).toHaveLength(0)
+    expect(lista.options[1].voters.map((v) => v.id)).toEqual([votante.id])
+  })
+
+  it('a enquete pode ser corrigida enquanto ninguém votou', async () => {
+    const { autor, post } = await postComEnquete()
+
+    const editado = await updatePost({
+      postId: post.id,
+      actorId: autor.id,
+      role: 'ADMIN',
+      companyId: DEFAULT_COMPANY_ID,
+      poll: { question: 'Qual logotipo?', options: ['Azul', 'Verde', 'Roxo'] },
+    })
+
+    expect(editado.poll?.question).toBe('Qual logotipo?')
+    expect(editado.poll?.options).toHaveLength(3)
+  })
+
+  it('depois do primeiro voto a enquete congela', async () => {
+    const { autor, post } = await postComEnquete()
+    const votante = await makeUser(`enq-congela-${Math.random()}@empresa.com`)
+    await voteCorporatePostPoll({
+      postId: post.id,
+      optionId: post.poll!.options[0].id,
+      viewer: viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID }),
+    })
+
+    await expect(
+      updatePost({
+        postId: post.id,
+        actorId: autor.id,
+        role: 'ADMIN',
+        companyId: DEFAULT_COMPANY_ID,
+        poll: { question: 'Outra pergunta', options: ['A', 'B'] },
+      }),
+    ).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('apagar o post leva a enquete e os votos junto', async () => {
+    const { autor, post } = await postComEnquete()
+    const votante = await makeUser(`enq-cascade-${Math.random()}@empresa.com`)
+    await voteCorporatePostPoll({
+      postId: post.id,
+      optionId: post.poll!.options[0].id,
+      viewer: viewerOf({ ...votante, companyId: DEFAULT_COMPANY_ID }),
+    })
+
+    await deletePost({ postId: post.id, userId: autor.id, role: 'ADMIN', companyId: DEFAULT_COMPANY_ID })
+
+    expect(await prisma.corporatePostPoll.count({ where: { postId: post.id } })).toBe(0)
+    expect(await prisma.corporatePostPollVote.count()).toBe(0)
   })
 })

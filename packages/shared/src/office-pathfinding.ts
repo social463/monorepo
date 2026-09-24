@@ -177,7 +177,7 @@ function tileRange(
 
 /**
  * Grade do documento, memoizada. O teste de cada tile continua sendo o CENTRO
- * dentro da geometria — mesma regra de `isMapTileWalkable` e `mapZoneAt`, só
+ * dentro da geometria — mesma regra de `isMapTileWalkable` e `mapZoneAtTile`, só
  * que avaliada de uma vez por objeto em vez de uma vez por consulta.
  */
 export function officeWalkGrid(document: MapDocumentV1): OfficeWalkGrid {
@@ -211,7 +211,7 @@ export function officeWalkGrid(document: MapDocumentV1): OfficeWalkGrid {
         if (!pointInMapObject(centerX, centerY, object)) continue
         const cell = y * width + x
         if (isZone) {
-          // A PRIMEIRA zona vence, para casar com o `.find()` de `mapZoneAt`.
+          // A PRIMEIRA zona vence, para casar com o `.find()` de `mapZoneAtTile`.
           if (zone[cell] === 0) zone[cell] = zoneId
         } else {
           blocked[cell] = 1

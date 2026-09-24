@@ -87,13 +87,19 @@ export async function officeMediaRoutes(app: FastifyInstance) {
       return reply.code(409).send({ message: 'Entre no escritório antes de conectar a mídia' })
     }
 
-    const allowed = hub.mediaRoomForPosition(occupant.x, occupant.y)
+    const allowed = hub.mediaRoomOf(occupant)
     if (parsed.data.room !== allowed) {
       return reply.code(403).send({ message: 'Você não está nessa sala' })
     }
-    const room = hub.roomForPosition(occupant.x, occupant.y)
+    const room = hub.roomOf(occupant)
     if (room && !room.voiceEnabled) {
       return reply.code(403).send({ message: 'A voz está desativada nesta sala' })
+    }
+    // Tirado da chamada e ainda parado dentro da sala: sem isto o cliente
+    // pediria outro token e voltaria sozinho, porque a sala é derivada da
+    // POSIÇÃO e o personagem continua lá. Sair da área limpa a marca.
+    if (room && hub.isRemovedFromRoom(participant.sub, room.id)) {
+      return reply.code(403).send({ message: 'Você saiu desta reunião. Saia da sala e entre de novo para voltar.' })
     }
 
     const accessToken = new AccessToken(livekit.apiKey, livekit.apiSecret, {

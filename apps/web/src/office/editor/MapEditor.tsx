@@ -2383,7 +2383,8 @@ function ObjectPropertyFields({
             onChange={(value) =>
               onPatch("properties", "capacity", value || undefined)
             }
-            value={object.properties.capacity ?? 1}
+            placeholder="Sem limite"
+            value={object.properties.capacity ?? ""}
           />
         </div>
         <PolicyField
@@ -2527,13 +2528,16 @@ function NumberField({
   label,
   min,
   onChange,
+  placeholder,
   value,
 }: {
   disabled: boolean;
   label: string;
   min?: number;
   onChange: (value: number) => void;
-  value: number;
+  /** Campo vazio (`""`) é valor ausente; o placeholder diz o que isso significa. */
+  placeholder?: string;
+  value: number | "";
 }) {
   return (
     <label className="map-editor-field">
@@ -2542,6 +2546,7 @@ function NumberField({
         disabled={disabled}
         min={min}
         onChange={(event) => onChange(Number(event.target.value))}
+        placeholder={placeholder}
         type="number"
         value={value}
       />

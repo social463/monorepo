@@ -3,9 +3,12 @@ import { Prisma, type Area, type UserRole } from '@prisma/client'
 import {
   AREA_LABELS,
   AREAS,
+  isPositionCategory,
+  POSITION_CATEGORIES,
   USER_IMPORT_COLUMNS,
   USER_IMPORT_COLUMN_ALIASES,
   USER_IMPORT_IGNORED_COLUMNS,
+  USER_IMPORT_INACTIVE_STATUSES,
   USER_IMPORT_MAX_ROWS,
   USER_IMPORT_REQUIRED_COLUMNS,
   USER_IMPORT_ROLES,
@@ -23,6 +26,8 @@ import {
 } from '@legends/shared'
 import { csvCell } from '../lib/csv'
 import { parseCsvTable } from '../lib/csv-parse'
+import { isMirrorOf, mirrorPhoto, normalizePhotoSourceUrl, PhotoMirrorError } from '../lib/photo-mirror'
+import { parseSpreadsheetDate } from '../lib/spreadsheet-values'
 import { prisma } from '../lib/prisma'
 import { generateTemporaryPassword, hashPassword } from '../lib/password'
 import { slugify } from '../lib/slug'
@@ -86,6 +91,8 @@ for (const column of USER_IMPORT_COLUMNS) {
 const IGNORED_BY_HEADER = new Map<string, string>()
 for (const column of USER_IMPORT_IGNORED_COLUMNS) IGNORED_BY_HEADER.set(flatten(column), column)
 
+const INACTIVE_STATUS = new Set(USER_IMPORT_INACTIVE_STATUSES.map(flatten))
+
 const ROLE_BY_LABEL = new Map<string, UserRole>()
 for (const [role, label] of Object.entries(USER_ROLE_LABELS)) {
   ROLE_BY_LABEL.set(flatten(label), role as UserRole)
@@ -100,28 +107,31 @@ for (const area of AREAS) {
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-/** `DD/MM/AAAA` (o que o Excel pt-BR grava) ou `AAAA-MM-DD` (o que o input date manda). */
-function parseImportDate(raw: string): Date | null {
-  const brazilian = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw)
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw)
-  let year: number
-  let month: number
-  let day: number
-  if (brazilian) {
-    day = Number(brazilian[1])
-    month = Number(brazilian[2])
-    year = Number(brazilian[3])
-  } else if (iso) {
-    year = Number(iso[1])
-    month = Number(iso[2])
-    day = Number(iso[3])
-  } else {
-    return null
-  }
-  const date = new Date(Date.UTC(year, month - 1, day))
-  // Rejeita 31/02 e afins: o Date normaliza em silêncio para 03/03.
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null
-  return date
+/**
+ * Categoria do cargo (das que indicam liderança) → Papel. Fora daqui,
+ * `deriveRoleFromFuncao` cai no fallback conservador: Função=Líder sem
+ * categoria de liderança reconhecida vira Líder, nunca Gerente/Head sozinho.
+ */
+const LEADERSHIP_ROLE_BY_CATEGORY = new Map<string, UserImportRole>([
+  ['coordenador', 'LEAD'],
+  ['supervisor', 'LEAD'],
+  ['team leader', 'LEAD'],
+  ['gerente', 'MANAGER'],
+  ['head', 'HEAD'],
+  ['diretor', 'HEAD'],
+])
+
+/**
+ * Deriva Papel de Função (Colaborador/Líder) + Categoria do cargo, para
+ * planilhas que não trazem a coluna Papel diretamente (export do BI
+ * Dashboard de Colaboradores). `null` quando Função não é reconhecida —
+ * quem chama mantém o Papel default/já resolvido por outra via.
+ */
+function deriveRoleFromFuncao(rawFuncao: string, positionCategory: string | null): UserImportRole | null {
+  const funcao = flatten(rawFuncao)
+  if (funcao === 'colaborador') return 'LEGEND'
+  if (funcao !== 'lider') return null
+  return LEADERSHIP_ROLE_BY_CATEGORY.get(flatten(positionCategory ?? '')) ?? 'LEAD'
 }
 
 function sameDay(a: Date | null, b: Date | null): boolean {
@@ -146,10 +156,27 @@ interface RowDraft {
   role: UserImportRole
   area: Area | null
   position: string | null
+  positionCategory: string | null
+  /**
+   * URL de ORIGEM da foto, já normalizada (`normalizePhotoSourceUrl`). `null` =
+   * célula vazia, e a foto gravada fica. O espelho no bucket só é criado no
+   * commit — o preview não baixa imagem nenhuma.
+   */
+  photoSourceUrl: string | null
+  /** `null` = a planilha não disse nada, e o que está gravado fica. */
+  employmentType: 'CLT' | 'PJ' | null
   joinedAt: Date | null
   birthDate: Date | null
+  /** `true` quando o Papel veio explícito (coluna Papel) ou derivado de Função + Categoria do cargo. */
+  roleExplicit: boolean
   managerKey: string | null
+  /** Valor bruto de "Líder (e-mail)", antes de resolver e-mail vs. nome. `null` = célula vazia. */
+  managerRaw: string | null
   existing: ExistingUser | null
+  /** `Situação` = Desligado na planilha (seção 4.4 do Documento 3). */
+  wantsDeactivation: boolean
+  /** `Desligado em`, quando informado; a data de hoje é o padrão. */
+  leftAt: Date | null
 }
 
 interface ExistingUser {
@@ -162,6 +189,8 @@ interface ExistingUser {
   active: boolean
   leftAt: Date | null
   position: string | null
+  positionCategory: string | null
+  photoUrl: string | null
   squad: string | null
   managerId: string | null
   area: Area | null
@@ -182,9 +211,17 @@ interface SquadRef {
   id: string | null
   name: string
   slug: string
+  /** Setor de DESTINO: já é o novo quando a planilha move a squad. */
   sectorKey: string
   active: boolean
   create: boolean
+  /**
+   * Setor de origem quando a planilha está movendo uma squad que já existe.
+   * `null` é o caso normal (squad nova, ou squad que fica onde está).
+   */
+  moveFromSectorKey?: string | null
+  /** Movimento planejado que virou erro: não entra no plano da pré-visualização. */
+  moveBlocked?: boolean
 }
 
 interface ResolvedImport {
@@ -193,6 +230,16 @@ interface ResolvedImport {
   sectors: Map<string, SectorRef>
   squads: Map<string, SquadRef>
   managerIdByKey: Map<string, string>
+}
+
+/**
+ * Linhas que não entram no planejamento de setor, squad e hierarquia.
+ *
+ * `SKIP` porque nada é alterado, e `DEACTIVATE` porque criar setor ou mover de
+ * squad para quem está saindo da empresa seria trabalho sem destinatário.
+ */
+function skipsPlanning(row: RowDraft): boolean {
+  return row.action === 'SKIP' || row.action === 'DEACTIVATE'
 }
 
 function addIssue(row: RowDraft, column: UserImportColumn | null, message: string): void {
@@ -204,8 +251,17 @@ function addIssue(row: RowDraft, column: UserImportColumn | null, message: strin
 
 interface HeaderMap {
   columnAt: (UserImportColumn | null)[]
+  /**
+   * Índice da coluna "Função" (Colaborador/Líder), quando a planilha trouxer
+   * uma — não é um `UserImportColumn`: só entra pra derivar Papel junto com
+   * Categoria do cargo quando a planilha não traz Papel diretamente (ver
+   * `deriveRoleFromFuncao`). `null` quando a planilha não tem essa coluna.
+   */
+  funcaoIndex: number | null
   warnings: string[]
 }
+
+const FUNCAO_HEADER_KEY = flatten('Função')
 
 function mapHeaders(headers: string[]): HeaderMap {
   const warnings: string[] = []
@@ -213,6 +269,7 @@ function mapHeaders(headers: string[]): HeaderMap {
   const seen = new Map<UserImportColumn, number>()
   const ignored: string[] = []
   const unknown: string[] = []
+  let funcaoIndex: number | null = null
 
   headers.forEach((header, index) => {
     const key = flatten(header)
@@ -227,6 +284,11 @@ function mapHeaders(headers: string[]): HeaderMap {
       return
     }
     columnAt.push(null)
+    if (key === FUNCAO_HEADER_KEY) {
+      if (funcaoIndex !== null) throw new UserImportError('A coluna "Função" aparece duas vezes na planilha.', 400)
+      funcaoIndex = index
+      return
+    }
     if (header.trim().length === 0) return
     if (IGNORED_BY_HEADER.has(key)) ignored.push(IGNORED_BY_HEADER.get(key)!)
     else unknown.push(header.trim())
@@ -243,13 +305,13 @@ function mapHeaders(headers: string[]): HeaderMap {
 
   if (ignored.length > 0) {
     warnings.push(
-      `${ignored.map((column) => `"${column}"`).join(' e ')} ${ignored.length === 1 ? 'foi ignorada' : 'foram ignoradas'}: a importação nunca desliga nem reativa ninguém.`,
+      `${ignored.map((column) => `"${column}"`).join(' e ')} ${ignored.length === 1 ? 'foi ignorada' : 'foram ignoradas'}: a importação não usa ${ignored.length === 1 ? 'essa coluna' : 'essas colunas'}.`,
     )
   }
   if (unknown.length > 0) {
     warnings.push(`${unknown.map((column) => `"${column}"`).join(', ')} não ${unknown.length === 1 ? 'é uma coluna' : 'são colunas'} do modelo e foi ignorada.`)
   }
-  return { columnAt, warnings }
+  return { columnAt, funcaoIndex, warnings }
 }
 
 // ────────────────────────────── resolução ──────────────────────────────
@@ -262,7 +324,7 @@ function mapHeaders(headers: string[]): HeaderMap {
  */
 async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<ResolvedImport> {
   const table = parseCsvTable(buffer)
-  const { columnAt, warnings } = mapHeaders(table.headers)
+  const { columnAt, funcaoIndex, warnings } = mapHeaders(table.headers)
 
   if (table.rows.length === 0) {
     throw new UserImportError('A planilha não tem nenhuma linha preenchida.', 400)
@@ -335,15 +397,38 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
       role: 'LEGEND',
       area: null,
       position: (cells.Cargo ?? '').trim() || null,
+      positionCategory: (cells['Categoria do cargo'] ?? '').trim() || null,
       joinedAt: null,
       birthDate: null,
-      managerKey: (cells['Líder (e-mail)'] ?? '').trim().toLowerCase() || null,
+      roleExplicit: false,
+      managerKey: null,
+      managerRaw: (cells['Líder (e-mail)'] ?? '').trim() || null,
       existing: null,
+      wantsDeactivation: INACTIVE_STATUS.has(flatten(cells['Situação'] ?? '')),
+      leftAt: null,
+      employmentType: null,
+      photoSourceUrl: null,
     }
     rows.push(row)
 
+    const rawPhoto = (cells['Foto (URL)'] ?? '').trim()
+    if (rawPhoto) {
+      const normalized = normalizePhotoSourceUrl(rawPhoto)
+      if (!normalized) addIssue(row, 'Foto (URL)', 'Link inválido. Cole o endereço completo, começando com https://.')
+      else row.photoSourceUrl = normalized
+    }
+
     if (!row.name) addIssue(row, 'Nome', 'Informe o nome.')
     if (row.position && row.position.length > 120) addIssue(row, 'Cargo', 'Cargo com mais de 120 caracteres.')
+    // Lista fechada: valor de fora dela viraria segmentação que nunca casa —
+    // e o curso restrito sumiria de todo mundo, sem erro visível.
+    if (row.positionCategory && !isPositionCategory(row.positionCategory)) {
+      addIssue(
+        row,
+        'Categoria do cargo',
+        `"${row.positionCategory}" não está na lista (${POSITION_CATEGORIES.join(', ')}).`,
+      )
+    }
 
     if (!row.email) addIssue(row, 'E-mail', 'Informe o e-mail.')
     else if (!EMAIL_PATTERN.test(row.email)) addIssue(row, 'E-mail', 'E-mail inválido.')
@@ -362,7 +447,20 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
         )
       } else {
         row.role = role as UserImportRole
+        row.roleExplicit = true
       }
+    } else if (funcaoIndex !== null) {
+      const derived = deriveRoleFromFuncao(record.cells[funcaoIndex] ?? '', row.positionCategory)
+      if (derived) {
+        row.role = derived
+        row.roleExplicit = true
+      }
+    }
+
+    if (row.managerRaw) {
+      if (EMAIL_PATTERN.test(row.managerRaw)) row.managerKey = row.managerRaw.toLowerCase()
+      // Valor sem "@": nome curto (planilha da G&G). Resolvido no passo 1b,
+      // depois que todas as linhas (e possíveis líderes citados nelas) existem.
     }
 
     const rawArea = (cells['Área'] ?? '').trim()
@@ -374,15 +472,39 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
 
     const rawJoinedAt = (cells['Na equipe desde'] ?? '').trim()
     if (rawJoinedAt) {
-      const date = parseImportDate(rawJoinedAt)
+      const date = parseSpreadsheetDate(rawJoinedAt)
       if (!date) addIssue(row, 'Na equipe desde', 'Data inválida. Use DD/MM/AAAA.')
       else if (!withinRange(date)) addIssue(row, 'Na equipe desde', 'Data fora do intervalo (1900 até um ano à frente).')
       else row.joinedAt = date
     }
 
+    const rawLeftAt = (cells['Desligado em'] ?? '').trim()
+    if (rawLeftAt) {
+      const date = parseSpreadsheetDate(rawLeftAt)
+      if (!date) addIssue(row, 'Desligado em', 'Data inválida. Use DD/MM/AAAA.')
+      else if (!withinRange(date)) addIssue(row, 'Desligado em', 'Data fora do intervalo (1900 até um ano à frente).')
+      else row.leftAt = date
+    }
+    // Data de saída sem "Desligado" na Situação é quase sempre erro de
+    // preenchimento — e adivinhar a intenção de quem digitou é justamente o que
+    // não se deve fazer com desligamento.
+    if (row.leftAt && !row.wantsDeactivation) {
+      addIssue(row, 'Situação', 'Há data de desligamento, mas a Situação não é "Desligado".')
+    }
+
+    // Regime de contratação. Coluna vazia NÃO devolve ninguém para CLT: regime é
+    // fato do contrato, e apagá-lo por esquecimento numa carga de 100 linhas só
+    // apareceria na programação de férias do ano seguinte.
+    const rawContrato = flatten(cells['Tipo de contrato'] ?? '')
+    if (rawContrato) {
+      if (rawContrato === 'clt') row.employmentType = 'CLT'
+      else if (rawContrato === 'pj') row.employmentType = 'PJ'
+      else addIssue(row, 'Tipo de contrato', 'Use CLT ou PJ.')
+    }
+
     const rawBirthDate = (cells['Data de nascimento'] ?? '').trim()
     if (rawBirthDate) {
-      const date = parseImportDate(rawBirthDate)
+      const date = parseSpreadsheetDate(rawBirthDate)
       if (!date) addIssue(row, 'Data de nascimento', 'Data inválida. Use DD/MM/AAAA.')
       else if (date.getTime() > Date.now()) addIssue(row, 'Data de nascimento', 'Data de nascimento no futuro.')
       else if (!withinRange(date)) addIssue(row, 'Data de nascimento', 'Data fora do intervalo (1900 até um ano à frente).')
@@ -397,6 +519,49 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
     }
   }
 
+  // ── 1b. líder por nome (planilha da G&G: "Líder" traz o nome curto, não
+  // o e-mail — ex. "Waghner Reis" para "Waghner Bruno Reis Soares Silva").
+  // Resolve contra as outras linhas do arquivo e contra quem já existe na
+  // empresa; sem casamento único, erra a linha em vez de arriscar hierarquia
+  // errada (ver design em docs/superpowers — importação aceita a planilha do BI).
+  const rowsWithNamedManager = rows.filter((row) => row.managerRaw && row.managerKey === null)
+  if (rowsWithNamedManager.length > 0) {
+    const companyUsers = await scopedPrisma(actor.companyId).user.findMany({
+      where: { active: true, leftAt: null },
+      select: { name: true, email: true },
+    })
+    const candidatesByEmail = new Map<string, string[]>()
+    for (const row of rows) {
+      if (!row.email || !row.name) continue
+      if (!candidatesByEmail.has(row.email)) candidatesByEmail.set(row.email, flatten(row.name).split(' '))
+    }
+    for (const user of companyUsers) {
+      const email = user.email.toLowerCase()
+      if (!candidatesByEmail.has(email)) candidatesByEmail.set(email, flatten(user.name).split(' '))
+    }
+
+    for (const row of rowsWithNamedManager) {
+      const [first, ...rest] = flatten(row.managerRaw!).split(' ')
+      const matches = new Set<string>()
+      for (const [email, words] of candidatesByEmail) {
+        if (words[0] !== first) continue
+        if (rest.every((word) => words.slice(1).some((candidateWord) => candidateWord.includes(word)))) {
+          matches.add(email)
+        }
+      }
+      if (matches.size === 1) row.managerKey = [...matches][0]
+      else if (matches.size === 0) {
+        addIssue(row, 'Líder (e-mail)', `Líder "${row.managerRaw}" não encontrado. Preencha com o e-mail.`)
+      } else {
+        addIssue(
+          row,
+          'Líder (e-mail)',
+          `Líder "${row.managerRaw}" é ambíguo (${matches.size} pessoas com esse nome). Preencha com o e-mail.`,
+        )
+      }
+    }
+  }
+
   // ── 2. quem já existe (busca global: o unique de e-mail atravessa empresas)
   //
   // Vem antes do setor de propósito: o papel efetivo de quem já existe depende
@@ -408,7 +573,7 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
       ? []
       : await prisma.$queryRaw<ExistingUser[]>`
           SELECT id, email, name, "companyId", "sectorId", role, active, "leftAt",
-                 position, squad, "managerId", area, "joinedAt", "birthDate"
+                 position, "positionCategory", "photoUrl", squad, "managerId", area, "joinedAt", "birthDate"
           FROM "User" WHERE lower(email) = ANY(${emails})
         `
   const existingByEmail = new Map(existingUsers.map((user) => [user.email.toLowerCase(), user]))
@@ -448,20 +613,31 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
       continue
     }
     if (!existing.active || existing.leftAt !== null) {
+      // A planilha desliga, mas NÃO reativa (ver `USER_IMPORT_INACTIVE_STATUSES`):
+      // reabrir acesso de quem saiu da empresa por causa de uma célula errada não
+      // se desfaz, ao contrário de um desligamento indevido.
       row.action = 'SKIP'
-      row.changes = ['Pessoa desligada — nada foi alterado. Reative em Administração › Lendas antes de importar.']
+      row.changes = ['Pessoa já desligada — nada foi alterado. A importação não reativa ninguém.']
+      continue
+    }
+    if (row.wantsDeactivation) {
+      // Desativar é o fim da linha para esta pessoa nesta importação: não faz
+      // sentido também mudar cargo ou setor de quem está saindo.
+      row.action = 'DEACTIVATE'
+      row.changes = ['Desativar — sai das listagens e não entra mais. Histórico preservado.']
       continue
     }
   }
 
   // ── 3. papel efetivo de cada linha
   //
-  // Coluna Papel em branco quer dizer "não mexe", igual a qualquer outra. Sem
-  // isto o default `LEGEND` seria validado contra o setor e recusaria um
-  // MANAGER num setor que não habilita Lenda — sem que papel nenhum fosse
-  // mudar — e ainda faria um setor novo nascer sem o papel de quem vai para lá.
+  // Coluna Papel em branco (e sem Função+Categoria do cargo que a substitua)
+  // quer dizer "não mexe", igual a qualquer outra. Sem isto o default
+  // `LEGEND` seria validado contra o setor e recusaria um MANAGER num setor
+  // que não habilita Lenda — sem que papel nenhum fosse mudar — e ainda
+  // faria um setor novo nascer sem o papel de quem vai para lá.
   for (const row of rows) {
-    if (row.cells.Papel?.trim()) continue
+    if (row.roleExplicit) continue
     const current = row.existing?.role
     if (current && (USER_IMPORT_ROLES as readonly string[]).includes(current)) row.role = current as UserImportRole
   }
@@ -476,7 +652,7 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
   const candidateSquadSlugs = new Set<string>()
   const candidateSquadNames = new Set<string>()
   for (const row of rows) {
-    if (row.action === 'SKIP') continue
+    if (skipsPlanning(row)) continue
     const sectorName = row.sectorName || (isSubadmin && actorSector ? actorSector.name : '')
     const sectorSlug = sectorName ? slugify(sectorName) : ''
     if (sectorSlug && !sectors.has(sectorSlug)) candidateSectorSlugs.add(sectorSlug)
@@ -506,7 +682,7 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
   for (const row of rows) {
     // Desligado não é gravado, então o setor dele não vira erro do arquivo nem
     // faz um setor novo entrar no plano de criação.
-    if (row.action === 'SKIP') continue
+    if (skipsPlanning(row)) continue
     if (row.action === 'ERROR' && row.issues.some((issue) => issue.column === 'Setor')) continue
 
     if (!row.sectorName) {
@@ -578,9 +754,19 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
   }
 
   // ── 6. squad de cada linha
+  //
+  // A planilha é fonte da verdade do organograma: ela cria setor, cria squad e
+  // move pessoa de setor. Aqui ela também **move a squad** — quando todas as
+  // linhas que a citam apontam para um setor diferente do atual, a squad vai
+  // junto com a gente dela. O que ela nunca faz é rachar uma squad entre dois
+  // setores, e por isso a decisão é da planilha inteira (`squadClaims`), não da
+  // primeira linha que aparecer.
+  const sectorLabel = (key: string): string => sectors.get(key)?.name ?? key
+  const squadClaims = new Map<string, { sectorKey: string; rows: RowDraft[] }>()
+
   for (const row of rows) {
     if (!row.squadName || !row.sectorKey) continue
-    if (row.action === 'ERROR' || row.action === 'SKIP') continue
+    if (row.action === 'ERROR' || skipsPlanning(row)) continue
 
     const slug = slugify(row.squadName)
     if (!slug) {
@@ -590,30 +776,30 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
     row.squadKey = slug
 
     const existing = squads.get(slug)
+    if (existing && !existing.active) {
+      // Desativar é ato deliberado da tela; a planilha vem de fora, com nome
+      // digitado por gente. Reativar em silêncio desfaria a decisão do admin.
+      addIssue(row, 'Squad', `A squad "${existing.name}" está desativada. Reative-a em Administração › Squads.`)
+      continue
+    }
+
+    const claim = squadClaims.get(slug)
+    if (claim) {
+      if (claim.sectorKey !== row.sectorKey) {
+        // Culpar só a segunda linha esconderia metade do conflito.
+        const name = existing?.name ?? row.squadName
+        const message = `A squad "${name}" aparece na planilha em dois setores ("${sectorLabel(claim.sectorKey)}" e "${sectorLabel(row.sectorKey)}"). Uma squad pertence a um setor só.`
+        addIssue(row, 'Squad', message)
+        for (const previous of claim.rows) addIssue(previous, 'Squad', message)
+        continue
+      }
+      claim.rows.push(row)
+      if (existing) row.squadName = existing.name
+      continue
+    }
+
     if (existing) {
-      if (!existing.active) {
-        addIssue(row, 'Squad', `A squad "${existing.name}" está desativada. Reative-a em Administração › Squads.`)
-        continue
-      }
-      if (existing.sectorKey !== row.sectorKey) {
-        const sectorName = sectors.get(existing.sectorKey)?.name ?? existing.sectorKey
-        if (existing.create) {
-          // Squad que a própria planilha está inventando, puxada para dois
-          // setores. Culpar só a segunda linha esconderia metade do conflito.
-          const message = `A squad "${existing.name}" aparece na planilha em dois setores ("${sectorName}" e "${row.sectorName}"). Uma squad pertence a um setor só.`
-          addIssue(row, 'Squad', message)
-          for (const previous of rows) {
-            if (previous !== row && previous.squadKey === slug) addIssue(previous, 'Squad', message)
-          }
-        } else {
-          addIssue(
-            row,
-            'Squad',
-            `A squad "${existing.name}" é do setor "${sectorName}"; esta pessoa está no setor "${row.sectorName}". Uma squad pertence a um setor só.`,
-          )
-        }
-        continue
-      }
+      squadClaims.set(slug, { sectorKey: row.sectorKey, rows: [row] })
       row.squadName = existing.name
       continue
     }
@@ -627,13 +813,83 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
       continue
     }
 
+    squadClaims.set(slug, { sectorKey: row.sectorKey, rows: [row] })
     squads.set(slug, { id: null, name: row.squadName, slug, sectorKey: row.sectorKey, active: true, create: true })
+  }
+
+  // ── 6.1. squads que a planilha move de setor
+  //
+  // O destino só entra em `sectorKey` depois que todas as linhas concordaram —
+  // decidir na primeira linha faria a pré-visualização anunciar um movimento
+  // que a linha seguinte contradiz.
+  for (const [slug, claim] of squadClaims) {
+    const squad = squads.get(slug)
+    if (!squad || squad.create) continue
+    if (squad.sectorKey === claim.sectorKey) continue
+    if (claim.rows.every((row) => row.action === 'ERROR')) continue
+    squad.moveFromSectorKey = squad.sectorKey
+    squad.sectorKey = claim.sectorKey
+  }
+
+  // Mover a squad só é honesto se ninguém ficar para trás: integrante que
+  // continua no setor antigo ficaria numa squad de outro setor — o estado que
+  // `addMember` recusa na tela, e que `updateSquad` recusa para o líder. A
+  // importação não pode ser a porta dos fundos para ele. Por isso a conferência
+  // é sobre TODO integrante ativo do banco (não só quem está na planilha) mais
+  // o líder, e não sobre as linhas do arquivo.
+  const movingSquads = [...squads.values()].filter((squad) => squad.id && squad.moveFromSectorKey)
+  if (movingSquads.length > 0) {
+    const movingIds = movingSquads.map((squad) => squad.id!)
+    const [movingMembers, movingSquadRows] = await Promise.all([
+      prisma.squadMember.findMany({
+        where: { squadId: { in: movingIds }, user: { active: true, leftAt: null } },
+        select: { squadId: true, user: { select: { id: true, name: true, email: true, sectorId: true } } },
+      }),
+      prisma.squad.findMany({
+        where: { id: { in: movingIds }, leaderId: { not: null } },
+        select: { id: true, leader: { select: { id: true, name: true, email: true, sectorId: true, active: true, leftAt: true } } },
+      }),
+    ])
+
+    const peopleBySquad = new Map<string, { id: string; name: string; email: string; sectorId: string }[]>()
+    const push = (squadId: string, person: { id: string; name: string; email: string; sectorId: string }) => {
+      const bucket = peopleBySquad.get(squadId) ?? []
+      if (!bucket.some((entry) => entry.id === person.id)) bucket.push(person)
+      peopleBySquad.set(squadId, bucket)
+    }
+    for (const member of movingMembers) push(member.squadId, member.user)
+    for (const squadRow of movingSquadRows) {
+      const leader = squadRow.leader
+      if (leader && leader.active && !leader.leftAt) push(squadRow.id, leader)
+    }
+
+    for (const squad of movingSquads) {
+      const claim = squadClaims.get(squad.slug)!
+      const leftBehind: string[] = []
+      for (const person of peopleBySquad.get(squad.id!) ?? []) {
+        const personRow = rows.find((row) => row.email === person.email.toLowerCase())
+        // Quem a planilha desliga não conta: está saindo da empresa.
+        if (personRow && (personRow.action === 'DEACTIVATE' || personRow.action === 'SKIP')) continue
+        const targetKey =
+          personRow && personRow.action !== 'ERROR' && personRow.sectorKey
+            ? personRow.sectorKey
+            : (sectorById.get(person.sectorId)?.slug ?? '')
+        if (targetKey !== squad.sectorKey) leftBehind.push(person.name)
+      }
+      if (leftBehind.length === 0) continue
+
+      squad.moveBlocked = true
+      const names = leftBehind.slice(0, 3).join(', ')
+      const rest = leftBehind.length > 3 ? ` e mais ${leftBehind.length - 3}` : ''
+      const message = `A squad "${squad.name}" é do setor "${sectorLabel(squad.moveFromSectorKey!)}" e a planilha a levaria para "${sectorLabel(squad.sectorKey)}", mas ${names}${rest} ${leftBehind.length === 1 ? 'continua' : 'continuam'} fora desse setor. Traga ${leftBehind.length === 1 ? 'essa pessoa' : 'essas pessoas'} na planilha para "${sectorLabel(squad.sectorKey)}" ou tire ${leftBehind.length === 1 ? 'ela' : 'elas'} da squad em Administração › Squads.`
+      for (const row of claim.rows) addIssue(row, 'Squad', message)
+    }
   }
 
   // ── 7. o que muda em quem já existe
   for (const row of rows) {
     const existing = row.existing
-    if (!existing || row.action === 'ERROR' || row.action === 'SKIP') continue
+    if (!existing || row.action === 'ERROR' || skipsPlanning(row)) continue
 
     const targetSector = row.sectorKey ? sectors.get(row.sectorKey) : undefined
     // Setor que a planilha ainda vai criar não tem id, mas mover alguém para
@@ -642,9 +898,13 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
     // checagem de squad presa ao setor atual.
     const changingSector = targetSector !== undefined && targetSector.id !== existing.sectorId
     if (changingSector) {
-      const stuck = (membershipsByUser.get(existing.id) ?? []).find(
-        (membership) => membership.squad.sectorId === existing.sectorId,
-      )
+      const stuck = (membershipsByUser.get(existing.id) ?? []).find((membership) => {
+        if (membership.squad.sectorId !== existing.sectorId) return false
+        // Squad que a seção 6 leva junto para o setor de destino não prende
+        // ninguém — recusar aqui desfaria o movimento recém-planejado.
+        const planned = squads.get(membership.squad.slug)
+        return !(planned && planned.moveFromSectorKey && planned.sectorKey === row.sectorKey)
+      })
       if (stuck) {
         const currentSector = sectorById.get(existing.sectorId)?.name ?? ''
         addIssue(
@@ -659,13 +919,22 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
     const changes: string[] = []
     if (row.name && row.name !== existing.name) changes.push(`Nome: "${existing.name}" → "${row.name}"`)
     if (row.position && row.position !== existing.position) changes.push(`Cargo: "${existing.position ?? ''}" → "${row.position}"`)
-    if (row.cells.Papel?.trim() && row.role !== existing.role) {
+    if (row.positionCategory && row.positionCategory !== existing.positionCategory) {
+      changes.push(`Categoria do cargo: "${existing.positionCategory ?? ''}" → "${row.positionCategory}"`)
+    }
+    if (row.roleExplicit && row.role !== existing.role) {
       changes.push(`Papel: ${USER_ROLE_LABELS[existing.role]} → ${USER_ROLE_LABELS[row.role]}`)
     }
     if (changingSector) changes.push(`Setor: "${sectorById.get(existing.sectorId)?.name ?? ''}" → "${row.sectorName}"`)
     if (row.area && row.area !== existing.area) changes.push(`Área: ${AREA_LABELS[row.area]}`)
     if (row.joinedAt && !sameDay(row.joinedAt, existing.joinedAt)) changes.push('Na equipe desde')
     if (row.birthDate && !sameDay(row.birthDate, existing.birthDate)) changes.push('Data de nascimento')
+    // Comparação por ORIGEM, não pela URL final: o espelho tem nome derivado do
+    // link da planilha, então reimportar o mesmo arquivo não vira "Foto" toda
+    // vez — e nem rebaixa a imagem. Ver `lib/photo-mirror.ts`.
+    if (row.photoSourceUrl && !isMirrorOf(existing.photoUrl, actor.companyId, row.photoSourceUrl)) {
+      changes.push(existing.photoUrl ? 'Foto (substituída)' : 'Foto')
+    }
 
     if (row.squadKey) {
       const squad = squads.get(row.squadKey)
@@ -690,7 +959,7 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
 
   // ── 8. líderes, com o grafo do banco fundido ao do arquivo
   const graphEntries: ManagerGraphEntry[] = rows
-    .filter((row) => row.action !== 'ERROR' && row.action !== 'SKIP' && row.email)
+    .filter((row) => row.action !== 'ERROR' && !skipsPlanning(row) && row.email)
     .map((row) => ({
       key: row.email,
       managerKey: row.managerKey,
@@ -751,6 +1020,13 @@ async function resolveImport(actor: UserImportActor, buffer: Buffer): Promise<Re
       squadsToCreate: [...squads.values()]
         .filter((squad) => squad.create)
         .map((squad) => ({ name: squad.name, sectorName: sectors.get(squad.sectorKey)?.name ?? '' })),
+      squadsToMove: [...squads.values()]
+        .filter((squad) => squad.moveFromSectorKey && !squad.moveBlocked)
+        .map((squad) => ({
+          name: squad.name,
+          fromSectorName: sectors.get(squad.moveFromSectorKey!)?.name ?? '',
+          toSectorName: sectors.get(squad.sectorKey)?.name ?? '',
+        })),
     },
     blocked: counts.ERROR > 0,
     warnings,
@@ -800,9 +1076,41 @@ export async function commitUserImport(
     passwordHashByEmail.set(row.email, await hashPassword(password))
   }
 
+  // Fotos: baixar e re-hospedar ANTES da transação, pelo mesmo motivo do bcrypt —
+  // são chamadas de rede a um servidor de terceiro, e 200 delas dentro da
+  // transação estourariam o timeout com o banco travado esperando o Google.
+  //
+  // Falha aqui é AVISO, não erro: o link do Drive pode estar fechado, e travar o
+  // cadastro inteiro de 100 pessoas por causa de uma permissão de arquivo seria
+  // desproporcional. A linha entra sem mexer na foto, e o resultado diz quais.
+  const photoUrlByEmail = new Map<string, string>()
+  const photoWarnings: string[] = []
+  const mirroredBySource = new Map<string, string>()
+  for (const row of rows) {
+    if (row.action !== 'CREATE' && row.action !== 'UPDATE') continue
+    const source = row.photoSourceUrl
+    if (!source) continue
+    if (row.existing && isMirrorOf(row.existing.photoUrl, actor.companyId, source)) continue
+
+    const already = mirroredBySource.get(source)
+    if (already) {
+      photoUrlByEmail.set(row.email, already)
+      continue
+    }
+    try {
+      const mirrored = await mirrorPhoto(source, actor.companyId)
+      mirroredBySource.set(source, mirrored)
+      photoUrlByEmail.set(row.email, mirrored)
+    } catch (error) {
+      if (!(error instanceof PhotoMirrorError)) throw error
+      photoWarnings.push(`Linha ${row.line} (${row.name}): a foto não foi importada — ${error.message}.`)
+    }
+  }
+
   const db = scopedPrisma(actor.companyId)
   const sectorsCreated: string[] = []
   const squadsCreated: string[] = []
+  const squadsMoved: string[] = []
 
   try {
     await db.$transaction(
@@ -838,6 +1146,24 @@ export async function commitUserImport(
         for (const [key, squad] of squads) {
           if (squad.id) {
             squadIdByKey.set(key, squad.id)
+            if (squad.moveFromSectorKey) {
+              const before = await tx.squad.findUnique({ where: { id: squad.id } })
+              const moved = await tx.squad.update({
+                where: { id: squad.id },
+                data: { sectorId: sectorIdByKey.get(squad.sectorKey)! },
+              })
+              squadsMoved.push(squad.name)
+              await recordAuditLog({
+                actorId: actor.id,
+                entityType: 'Squad',
+                entityId: squad.id,
+                action: 'UPDATE',
+                before,
+                after: moved,
+                companyId: actor.companyId,
+                tx: tx as unknown as Prisma.TransactionClient,
+              })
+            }
             continue
           }
           const created = await tx.squad.create({
@@ -872,11 +1198,14 @@ export async function commitUserImport(
               email: row.email,
               passwordHash: passwordHashByEmail.get(row.email)!,
               position: row.position ?? undefined,
+              positionCategory: row.positionCategory ?? undefined,
               squad: row.squadKey ? squads.get(row.squadKey)!.name : undefined,
               role: row.role,
               area: row.area,
               sectorId: sectorIdByKey.get(row.sectorKey!)!,
               ...(row.joinedAt ? { joinedAt: row.joinedAt } : {}),
+              ...(row.employmentType ? { employmentType: row.employmentType } : {}),
+              ...(photoUrlByEmail.has(row.email) ? { photoUrl: photoUrlByEmail.get(row.email) } : {}),
               birthDate: row.birthDate,
             },
           })
@@ -891,13 +1220,29 @@ export async function commitUserImport(
             data: {
               ...(row.name ? { name: row.name } : {}),
               ...(row.position ? { position: row.position } : {}),
-              ...(row.cells.Papel?.trim() ? { role: row.role } : {}),
+              ...(row.positionCategory ? { positionCategory: row.positionCategory } : {}),
+              ...(row.roleExplicit ? { role: row.role } : {}),
               ...(row.area ? { area: row.area } : {}),
               ...(row.sectorKey ? { sectorId: sectorIdByKey.get(row.sectorKey)! } : {}),
               ...(row.squadKey ? { squad: squads.get(row.squadKey)!.name } : {}),
               ...(row.joinedAt ? { joinedAt: row.joinedAt } : {}),
+              ...(row.employmentType ? { employmentType: row.employmentType } : {}),
               ...(row.birthDate ? { birthDate: row.birthDate } : {}),
+              ...(photoUrlByEmail.has(row.email) ? { photoUrl: photoUrlByEmail.get(row.email) } : {}),
             },
+          })
+          touched.push({ id: row.existing.id, email: row.email })
+        }
+
+        // Desativação por planilha (seção 4.4 do Documento 3). Desativar NÃO é
+        // apagar: pontos, EMR Coins, feedbacks e selos ficam onde estão — a
+        // pessoa some das listagens e não entra mais. É isso que permite a
+        // planilha ser fonte da verdade sem destruir histórico.
+        for (const row of rows) {
+          if (row.action !== 'DEACTIVATE' || !row.existing) continue
+          await tx.user.update({
+            where: { id: row.existing.id },
+            data: { active: false, leftAt: row.leftAt ?? new Date() },
           })
           touched.push({ id: row.existing.id, email: row.email })
         }
@@ -931,7 +1276,10 @@ export async function commitUserImport(
             actorId: actor.id,
             entityType: 'User',
             entityId: user.id,
-            action: preview.rows.find((row) => row.email === user.email.toLowerCase())?.action === 'CREATE' ? 'CREATE' : 'UPDATE',
+            action:
+              preview.rows.find((row) => row.email === user.email.toLowerCase())?.action === 'CREATE'
+                ? 'CREATE'
+                : 'UPDATE',
             after: safeUser,
             companyId: actor.companyId,
             tx: tx as unknown as Prisma.TransactionClient,
@@ -948,9 +1296,11 @@ export async function commitUserImport(
             created: preview.counts.CREATE,
             updated: preview.counts.UPDATE,
             unchanged: preview.counts.UNCHANGED,
+            deactivated: preview.counts.DEACTIVATE,
             skipped: preview.counts.SKIP,
             sectorsCreated,
             squadsCreated,
+            squadsMoved,
           },
           companyId: actor.companyId,
           tx: tx as unknown as Prisma.TransactionClient,
@@ -977,6 +1327,9 @@ export async function commitUserImport(
     skipped: preview.counts.SKIP,
     sectorsCreated,
     squadsCreated,
+    squadsMoved,
     credentials,
+    photosImported: photoUrlByEmail.size,
+    photoWarnings,
   }
 }

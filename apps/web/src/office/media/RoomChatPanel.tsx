@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ROOM_CHAT_MESSAGE_MAX_LENGTH, type OfficeOccupant } from '@legends/shared'
+import { ROOM_CHAT_MESSAGE_MAX_LENGTH } from '@legends/shared'
 import { Icon } from '../../components/Icon'
-import { Avatar } from '../../components/Avatar'
+import { Avatar, type AvatarSource } from '../../components/Avatar'
 import { groupRoomChatMessages } from './roomChatGroups'
 import type { RoomChatMessage } from './useRoomChat'
 
@@ -44,13 +44,25 @@ export function RoomChatPanel({
   canSend,
   onSendMessage,
   onClose,
+  title = 'Chat da sala',
+  emptyText = 'Sem mensagens na sala ainda.',
+  closeLabel = 'Fechar painel de chat da sala',
 }: {
   messages: RoomChatMessage[]
-  /** Quem está na sala agora — só serve para achar o avatar de quem falou. */
-  occupants?: OfficeOccupant[]
+  /**
+   * Quem está aqui agora — só serve para achar o avatar de quem falou. O tipo
+   * é o mínimo de que o `Avatar` precisa (e não `OfficeOccupant`) desde que a
+   * arena e o saguão passaram a usar este painel: lá quem está presente é
+   * `ArenaOccupant`/`ArenaLobbyMember`, sem posição nem sala.
+   */
+  occupants?: Array<AvatarSource & { userId: string }>
   canSend: boolean
   onSendMessage: (text: string) => boolean
   onClose: () => void
+  /** Cabeçalho — a arena e o saguão não são "sala". */
+  title?: string
+  emptyText?: string
+  closeLabel?: string
 }) {
   const [text, setText] = useState('')
   const groups = useMemo(() => groupRoomChatMessages(messages), [messages])
@@ -89,10 +101,10 @@ export function RoomChatPanel({
   return (
     <div className="flex h-full flex-col text-on-surface">
       <header className="flex items-center justify-between border-b border-outline-variant px-md py-sm">
-        <h2 className="font-label text-label-md text-on-surface-variant">Chat da sala</h2>
+        <h2 className="font-label text-label-md text-on-surface-variant">{title}</h2>
         <button
           type="button"
-          aria-label="Fechar painel de chat da sala"
+          aria-label={closeLabel}
           onClick={onClose}
           className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
         >
@@ -102,7 +114,7 @@ export function RoomChatPanel({
 
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-md py-sm">
         {messages.length === 0 ? (
-          <p className="font-body text-body-sm text-on-surface-variant">Sem mensagens na sala ainda.</p>
+          <p className="font-body text-body-sm text-on-surface-variant">{emptyText}</p>
         ) : (
           <ul className="flex flex-col gap-md">
             {groups.map((group) => {

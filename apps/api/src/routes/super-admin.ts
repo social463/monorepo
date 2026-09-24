@@ -8,6 +8,7 @@ import { toCompanyAdmin, toPublicUser } from '../lib/serialize'
 import { revokeAllForUser } from '../services/refresh-token-service'
 import { getAdoptionOverview } from '../services/analytics-dashboard-service'
 import { provisionCategories } from '../services/category-service'
+import { provisionCorporatePostTags } from '../services/corporate-post-tag-service'
 import { provisionXpRules } from '../services/xp-admin-service'
 import { ADOPTION_WINDOWS, DEFAULT_ADOPTION_WINDOW } from '@legends/shared'
 
@@ -117,6 +118,7 @@ export async function superAdminRoutes(app: FastifyInstance) {
         // Empresa nova já nasce com o catálogo de competências do Mural: sem
         // nenhuma categoria o envio de reconhecimento não fecha.
         await provisionCategories(tx, company.id)
+        await provisionCorporatePostTags(tx, company.id)
         // … e com as regras de pontos: sem nenhuma, `awardXp` devolve NO_RULE e
         // a empresa nasce com a gamificação desligada sem ter escolhido isso.
         await provisionXpRules(tx, company.id)

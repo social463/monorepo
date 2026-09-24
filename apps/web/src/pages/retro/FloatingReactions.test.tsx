@@ -7,7 +7,7 @@ const participants: RetroParticipantDTO[] = [
   {
     user: {
       id: 'u1', name: 'Dan Silva', email: 'd@x.com', role: 'LEGEND',
-      area: null, position: null, squad: null,
+      area: null, position: null, positionCategory: null, squad: null,
       photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null,
       active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false,
     },

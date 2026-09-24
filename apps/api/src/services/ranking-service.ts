@@ -25,6 +25,7 @@ import {
   ymdOf,
 } from '../lib/sao-paulo-date'
 import { onlineUserIds } from './presence-service'
+import { companyHolidays } from './vacation-planning-service'
 
 /**
  * Ranking de engajamento.
@@ -137,22 +138,26 @@ interface StreakPair {
  * pessoas de uma vez. Chamar `getStreakSummary` num laço faria uma query por
  * pessoa; aqui o banco é lido uma vez só e a conta acontece em memória.
  */
-export function streaksFromDays(days: Set<string>, todayYmd: string): StreakPair {
-  const lastBiz = isBusinessDay(todayYmd) ? todayYmd : prevBusinessDay(todayYmd)
+export function streaksFromDays(
+  days: Set<string>,
+  todayYmd: string,
+  holidays?: ReadonlySet<string>,
+): StreakPair {
+  const lastBiz = isBusinessDay(todayYmd, holidays) ? todayYmd : prevBusinessDay(todayYmd, holidays)
 
   let currentStreak = 0
-  let cursor = days.has(lastBiz) ? lastBiz : prevBusinessDay(lastBiz)
+  let cursor = days.has(lastBiz) ? lastBiz : prevBusinessDay(lastBiz, holidays)
   while (days.has(cursor)) {
     currentStreak += 1
-    cursor = prevBusinessDay(cursor)
+    cursor = prevBusinessDay(cursor, holidays)
   }
 
-  const bizYmds = [...days].filter(isBusinessDay).sort()
+  const bizYmds = [...days].filter((ymd) => isBusinessDay(ymd, holidays)).sort()
   let bestStreak = 0
   let run = 0
   let prev: string | null = null
   for (const ymd of bizYmds) {
-    run = prev !== null && nextBusinessDay(prev) === ymd ? run + 1 : 1
+    run = prev !== null && nextBusinessDay(prev, holidays) === ymd ? run + 1 : 1
     if (run > bestStreak) bestStreak = run
     prev = ymd
   }
@@ -181,8 +186,14 @@ export async function getStreakRanking(
   const daysByUser = new Map<string, Set<string>>(ids.map((id) => [id, new Set<string>()]))
   for (const entry of entries) daysByUser.get(entry.userId)?.add(ymdOf(entry.day))
 
+  const minDay = entries.reduce((min, e) => {
+    const ymd = ymdOf(e.day)
+    return ymd < min ? ymd : min
+  }, todayYmd)
+  const holidays = new Set((await companyHolidays(companyId, minDay, todayYmd)).keys())
+
   const ranked = users
-    .map((user) => ({ user, ...streaksFromDays(daysByUser.get(user.id)!, todayYmd) }))
+    .map((user) => ({ user, ...streaksFromDays(daysByUser.get(user.id)!, todayYmd, holidays) }))
     .sort((a, b) => {
       if (b.currentStreak !== a.currentStreak) return b.currentStreak - a.currentStreak
       if (b.bestStreak !== a.bestStreak) return b.bestStreak - a.bestStreak

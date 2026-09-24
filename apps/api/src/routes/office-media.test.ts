@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { buildApp } from '../app'
 import { prisma } from '../lib/prisma'
 import { getOfficeHub, type OfficeSocket } from '../lib/office-hub'
-import { OFFICE_BROADCAST_ROOM, createEmptyMapDocumentV1, officeRoomForMapPosition, DEFAULT_COMPANY_ID } from '@legends/shared'
+import { OFFICE_BROADCAST_ROOM, createEmptyMapDocumentV1, officeRoomForTile, DEFAULT_COMPANY_ID } from '@legends/shared'
 import { setBroadcastEnabled } from '../services/office-setting-service'
 import { legacyOfficeRuntimeFixture } from '../test/office-map-fixture'
 import {
@@ -48,6 +48,11 @@ async function createActorId(): Promise<string> {
     data: { name: 'Admin', email: `admin-${userCounter}@x.com`, passwordHash: 'x', role: 'ADMIN' },
   })
   return user.id
+}
+
+/** O TILE de uma posição em pixel — o occupant fala pixel desde o movimento livre. */
+function tileOf(point: { x: number; y: number }): { x: number; y: number } {
+  return { x: Math.floor(point.x / 32), y: Math.floor(point.y / 32) }
 }
 
 describe('POST /office/media-token', () => {
@@ -114,6 +119,51 @@ describe('POST /office/media-token', () => {
     await app.close()
   })
 
+  it('removido da reunião: token negado até sair da sala, liberado ao voltar', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { user, token } = await createUserAndToken(app)
+    const manager = await createUserAndToken(app)
+    const managerSink: OfficeSocket = { send: () => {} }
+    officeHub.join(managerSink, {
+      id: manager.user.id, name: manager.user.name, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null,
+    })
+    officeHub.join(sink, { id: user.id, name: user.name, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null })
+
+    // Os dois entram na sala 2 (mesmo caminho do teste acima). O manager entra
+    // primeiro: é quem chegou antes que manda.
+    for (const [socket, id] of [[managerSink, manager.user.id], [sink, user.id]] as const) {
+      if (tileOf(officeHub.occupantOf(id)!).y === 14) officeHub.__walkForTest(socket, id, 'down')
+      for (let i = 0; i < 8 && tileOf(officeHub.occupantOf(id)!).x < 17; i += 1) officeHub.__walkForTest(socket, id, 'right')
+      expect(officeHub.occupantOf(id)!.x).toBeGreaterThanOrEqual(17)
+    }
+
+    const room = officeHub.roomOf(officeHub.occupantOf(user.id)!)!
+    expect(officeHub.removeFromRoom(managerSink, manager.user.id, user.id)).not.toBeNull()
+
+    const negado = await app.inject({
+      method: 'POST',
+      url: '/office/media-token',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { room: TEST_MEETING_ROOM },
+    })
+    expect(negado.statusCode).toBe(403)
+    expect(officeHub.isRemovedFromRoom(user.id, room.id)).toBe(true)
+
+    // Sai da sala e volta: a marca some e a chamada é liberada de novo.
+    for (let i = 0; i < 8 && tileOf(officeHub.occupantOf(user.id)!).x >= 17; i += 1) officeHub.__walkForTest(sink, user.id, 'left')
+    for (let i = 0; i < 8 && tileOf(officeHub.occupantOf(user.id)!).x < 17; i += 1) officeHub.__walkForTest(sink, user.id, 'right')
+
+    const liberado = await app.inject({
+      method: 'POST',
+      url: '/office/media-token',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { room: TEST_MEETING_ROOM },
+    })
+    expect(liberado.statusCode).toBe(200)
+    await app.close()
+  })
+
   it('200 dentro da sala: andar até a reunião-2 autoriza a sala dela', async () => {
     const app = buildApp()
     await app.ready()
@@ -124,9 +174,9 @@ describe('POST /office/media-token', () => {
     // linha 15 se preciso e anda pra direita atravessando a porta (16,15).
     // Burst do rate limit é 10 — cabem os ≤ 7 passos sem esperar relógio.
     let occ = officeHub.occupantOf(user.id)!
-    if (occ.y === 14) officeHub.move(sink, user.id, 'down')
-    for (let i = 0; i < 8 && officeHub.occupantOf(user.id)!.x < 17; i += 1) {
-      officeHub.move(sink, user.id, 'right')
+    if (tileOf(occ).y === 14) officeHub.__walkForTest(sink, user.id, 'down')
+    for (let i = 0; i < 8 && tileOf(officeHub.occupantOf(user.id)!).x < 17; i += 1) {
+      officeHub.__walkForTest(sink, user.id, 'right')
     }
     occ = officeHub.occupantOf(user.id)!
     expect(occ.x).toBeGreaterThanOrEqual(17) // realmente entrou na sala
@@ -282,7 +332,7 @@ describe('POST /office/media-token — estabilidade da sala após publicar decor
     const occ = officeHub.occupantOf(user.id)!
 
     const before = await getActiveOfficeMap(DEFAULT_COMPANY_ID)
-    const roomBefore = officeRoomForMapPosition(before.map.id, before.document, occ.x, occ.y)
+    const roomBefore = officeRoomForTile(before.map.id, before.document, occ.x, occ.y)
 
     // publica decoração inócua: mesmo map.id, novo publication.id
     const lock2 = await acquireOfficeMapLock(mapId, admin.id, DEFAULT_COMPANY_ID)
@@ -300,7 +350,7 @@ describe('POST /office/media-token — estabilidade da sala após publicar decor
     const after = await getActiveOfficeMap(DEFAULT_COMPANY_ID)
     expect(after.publication.id).not.toBe(before.publication.id)
     expect(after.map.id).toBe(before.map.id)
-    expect(officeRoomForMapPosition(after.map.id, after.document, occ.x, occ.y)).toBe(roomBefore)
+    expect(officeRoomForTile(after.map.id, after.document, occ.x, occ.y)).toBe(roomBefore)
 
     // token continua autorizado para a sala calculada antes de publicar
     const res = await app.inject({

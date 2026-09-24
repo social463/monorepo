@@ -10,6 +10,12 @@ export interface PublicUser {
   role: UserRole
   area: Area | null
   position: string | null
+  /**
+   * Categoria do cargo (Auxiliar, Analista, Jovem Aprendiz…). Sai daqui porque é
+   * ela que abre a área Eu Aprendiz no menu e no guard de rota — `position`
+   * guarda o título completo e tem 80 valores distintos, que não servem para isso.
+   */
+  positionCategory: string | null
   squad: string | null
   photoUrl: string | null
   avatarStyle: AvatarStyleKey | null

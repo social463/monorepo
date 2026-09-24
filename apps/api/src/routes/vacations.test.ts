@@ -82,6 +82,26 @@ describe('rotas de férias', () => {
     await app.close()
   })
 
+  it('acesso administrativo delegado lança férias de quem não é liderado', async () => {
+    const app = buildApp()
+    await app.ready()
+    const delegada = await registerUser(app, 'Delegada', 'delegada-vac@x.com')
+    const alvo = await registerUser(app, 'Alvo Delegado', 'alvo-delegado-vac@x.com')
+    // Continua LEGEND e não lidera o alvo: o que a autoriza é o switch de
+    // admin, lido do banco por `assertCanManage` (ver @legends/shared/permissions).
+    await prisma.user.update({ where: { id: delegada.id }, data: { role: 'LEGEND', adminAccess: true } })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/vacations',
+      headers: { authorization: `Bearer ${delegada.token}` },
+      payload: { userId: alvo.id, startDate: '2026-08-03', endDate: '2026-08-14' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    await app.close()
+  })
+
   it('recusa payload inválido (400)', async () => {
     const app = buildApp()
     await app.ready()

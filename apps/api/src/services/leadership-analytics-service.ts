@@ -38,7 +38,9 @@ async function listLedMembers(viewerId: string): Promise<{ id: string; name: str
 export async function getLeadershipOverview(scope: LeadershipAnalyticsScope): Promise<LeadershipOverviewDTO> {
   const now = scope.now ?? new Date()
   const { companyId, range } = scope
-  const window = resolveWindow(range, now)
+  // A Liderança segue com os atalhos: o filtro personalizável é da tela de
+  // People Analytics (Documento 3, seção 4.1), e nada foi pedido aqui.
+  const window = resolveWindow({ range }, now)
   const db = scopedPrisma(companyId)
 
   const members = await listLedMembers(scope.viewerId)

@@ -151,6 +151,76 @@ describe('GET /feedbacks/mural', () => {
     expect(page2.json().feedbacks.map((f: { id: string }) => f.id)).toEqual([primeiro])
     await app.close()
   })
+
+  it('devolve wallSeenAt null para quem nunca abriu a aba — aí tudo é novo', async () => {
+    const app = buildApp()
+    await app.ready()
+    const author = await register(app, 'Autor', 'wall-seen1@x.com')
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/feedbacks/mural',
+      headers: { authorization: `Bearer ${author.token}` },
+    })
+
+    expect(res.json().wallSeenAt).toBeNull()
+    await app.close()
+  })
+})
+
+describe('POST /feedbacks/mural/seen', () => {
+  it('exige autenticação (401)', async () => {
+    const app = buildApp()
+    await app.ready()
+    const res = await app.inject({ method: 'POST', url: '/feedbacks/mural/seen' })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('marca a aba como vista, e o mural passa a devolver o instante', async () => {
+    const app = buildApp()
+    await app.ready()
+    const author = await register(app, 'Autor', 'wall-seen2@x.com')
+    const antes = Date.now()
+
+    const marcou = await app.inject({
+      method: 'POST',
+      url: '/feedbacks/mural/seen',
+      headers: { authorization: `Bearer ${author.token}` },
+    })
+    expect(marcou.statusCode).toBe(204)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/feedbacks/mural',
+      headers: { authorization: `Bearer ${author.token}` },
+    })
+    const seenAt = res.json().wallSeenAt as string
+    expect(seenAt).not.toBeNull()
+    expect(new Date(seenAt).getTime()).toBeGreaterThanOrEqual(antes)
+    await app.close()
+  })
+
+  it('é da PESSOA, não da empresa: marcar por um não marca pelo outro', async () => {
+    const app = buildApp()
+    await app.ready()
+    const ana = await register(app, 'Ana', 'wall-seen3@x.com')
+    const bruno = await register(app, 'Bruno', 'wall-seen4@x.com')
+
+    await app.inject({
+      method: 'POST',
+      url: '/feedbacks/mural/seen',
+      headers: { authorization: `Bearer ${ana.token}` },
+    })
+
+    const doBruno = await app.inject({
+      method: 'GET',
+      url: '/feedbacks/mural',
+      headers: { authorization: `Bearer ${bruno.token}` },
+    })
+    expect(doBruno.json().wallSeenAt).toBeNull()
+    await app.close()
+  })
 })
 
 describe('GET /users/company', () => {

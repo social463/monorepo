@@ -13,6 +13,11 @@ vi.mock('../lib/api', async (importOriginal) => {
 })
 const mockApiFetch = apiFetch as unknown as Mock
 
+// O card consulta quem está logado para decidir se mostra o botão de parabéns
+// (`canSignBirthdayWall`): todo mundo, menos o próprio aniversariante.
+const mockAuth = vi.hoisted(() => ({ user: { id: 'viewer', role: 'LEGEND' } as { id: string; role: string } | null }))
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: mockAuth.user }) }))
+
 function wrap(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -29,6 +34,7 @@ function birthday(
   observedDate: string,
   position: string | null = 'Consultor',
   sectorName?: string,
+  greetingCount = 0,
 ) {
   return {
     user: { id, name, position, sectorName, avatarStyle: null, avatarSeed: null, avatarOptions: null, photoUrl: null },
@@ -36,6 +42,7 @@ function birthday(
     month: Number(observedDate.slice(5, 7)),
     daysUntil,
     observedDate,
+    greetingCount,
   }
 }
 
@@ -51,6 +58,7 @@ function response(upcoming: unknown[], month: unknown[] = []) {
 describe('BirthdaysCard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockAuth.user = { id: 'viewer', role: 'LEGEND' }
   })
 
   it('mostra o próximo aniversariante com setor, destaque "Hoje" e link pro calendário', async () => {
@@ -71,13 +79,19 @@ describe('BirthdaysCard', () => {
     )
   })
 
-  it('leva pro perfil da pessoa ao clicar em "Deixe um feedback"', async () => {
+  // O botão de festa é a ÚNICA ação da linha (o coração de "deixe um feedback"
+  // saiu) e leva ao mural de aniversário do perfil, já com o campo em foco.
+  it('leva ao mural de aniversário do perfil ao clicar no botão de festa', async () => {
     mockApiFetch.mockResolvedValue(response([birthday('u1', 'Heitor Albanez', 0, '2026-07-30')]))
 
     wrap(<BirthdaysCard />)
 
     expect(await screen.findByText('Heitor Albanez')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /deixe um feedback/i })).toHaveAttribute('href', '/perfil/u1')
+    expect(screen.getByRole('link', { name: /dê os parabéns a Heitor Albanez/i })).toHaveAttribute(
+      'href',
+      '/perfil/u1?parabens=1',
+    )
+    expect(screen.queryByRole('link', { name: /deixe um feedback/i })).not.toBeInTheDocument()
   })
 
   it('mostra "Amanhã" e "Em N dias" para datas futuras', async () => {
@@ -112,7 +126,9 @@ describe('BirthdaysCard', () => {
     expect(screen.queryByText(/consultor · operações/i)).toBeNull()
   })
 
-  it('mostra todo mundo das próximas datas, sem cortar por pessoa', async () => {
+  it('mostra no máximo 3 pessoas, mesmo com uma data cheia', async () => {
+    // O servidor manda as 3 DATAS mais próximas inteiras — uma delas com quatro
+    // aniversariantes traz os quatro. Quem corta por pessoa é o card.
     mockApiFetch.mockResolvedValue(
       response([
         birthday('u1', 'Ana', 0, '2026-07-30'),
@@ -127,7 +143,45 @@ describe('BirthdaysCard', () => {
     expect(await screen.findByText('Ana')).toBeInTheDocument()
     expect(screen.getByText('Bruno')).toBeInTheDocument()
     expect(screen.getByText('Carla')).toBeInTheDocument()
-    expect(screen.getByText('Duda')).toBeInTheDocument()
+    expect(screen.queryByText('Duda')).not.toBeInTheDocument()
+    // Quem sobrou continua a um clique de distância.
+    expect(screen.getByText('Ver todos os aniversários')).toBeInTheDocument()
+  })
+
+  it('oferece parabéns a quem faz aniversário, mas não a si mesmo', async () => {
+    mockApiFetch.mockResolvedValue(
+      response([
+        birthday('u1', 'Ana', 0, '2026-07-30'),
+        birthday('viewer', 'Eu Mesmo', 0, '2026-07-30'),
+      ]),
+    )
+
+    wrap(<BirthdaysCard />)
+
+    expect(await screen.findByRole('link', { name: /Dê os parabéns a Ana/i })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Dê os parabéns a Eu Mesmo/i })).not.toBeInTheDocument()
+  })
+
+  it('o ADMIN parabeniza: assinar o mural não é escrever feedback', async () => {
+    mockAuth.user = { id: 'chefe', role: 'ADMIN' }
+    mockApiFetch.mockResolvedValue(response([birthday('u1', 'Ana', 0, '2026-07-30')]))
+
+    wrap(<BirthdaysCard />)
+
+    expect(await screen.findByText('Ana')).toBeInTheDocument()
+    // O botão some para o próprio aniversariante, e só para ele: o mural é de
+    // todo mundo, ao contrário do `FeedbackComposer`, que barra o ADMIN.
+    expect(screen.getByRole('link', { name: /Dê os parabéns a Ana/i })).toBeInTheDocument()
+  })
+
+  it('mostra quantas pessoas já assinaram o mural de quem comemora hoje', async () => {
+    mockApiFetch.mockResolvedValue(
+      response([birthday('u1', 'Ana', 0, '2026-07-30', 'Consultor', 'Produto', 3)]),
+    )
+
+    wrap(<BirthdaysCard />)
+
+    expect(await screen.findByText(/3 pessoas já assinaram o mural/i)).toBeInTheDocument()
   })
 
   it('mostra estado vazio quando não há próximo aniversariante, mantendo o link', async () => {

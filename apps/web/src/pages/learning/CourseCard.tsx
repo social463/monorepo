@@ -31,9 +31,21 @@ export function CourseCard({ course, onToggleFavorite }: { course: CourseCardDTO
   return (
     <article className="group flex h-full flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-surface-container transition-colors hover:border-primary/40">
       <Link to={`/aprendizado/curso/${course.id}`} className="block">
-        <div className="relative h-28 bg-gradient-to-br from-primary/25 via-primary/10 to-transparent">
+        {/* Identidade visual (Documento 4, seção 9.6): sem capa, o emoji e a cor
+            do curso vestem o cabeçalho — que é o caso da maioria dos cursos
+            internos, onde ninguém vai produzir uma imagem por curso. A cor entra
+            por `style` porque é hex escolhido pelo admin, e classe do Tailwind
+            não se monta em tempo de execução. */}
+        <div
+          className="relative h-28 bg-gradient-to-br from-primary/25 via-primary/10 to-transparent"
+          style={course.primaryColor ? { backgroundImage: 'none', backgroundColor: course.primaryColor } : undefined}
+        >
           {course.coverUrl ? (
             <img src={course.coverUrl} alt="" className="h-full w-full object-cover" />
+          ) : course.icon ? (
+            <span aria-hidden className="absolute bottom-md left-lg text-[36px] leading-none">
+              {course.icon}
+            </span>
           ) : (
             <Icon name="school" className="absolute bottom-md left-lg text-[36px] text-primary" />
           )}

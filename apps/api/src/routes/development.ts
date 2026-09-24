@@ -5,7 +5,8 @@ import { getDevelopmentSettings, updateDevelopmentSettings } from '../services/d
 const updateSchema = z.object({
   leaderApprovalRequired: z.boolean().optional(),
   impulseUpUrl: z.string().trim().url().nullable().optional().or(z.literal('')),
-  inovaCommunityUrl: z.string().trim().url().nullable().optional().or(z.literal('')),
+  inovaModuleEnabled: z.boolean().optional(),
+  inovaTeamsWebhookUrl: z.string().trim().url().nullable().optional().or(z.literal('')),
 })
 
 export async function developmentRoutes(app: FastifyInstance) {
@@ -29,7 +30,8 @@ export async function developmentRoutes(app: FastifyInstance) {
       const settings = await updateDevelopmentSettings({
         leaderApprovalRequired: parsed.data.leaderApprovalRequired,
         impulseUpUrl: parsed.data.impulseUpUrl === '' ? null : parsed.data.impulseUpUrl,
-        inovaCommunityUrl: parsed.data.inovaCommunityUrl === '' ? null : parsed.data.inovaCommunityUrl,
+        inovaModuleEnabled: parsed.data.inovaModuleEnabled,
+        inovaTeamsWebhookUrl: parsed.data.inovaTeamsWebhookUrl === '' ? null : parsed.data.inovaTeamsWebhookUrl,
         actorId: request.user.sub,
         companyId: request.user.companyId,
       })

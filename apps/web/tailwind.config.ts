@@ -42,11 +42,19 @@ export default {
          */
         page: '1600px',
       },
+      /*
+       * A fonte é token de MARCA, como as cores: `--brand-font-*` é injetada
+       * pelo `applyBranding` a partir do que a empresa cadastrou, e o fallback
+       * aqui é a pilha do produto — sem a variável (SSR, primeiro paint, empresa
+       * sem tipografia própria), o Tailwind entrega Geist/Inter como sempre.
+       *
+       * `mono` fica de fora: é fonte de código e de número tabular, não de marca.
+       */
       fontFamily: {
-        headline: ['Geist', 'system-ui', 'sans-serif'],
-        label: ['Geist', 'system-ui', 'sans-serif'],
-        body: ['Inter', 'system-ui', 'sans-serif'],
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        headline: ['var(--brand-font-headline, Geist)', 'system-ui', 'sans-serif'],
+        label: ['var(--brand-font-headline, Geist)', 'system-ui', 'sans-serif'],
+        body: ['var(--brand-font-body, Inter)', 'system-ui', 'sans-serif'],
+        sans: ['var(--brand-font-body, Inter)', 'system-ui', 'sans-serif'],
         mono: ['Geist', 'ui-monospace', 'monospace'],
       },
       fontSize: {
@@ -82,6 +90,7 @@ export default {
         md: '16px',
         lg: '24px',
         xl: '40px',
+        '2xl': '64px',
         gutter: '16px',
         margin: '24px',
       },

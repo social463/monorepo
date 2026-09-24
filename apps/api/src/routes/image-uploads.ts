@@ -19,11 +19,16 @@ import {
   type MediaUploadConfig,
 } from '@legends/shared'
 import {
+  buildBadgeClaimKey,
+  buildApprenticeMaterialKey,
+  buildCertificateAttachmentKey,
   buildChallengeEvidenceKey,
   buildDocumentKey,
   buildEventPhotoKey,
   buildFeedMediaKey,
   buildImageKey,
+  buildInovaDiaryKey,
+  buildInovaGuiaVideoKey,
   buildPersonalAssetKey,
   buildVisualAssetKey,
   imageUploadsEnabled,
@@ -151,6 +156,66 @@ export async function imageUploadRoutes(app: FastifyInstance) {
     return reply.send({ uploadUrl, publicUrl: publicUrlFor(key, cfg), key, kind })
   })
 
+  /**
+   * Evidência do diário de bordo do INOVA: imagem ou vídeo, enviado por
+   * qualquer colaborador autenticado (diário é aberto a todo mundo, só
+   * criar/editar projeto e mudar fase é admin/subadmin). Mesmos tipo/tamanho
+   * de mídia já usados pelo Feed — sem limite novo.
+   */
+  app.post('/uploads/inova-diary/presign', { onRequest: [app.authenticate] }, async (request, reply) => {
+    const cfg = s3Config()
+    if (!cfg) return reply.code(503).send({ message: 'Uploads desabilitados.' })
+
+    const parsed = presignSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Requisição inválida.', issues: parsed.error.flatten() })
+    }
+    const { contentType, size } = parsed.data
+    const kind = mediaKindFor(contentType)
+    if (!kind || (kind !== 'IMAGE' && kind !== 'VIDEO')) {
+      return reply.code(400).send({ message: 'Formato não suportado. Envie imagem ou vídeo MP4/WebM.' })
+    }
+    if (size > mediaMaxBytesFor(kind)) {
+      return reply.code(400).send({ message: mediaTooLargeMessage(kind) })
+    }
+
+    const key = buildInovaDiaryKey(request.user.companyId, request.user.sub, contentType)
+    const uploadUrl = await presignImageUpload({ key, contentType })
+    return reply.send({ uploadUrl, publicUrl: publicUrlFor(key, cfg), key, kind })
+  })
+
+  /**
+   * Vídeo da biblioteca do Guia AI First (Comunidade INOVA), enviado só por
+   * quem administra — a mesma trava de `requireAdminOrSubadmin` das rotas de
+   * escrita em `/inova/guia/videos`. Só vídeo (MP4/WebM): a biblioteca não
+   * aceita imagem no lugar do vídeo.
+   */
+  app.post(
+    '/uploads/inova-guia-video/presign',
+    { onRequest: [app.authenticate, app.requireAdminOrSubadmin] },
+    async (request, reply) => {
+      const cfg = s3Config()
+      if (!cfg) return reply.code(503).send({ message: 'Uploads de vídeo desabilitados.' })
+
+      const parsed = presignSchema.safeParse(request.body)
+      if (!parsed.success) {
+        return reply.code(400).send({ message: 'Requisição inválida.', issues: parsed.error.flatten() })
+      }
+      const { contentType, size } = parsed.data
+      const kind = mediaKindFor(contentType)
+      if (kind !== 'VIDEO') {
+        return reply.code(400).send({ message: 'Formato não suportado. Envie um vídeo MP4 ou WebM.' })
+      }
+      if (size > VIDEO_MAX_BYTES) {
+        return reply.code(400).send({ message: mediaTooLargeMessage('VIDEO') })
+      }
+
+      const key = buildInovaGuiaVideoKey(request.user.companyId, contentType)
+      const uploadUrl = await presignImageUpload({ key, contentType })
+      return reply.send({ uploadUrl, publicUrl: publicUrlFor(key, cfg), storagePath: key })
+    },
+  )
+
   // Evidência de participação em desafio: qualquer colaborador autenticado sobe
   // (não é admin/subadmin como o presign de manual acima). Mesmos tipo/tamanho
   // permitidos de documento — reaproveita as constantes de @legends/shared, não
@@ -178,6 +243,99 @@ export async function imageUploadRoutes(app: FastifyInstance) {
       const key = buildChallengeEvidenceKey(request.user.sub)
       const uploadUrl = await presignDocumentUpload({ key, contentType })
       return reply.send({ uploadUrl, key })
+    },
+  )
+
+  /**
+   * Comprovação de uma reivindicação de selo (Documento 4, seção 11.2).
+   *
+   * Imagem **ou** PDF, que é o que o documento pede — daí não reusar o presign
+   * de evidência de desafio, que é só PDF. A chave nasce no servidor,
+   * namespaced pelo próprio usuário (`badge-claims/<userId>/…`), e o service
+   * confere esse prefixo no envio: o cliente nunca escolhe onde grava.
+   */
+  app.post('/uploads/badge-claim/presign', { onRequest: [app.authenticate] }, async (request, reply) => {
+    if (!s3Config()) return reply.code(503).send({ message: 'Uploads de comprovação desabilitados.' })
+
+    const parsed = presignSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Requisição inválida.', issues: parsed.error.flatten() })
+    }
+    const { contentType, size } = parsed.data
+    const kind = mediaKindFor(contentType)
+    if (kind !== 'IMAGE' && contentType !== 'application/pdf') {
+      return reply.code(400).send({ message: 'Formato não suportado. Envie uma imagem ou um PDF.' })
+    }
+    if (size > mediaMaxBytesFor(kind ?? 'DOCUMENT')) {
+      return reply.code(400).send({ message: mediaTooLargeMessage(kind ?? 'DOCUMENT') })
+    }
+
+    const key = buildBadgeClaimKey(request.user.sub, contentType)
+    const uploadUrl = await presignImageUpload({ key, contentType })
+    return reply.send({ uploadUrl, key, kind: kind ?? 'DOCUMENT' })
+  })
+
+  /**
+   * Certificado de curso EXTERNO anexado pelo colaborador (Documento 4, seção
+   * 9.8). Aceita imagem ou PDF — o formulário pede "uma foto visível do seu
+   * certificado", e nem todo mundo tem o PDF.
+   *
+   * Aberta a qualquer colaborador autenticado, como a comprovação de selo: quem
+   * faz curso é quem envia. A chave nasce namespaced pelo próprio usuário
+   * (`certificate-requests/<userId>/…`), e o service confere esse prefixo antes
+   * de gravar — o cliente nunca escolhe onde grava nem anexa o documento alheio.
+   */
+  app.post('/uploads/certificate-request/presign', { onRequest: [app.authenticate] }, async (request, reply) => {
+    if (!s3Config()) return reply.code(503).send({ message: 'Envio de certificado desabilitado.' })
+
+    const parsed = presignSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Requisição inválida.', issues: parsed.error.flatten() })
+    }
+    const { contentType, size } = parsed.data
+    const kind = mediaKindFor(contentType)
+    if (kind !== 'IMAGE' && contentType !== 'application/pdf') {
+      return reply.code(400).send({ message: 'Formato não suportado. Envie uma imagem ou um PDF.' })
+    }
+    if (size > mediaMaxBytesFor(kind ?? 'DOCUMENT')) {
+      return reply.code(400).send({ message: mediaTooLargeMessage(kind ?? 'DOCUMENT') })
+    }
+
+    const key = buildCertificateAttachmentKey(request.user.sub, contentType)
+    const uploadUrl = await presignImageUpload({ key, contentType })
+    return reply.send({ uploadUrl, key, kind: kind ?? 'DOCUMENT' })
+  })
+
+  /**
+   * Material e apresentação da trilha Eu Aprendiz.
+   *
+   * Só o facilitador sobe (mesmo guard do painel), e a chave nasce namespaced
+   * pela empresa — o material é do encontro, não de uma pessoa. Aceita o mesmo
+   * conjunto do anexo de certificado mais os formatos de apresentação, que é o
+   * que a G&G leva para o encontro.
+   */
+  app.post(
+    '/uploads/apprentice-material/presign',
+    { onRequest: [app.authenticate, app.requireSectorFeature('gente-gestao')] },
+    async (request, reply) => {
+      if (!s3Config()) return reply.code(503).send({ message: 'Envio de arquivos desabilitado.' })
+
+      const parsed = presignSchema.safeParse(request.body)
+      if (!parsed.success) {
+        return reply.code(400).send({ message: 'Requisição inválida.', issues: parsed.error.flatten() })
+      }
+      const { contentType, size } = parsed.data
+      const kind = mediaKindFor(contentType)
+      if (!kind) {
+        return reply.code(400).send({ message: 'Formato não suportado.' })
+      }
+      if (size > mediaMaxBytesFor(kind)) {
+        return reply.code(400).send({ message: mediaTooLargeMessage(kind) })
+      }
+
+      const key = buildApprenticeMaterialKey(request.user.companyId, contentType)
+      const uploadUrl = await presignImageUpload({ key, contentType })
+      return reply.send({ uploadUrl, key, kind })
     },
   )
 

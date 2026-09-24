@@ -134,10 +134,14 @@ function iconFor(type: string): string {
       return 'chat'
     case 'FEEDBACK_REACTION':
       return 'add_reaction'
+    case 'FEEDBACK_COMMENT':
+      return 'chat_bubble'
     case 'BADGE_EARNED':
       return 'workspace_premium'
     case 'HIGHLIGHT_PUBLISHED':
       return 'trophy'
+    case 'BIRTHDAY_GREETING_RECEIVED':
+      return 'cake'
     case 'MEETING_INVITED':
     case 'MEETING_UPDATED':
     case 'MEETING_CANCELED':
@@ -147,6 +151,9 @@ function iconFor(type: string): string {
     case 'ONE_ON_ONE_ACTION_ASSIGNED':
     case 'ONE_ON_ONE_REMINDER':
       return 'forum'
+    case 'VACATION_PLAN_VALIDATED':
+    case 'VACATION_PLAN_DEADLINE':
+      return 'beach_access'
     case 'OFFICE_DESK_REMINDER_RECEIVED':
       return 'redeem'
     case 'OFFICE_DESK_REMINDER_READ':

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -15,9 +15,23 @@ import { HighlightsSkeleton } from '../../components/Skeleton'
 import { MonthPicker } from './MonthPicker'
 import { NewMonthlyHighlightDialog } from './NewMonthlyHighlightDialog'
 
-/** Mês corrente em `AAAA-MM` — é onde a tela abre. */
+/** Mês corrente em `AAAA-MM`. */
 export function currentMonthRef(): string {
   return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7)
+}
+
+/**
+ * Mês em que a tela abre: o corrente quando já tem destaque, senão o **último
+ * mês registrado**.
+ *
+ * O quadro é sempre do mês que passou — a G&G cadastra agosto lá pelo meio de
+ * setembro —, então abrir no mês corrente mostrava o vazio para todo mundo e
+ * obrigava a filtrar para ver o que existe. Meses futuros (cadastro adiantado)
+ * ficam de fora do fallback: quem abre quer o quadro mais recente já divulgado.
+ */
+export function defaultMonthRef(months: string[], current = currentMonthRef()): string {
+  if (months.includes(current)) return current
+  return months.find((month) => month < current) ?? current
 }
 
 function PersonCard({ highlight, canManage }: { highlight: MonthlyHighlightDTO; canManage: boolean }) {
@@ -41,6 +55,11 @@ function PersonCard({ highlight, canManage }: { highlight: MonthlyHighlightDTO; 
           <p className="text-label-sm text-on-surface-variant">{highlight.person.position}</p>
         )}
       </div>
+      {/* O grupo (hoje o setor) é etiqueta no card, e não título de seção: com
+          uma pessoa por setor, cada seção virava uma faixa quase vazia. */}
+      <span className="rounded-full bg-primary/10 px-sm py-0.5 font-label text-label-sm text-primary">
+        {highlight.group.name}
+      </span>
       {highlight.message && (
         <p className="text-body-sm italic text-on-surface-variant">“{highlight.message}”</p>
       )}
@@ -62,29 +81,57 @@ function PersonCard({ highlight, canManage }: { highlight: MonthlyHighlightDTO; 
 }
 
 /**
- * Quadro do mês: um bloco por grupo, com uma ou várias pessoas — o formato do
- * template que a G&G divulga. O grupo hoje é o **setor** (ver a spec, decisão
- * 2); o DTO já entrega `{ id, name }`, então trocar a origem do agrupamento não
- * mexe nesta tela.
+ * Quadro do mês: uma grade única de pessoas, cada card etiquetado com o grupo.
+ * O grupo hoje é o **setor** (ver a spec, decisão 2); o DTO já entrega
+ * `{ id, name }`, então trocar a origem do agrupamento não mexe nesta tela.
  */
 export function MonthlyHighlightsTab() {
   const { user } = useAuth()
-  const [monthRef, setMonthRef] = useState(currentMonthRef())
+  // `null` = ninguém filtrou ainda: quem escolhe o mês é `defaultMonthRef`.
+  const [pickedMonth, setPickedMonth] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const current = currentMonthRef()
+
+  const monthsQuery = useQuery({
+    queryKey: ['monthly-highlights', 'months'],
+    queryFn: () => apiFetch<{ months: string[] }>('/monthly-highlights/months'),
+  })
+  const fallbackMonth = useMemo(
+    () => defaultMonthRef(monthsQuery.data?.months ?? [], current),
+    [monthsQuery.data, current],
+  )
+  const monthRef = pickedMonth ?? fallbackMonth
+  // Só avisa quando a tela escolheu sozinha um mês que não é o corrente.
+  const showingPreviousMonth = pickedMonth === null && monthRef !== current
 
   const query = useQuery({
     queryKey: ['monthly-highlights', monthRef],
     queryFn: () =>
       apiFetch<MonthlyHighlightsResponse & { canManage: boolean }>(`/monthly-highlights?monthRef=${monthRef}`),
+    // Espera saber o mês certo antes de buscar, senão a tela pisca no vazio do
+    // mês corrente para depois trocar para o último registrado.
+    enabled: !monthsQuery.isPending,
   })
   // A API é a autoridade; enquanto ela não responde, o papel já decide se o
   // botão aparece (evita piscar para quem administra).
   const canManage = query.data?.canManage ?? canManageMonthlyHighlights(user?.role, user?.adminAccess)
+  const people = useMemo(
+    () => (query.data?.groups ?? []).flatMap((group) => group.people),
+    [query.data],
+  )
 
   return (
     <div className="flex flex-col gap-lg">
       <div className="flex flex-wrap items-center justify-between gap-md">
-        <MonthPicker monthRef={monthRef} onChange={setMonthRef} />
+        <div className="flex flex-wrap items-center gap-md">
+          <MonthPicker monthRef={monthRef} onChange={setPickedMonth} />
+          {showingPreviousMonth && (
+            <p className="flex items-center gap-xs text-label-sm text-on-surface-variant">
+              <Icon name="info" className="text-[16px]" />
+              Ainda não há destaques de {monthRefLabel(current)} — mostrando os de {monthRefLabel(monthRef)}.
+            </p>
+          )}
+        </div>
         {canManage && query.data && query.data.total > 0 && (
           <button
             type="button"
@@ -97,7 +144,7 @@ export function MonthlyHighlightsTab() {
         )}
       </div>
 
-      {query.isLoading ? (
+      {monthsQuery.isPending || query.isLoading ? (
         <HighlightsSkeleton />
       ) : query.isError ? (
         <p role="alert" className="flex items-center gap-sm text-body-sm text-error">
@@ -121,16 +168,9 @@ export function MonthlyHighlightsTab() {
           )}
         </div>
       ) : (
-        <div className="flex flex-col gap-xl">
-          {(query.data?.groups ?? []).map((group) => (
-            <section key={group.group.id} className="flex flex-col gap-md">
-              <h3 className="font-headline text-headline-md text-on-surface">{group.group.name}</h3>
-              <div className="grid grid-cols-2 gap-gutter sm:grid-cols-3 lg:grid-cols-4">
-                {group.people.map((highlight) => (
-                  <PersonCard key={highlight.id} highlight={highlight} canManage={canManage} />
-                ))}
-              </div>
-            </section>
+        <div className="grid grid-cols-2 gap-gutter sm:grid-cols-3 lg:grid-cols-4">
+          {people.map((highlight) => (
+            <PersonCard key={highlight.id} highlight={highlight} canManage={canManage} />
           ))}
         </div>
       )}

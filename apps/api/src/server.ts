@@ -3,6 +3,10 @@ import { startNudgeScheduler } from './scheduler/nudges'
 import { startMeetingReminderScheduler } from './scheduler/meeting-reminders'
 import { startCalendarEventReminderScheduler } from './scheduler/calendar-event-reminders'
 import { startOneOnOneReminderScheduler } from './scheduler/one-on-one-reminders'
+import { startScheduledPostScheduler } from './scheduler/scheduled-posts'
+import { startCampaignPostScheduler } from './scheduler/campaign-posts'
+import { startAutoEnrollmentScheduler } from './services/course-auto-enrollment-service'
+import { startVacationDeadlineReminderScheduler } from './scheduler/vacation-deadline-reminders'
 
 const app = buildApp()
 const port = Number(process.env.PORT ?? 3333)
@@ -15,13 +19,12 @@ app
     startMeetingReminderScheduler()
     startCalendarEventReminderScheduler()
     startOneOnOneReminderScheduler()
+    startScheduledPostScheduler()
+    startCampaignPostScheduler()
+    startAutoEnrollmentScheduler()
+    startVacationDeadlineReminderScheduler()
   })
   .catch((err) => {
     app.log.error(err)
-    // Mesmo motivo do console.error em app.ts: com `logger: false`, o
-    // app.log acima é no-op e a causa morre aqui. Falha de boot sem
-    // mensagem nenhuma é indepurável em produção — o container sai com 1,
-    // `docker logs` volta vazio e não há o que investigar.
-    console.error('Falha ao subir a API:', err)
     process.exit(1)
   })

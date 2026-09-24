@@ -8,14 +8,24 @@ vi.mock('../lib/gemini-client', () => ({
 }))
 vi.mock('../lib/card-renderer', () => ({
   renderCard: vi.fn(async () => Buffer.from('89504e470d0a1a0a', 'hex')),
+  cardBrandFrom: vi.fn((_branding: unknown, options: { companyName?: string | null; logoDataUri?: string | null } = {}) => ({
+    wordmark: (options.companyName ?? '').toUpperCase(),
+    logoDataUri: options.logoDataUri ?? null,
+  })),
 }))
+// A logo do card NÃO vem da marca (ver `generateHighlightImage`); o spy existe
+// para provar que ninguém volta a buscá-la sem perceber.
+vi.mock('../lib/remote-image', () => ({ fetchImageDataUri: vi.fn(async () => 'data:image/png;base64,xx') }))
 vi.mock('../lib/highlight-storage', () => ({
   saveCardPng: vi.fn(async (companyId: string, monthRef: string) => `https://cdn.test/highlights/${companyId}/${monthRef}.png`),
   highlightStorageEnabled: vi.fn(() => true),
 }))
 
 import { buildCongratsText } from '../lib/gemini-client'
+import { renderCard } from '../lib/card-renderer'
+import { fetchImageDataUri } from '../lib/remote-image'
 import { highlightStorageEnabled } from '../lib/highlight-storage'
+import { BRANDING_SETTING_KEY, clearBrandingCache } from './branding-service'
 import {
   generateHighlightDraft,
   updateHighlightText,
@@ -106,6 +116,51 @@ describe('generateHighlightImage', () => {
     const updated = await generateHighlightImage(period.id, actor.id, DEFAULT_COMPANY_ID)
     expect(updated.highlightStatus).toBe('DRAFT')
     expect(updated.highlightImagePath).toBe('https://cdn.test/highlights/company-emr/2026-06.png')
+  })
+
+  /**
+   * O card é a única peça do produto que circula FORA da empresa — é feito para
+   * ser salvo e compartilhado. A logo cadastrada é a que a empresa usa por
+   * dentro, e na EMR as duas são diferentes hoje: publicar o card com a marca
+   * nova vazaria o rebranding antes da hora. Cores vêm da marca; logo, não.
+   */
+  it('usa as cores da marca, mas não a logo cadastrada — o card sai com a arte embutida', async () => {
+    const { period, actor } = await seed()
+    clearBrandingCache()
+    await prisma.appSetting.create({
+      data: {
+        key: BRANDING_SETTING_KEY,
+        companyId: DEFAULT_COMPANY_ID,
+        value: JSON.stringify({
+          appName: 'EMR Legends',
+          tagline: null,
+          hosts: [],
+          logos: {
+            light: { wide: 'https://cdn.exemplo.com/nova-clara.svg', mark: null },
+            dark: { wide: 'https://cdn.exemplo.com/nova-escura.svg', mark: null },
+          },
+          defaultScheme: 'dark',
+          allowUserScheme: true,
+          brandColor: '#35bd78',
+          neutralColor: null,
+          overrides: {},
+        }),
+      },
+    })
+    clearBrandingCache()
+
+    await generateHighlightDraft(period.id, actor.id, DEFAULT_COMPANY_ID)
+    await generateHighlightImage(period.id, actor.id, DEFAULT_COMPANY_ID)
+
+    expect(fetchImageDataUri).not.toHaveBeenCalled()
+    const [entrada] = (renderCard as unknown as { mock: { calls: [{ brand?: { logoDataUri: string | null; wordmark: string } }][] } }).mock
+      .calls.at(-1)!
+    // A marca CHEGOU (as cores saem dela); só a logo é que não.
+    expect(entrada.brand).toBeDefined()
+    expect(entrada.brand?.logoDataUri).toBeNull()
+    // E o título é "DESTAQUES <EMPRESA>", pelo nome da Company — não pelo
+    // `appName`, que aqui é "EMR Legends".
+    expect(entrada.brand?.wordmark).toBe('EMR')
   })
 
   it('refuses to render when the highlight draft does not exist', async () => {

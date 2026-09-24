@@ -127,12 +127,15 @@ export function CorporatePostComments({ postId }: { postId: string }) {
                 </p>
 
                 {c.gif && (
+                  // Sem `width`/`height` de atributo: com os dois presentes ao lado de
+                  // `max-h-64`/`max-w-full`, o navegador trata os dois limites como
+                  // independentes e distorce sempre que um deles vira o gargalo — só
+                  // `aspect-ratio` faz o eixo livre acompanhar o que foi limitado.
                   <img
                     src={c.gif.url}
                     alt="GIF"
-                    width={c.gif.width || undefined}
-                    height={c.gif.height || undefined}
                     loading="lazy"
+                    style={c.gif.width && c.gif.height ? { aspectRatio: `${c.gif.width} / ${c.gif.height}` } : undefined}
                     className="mt-xs max-h-64 max-w-full rounded-lg border border-outline-variant/40"
                   />
                 )}

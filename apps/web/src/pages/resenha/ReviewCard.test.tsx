@@ -14,7 +14,7 @@ vi.mock('../../lib/use-reviews', () => ({
 }))
 
 const base: ReviewDTO = {
-  id: 'r1', author: { id: 'u2', name: 'Bia', email: '', role: 'LEGEND', area: null, position: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
+  id: 'r1', author: { id: 'u2', name: 'Bia', email: '', role: 'LEGEND', area: null, position: null, positionCategory: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
   content: 'olha', createdAt: '2026-06-29T00:00:00.000Z', reactions: [], reactors: [], reactorCount: 0,
   commentCount: 0, shareCount: 0, sharedByMe: false, mentions: [],
   gif: { url: 'https://media.giphy.com/a.gif', width: 100, height: 80 },

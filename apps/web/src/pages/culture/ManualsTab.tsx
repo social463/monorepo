@@ -3,15 +3,21 @@ import { Icon } from '../../components/Icon'
 import { Skeleton } from '../../components/Skeleton'
 import { useCultureManuals } from '../../lib/use-culture'
 import { formatSize, useManualDownload } from './manual-file'
+import { useBonusCalculatorManualId } from './bonus-program'
 
 /**
  * Lista os manuais. A leitura abre em tela própria (`/cultura/manuais/:id`) e
  * não em modal: um Código de Ética passa de 40 mil caracteres. O download do
  * PDF fica aqui também, para quem só quer o arquivo.
+ *
+ * O card do manual vinculado ao Todos Pelos 9 leva também à calculadora. Ela
+ * saiu do menu lateral: o acesso é daqui, de um clique, sem obrigar a abrir o
+ * manual antes — o atalho de dentro dele continua valendo para quem está lendo.
  */
 export function ManualsTab() {
   const { data, isLoading, isError } = useCultureManuals()
   const { download, error: downloadError } = useManualDownload()
+  const calculadoraManualId = useBonusCalculatorManualId()
 
   if (isLoading) {
     return (
@@ -85,6 +91,15 @@ export function ManualsTab() {
                     <Icon name="download" className="text-[18px]" />
                     PDF
                   </button>
+                )}
+                {manual.id === calculadoraManualId && (
+                  <Link
+                    to="/cultura/calculadora-todos-pelos-9"
+                    className="flex items-center gap-xs rounded-md border border-primary/40 bg-primary/10 px-md py-sm font-label text-label-md text-primary transition-colors hover:border-primary hover:bg-primary/20"
+                  >
+                    <Icon name="calculate" className="text-[18px]" />
+                    Calculadora
+                  </Link>
                 )}
               </div>
             </li>

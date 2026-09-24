@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { isWithinProximity, PROXIMITY_RADIUS, type OfficeOccupant } from '@legends/shared'
+import { isWithinProximityTiles, PROXIMITY_RADIUS, type OfficeOccupant, tileOfPixel } from '@legends/shared'
 
 /** Diâmetro do círculo de proximidade, em px (colapsado / expandido). */
 const RADAR_SIZE = 96
@@ -28,18 +28,26 @@ export function ProximityRadar({
   you,
   occupants,
   micEnabled,
+  tileSize,
 }: {
   you: OfficeOccupant | null
   occupants: OfficeOccupant[]
   micEnabled: boolean
+  /** Tile do mapa ATIVO, em pixels — a régua do `tileOfPixel`. */
+  tileSize: number
 }) {
   const [expanded, setExpanded] = useState(false)
 
   if (!you) return null
 
-  const nearby = occupants.filter(
-    (o) => o.userId !== you.userId && isWithinProximity(you.x, you.y, o.x, o.y),
-  )
+  // O alcance da voz é medido em TILE, como todo alcance do escritório; o
+  // occupant fala PIXEL desde o movimento livre.
+  const youTile = tileOfPixel(you, tileSize)
+  const nearby = occupants.filter((o) => {
+    if (o.userId === you.userId) return false
+    const tile = tileOfPixel(o, tileSize)
+    return isWithinProximityTiles(youTile.x, youTile.y, tile.x, tile.y)
+  })
   const size = expanded ? EXPANDED_RADAR_SIZE : RADAR_SIZE
   const otherDotSize = expanded ? OTHER_DOT_SIZE_EXPANDED : OTHER_DOT_SIZE
 
@@ -66,8 +74,12 @@ export function ProximityRadar({
           style={{ width: size, height: size }}
         >
           {nearby.map((o) => {
-            const dx = (o.x - you.x) / PROXIMITY_RADIUS
-            const dy = (o.y - you.y) / PROXIMITY_RADIUS
+            // Em TILE também na POSIÇÃO do ponto: `PROXIMITY_RADIUS` é o raio
+            // em tiles, e dividir uma diferença em pixel por ele encolheria
+            // todo mundo para o centro do radar.
+            const tile = tileOfPixel(o, tileSize)
+            const dx = (tile.x - youTile.x) / PROXIMITY_RADIUS
+            const dy = (tile.y - youTile.y) / PROXIMITY_RADIUS
             const left = size / 2 + (dx * size) / 2 - otherDotSize / 2
             const top = size / 2 + (dy * size) / 2 - otherDotSize / 2
             return (

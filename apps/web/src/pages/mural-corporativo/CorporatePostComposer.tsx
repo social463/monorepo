@@ -5,6 +5,8 @@ import {
   ALLOWED_MEDIA_DOCUMENT_CONTENT_TYPES,
   ALLOWED_VIDEO_CONTENT_TYPES,
   CORPORATE_POST_AI_PROMPT_MAX_LENGTH,
+  audienceHasSectors,
+  CORPORATE_POST_AUDIENCES,
   CORPORATE_POST_AUDIENCE_LABELS,
   CORPORATE_POST_BODY_MAX_LENGTH,
   CORPORATE_POST_TITLE_MAX_LENGTH,
@@ -18,6 +20,10 @@ import {
   type CreateCorporatePostRequest,
   type RichDoc,
   type SectorOptionDTO,
+  CORPORATE_POST_POLL_QUESTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_OPTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_MIN_OPTIONS,
+  CORPORATE_POST_POLL_MAX_OPTIONS,
 } from '@legends/shared'
 import { Avatar } from '../../components/Avatar'
 import { GifPicker } from '../../components/GifPicker'
@@ -28,7 +34,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { apiFetch } from '../../lib/api'
 import { useGifsEnabled } from '../../lib/use-gifs'
 import { useImageUploadsEnabled } from '../../lib/use-image-upload'
-import { useGenerateCorporatePost } from '../../lib/use-corporate-mural'
+import { useCorporatePostTags, useGenerateCorporatePost } from '../../lib/use-corporate-mural'
 import { UploadError, uploadFeedMedia } from '../../lib/upload'
 
 const EMPTY_DOC: RichDoc = { blocks: [{ type: 'paragraph', spans: [] }] }
@@ -102,18 +108,45 @@ export function CorporatePostComposer({
   const [gif, setGif] = useState<AttachedGif | null>(null)
   const [attachments, setAttachments] = useState<CorporatePostAttachmentInput[]>([])
   const [audience, setAudience] = useState<CorporatePostAudience>('ALL')
+  const [tagId, setTagId] = useState('')
+  const tags = useCorporatePostTags()
   const [sectorIds, setSectorIds] = useState<string[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [aiOpen, setAiOpen] = useState(false)
   const [instructions, setInstructions] = useState('')
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  // Agendamento (Documento 4, seção 12). Só quem publica direto agenda: para
+  // quem passa pela aprovação, marcar data seria prometer o que não controla.
+  const [agendar, setAgendar] = useState(false)
+  const [publishAt, setPublishAt] = useState('')
+  // Enquete. Não desabilita anexo nenhum: no Feed ela CONVIVE com imagem e GIF
+  // — "banner + enquete" é o formato normal de comunicação interna.
+  const [pollOpen, setPollOpen] = useState(false)
+  const [pollQuestion, setPollQuestion] = useState('')
+  const [pollOptions, setPollOptions] = useState<string[]>(['', ''])
 
   const plain = richDocToPlainText(doc)
   const tooLong = plain.length > CORPORATE_POST_BODY_MAX_LENGTH
-  const audienceOk = audience === 'ALL' || sectorIds.length > 0
-  const hasContent = !isEmptyRichDoc(doc) || gif !== null || attachments.length > 0
-  const canSubmit = hasContent && !tooLong && audienceOk && !pending && !uploading
+  // Só o escopo por setor exige escolha: 'Toda a empresa' e 'Liderança' já
+  // dizem quem alcançam.
+  const audienceOk = !audienceHasSectors(audience) || sectorIds.length > 0
+  const pollTrimmed = pollOptions.map((opt) => opt.trim())
+  const pollDistinct =
+    new Set(pollTrimmed.map((opt) => opt.toLocaleLowerCase('pt-BR'))).size === pollTrimmed.length
+  const pollValid =
+    pollQuestion.trim().length > 0 &&
+    pollQuestion.trim().length <= CORPORATE_POST_POLL_QUESTION_MAX_LENGTH &&
+    pollTrimmed.length >= CORPORATE_POST_POLL_MIN_OPTIONS &&
+    pollTrimmed.every((opt) => opt.length > 0) &&
+    pollDistinct
+  // A enquete conta como conteúdo: post que é só a pergunta é legítimo.
+  const hasContent = !isEmptyRichDoc(doc) || gif !== null || attachments.length > 0 || (pollOpen && pollValid)
+  const agendamentoOk = !agendar || (publishAt !== '' && new Date(publishAt).getTime() > Date.now())
+  // Enquete aberta e incompleta trava o envio: publicar ignorando o que a
+  // pessoa começou a escrever perderia o trabalho dela sem avisar.
+  const canSubmit =
+    hasContent && !tooLong && audienceOk && agendamentoOk && (!pollOpen || pollValid) && !pending && !uploading
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -124,14 +157,25 @@ export function CorporatePostComposer({
       ...(gif ? { gif } : {}),
       ...(attachments.length ? { attachments } : {}),
       audience,
-      ...(audience === 'SECTORS' ? { audienceSectorIds: sectorIds } : {}),
+      ...(tagId ? { tagId } : {}),
+      ...(audienceHasSectors(audience) ? { audienceSectorIds: sectorIds } : {}),
+      // `datetime-local` entrega hora local sem fuso; o servidor exige ISO com
+      // offset, então quem converte é o `Date` do navegador.
+      ...(agendar && publishAt ? { publishAt: new Date(publishAt).toISOString() } : {}),
+      ...(pollOpen && pollValid ? { poll: { question: pollQuestion.trim(), options: pollTrimmed } } : {}),
     })
     setTitle('')
     setDoc(EMPTY_DOC)
     setGif(null)
     setAttachments([])
     setAudience('ALL')
+    setTagId('')
     setSectorIds([])
+    setPollOpen(false)
+    setPollQuestion('')
+    setPollOptions(['', ''])
+    setAgendar(false)
+    setPublishAt('')
   }
 
   async function handleFiles(files: FileList | null) {
@@ -154,7 +198,7 @@ export function CorporatePostComposer({
   async function handleGenerate() {
     const draft = await generate.mutateAsync({
       instructions,
-      ...(audience === 'SECTORS' ? { audience, audienceSectorIds: sectorIds } : {}),
+      ...(audienceHasSectors(audience) ? { audience, audienceSectorIds: sectorIds } : {}),
     })
     setTitle(draft.title)
     setDoc(plainTextToRichDoc(draft.body))
@@ -238,13 +282,64 @@ export function CorporatePostComposer({
             direita, como no desenho da G&G. O recorte por setor é a decisão
             mais consequente do composer — ela merece linha própria, e não um
             controle solto no meio dos anexos. */}
+        {/* Tipo de comunicação (seção 13). Fica ao lado do direcionamento por
+            setor porque as duas respondem "para quem e sobre o quê" — e é a tag
+            que alimenta o filtro do Feed e o painel de Comunicação Interna. */}
+        {(tags.data?.tags?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap items-center gap-sm rounded-lg border border-outline-variant/40 bg-surface-container px-md py-sm">
+            <span className="flex items-center gap-xs font-label text-label-md text-on-surface">
+              <Icon name="sell" className="text-[18px] text-primary" />
+              Tipo de comunicação
+            </span>
+            <Select
+              options={[
+                { value: '', label: 'Sem categoria' },
+                ...(tags.data?.tags ?? []).map((tag) => ({ value: tag.id, label: tag.name })),
+              ]}
+              value={tagId}
+              onChange={setTagId}
+              ariaLabel="Tipo de comunicação"
+              searchable={false}
+              className="ml-auto w-56"
+            />
+          </div>
+        )}
+
+        {canPublishDirectly && (
+          <div className="flex flex-wrap items-center gap-sm rounded-lg border border-outline-variant/40 bg-surface-container px-md py-sm">
+            <label className="flex cursor-pointer items-center gap-xs font-label text-label-md text-on-surface">
+              <input
+                type="checkbox"
+                checked={agendar}
+                onChange={(event) => setAgendar(event.target.checked)}
+              />
+              <Icon name="schedule" className="text-[18px] text-primary" />
+              Agendar publicação
+            </label>
+            {agendar && (
+              <input
+                type="datetime-local"
+                value={publishAt}
+                onChange={(event) => setPublishAt(event.target.value)}
+                aria-label="Data e hora da publicação"
+                className="ml-auto rounded-md border border-outline-variant/60 bg-surface px-sm py-1 font-body text-body-sm text-on-surface"
+              />
+            )}
+            {agendar && !agendamentoOk && (
+              <p className="w-full text-body-sm text-error">
+                Escolha uma data e hora no futuro para agendar o comunicado.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-sm rounded-lg border border-outline-variant/40 bg-surface-container px-md py-sm">
           <span className="flex items-center gap-xs font-label text-label-md text-on-surface">
             <Icon name="my_location" className="text-[18px] text-primary" />
-            Direcionar para o Setor
+            Direcionar para
           </span>
           <Select
-            options={(['ALL', 'SECTORS'] as const).map((value) => ({
+            options={CORPORATE_POST_AUDIENCES.map((value) => ({
               value,
               label: CORPORATE_POST_AUDIENCE_LABELS[value],
             }))}
@@ -254,7 +349,7 @@ export function CorporatePostComposer({
             searchable={false}
             className="ml-auto w-56"
           />
-          {audience === 'SECTORS' && (
+          {audienceHasSectors(audience) && (
             <div className="flex w-full flex-wrap gap-xs">
               {(sectors.data?.sectors ?? []).map((sector) => {
                 const checked = sectorIds.includes(sector.id)
@@ -291,6 +386,68 @@ export function CorporatePostComposer({
           </span>
         )}
 
+        {pollOpen && (
+          <div className="flex flex-col gap-sm rounded-xl border border-outline-variant/50 bg-surface-container p-md">
+            <label className="flex flex-col gap-1">
+              <span className="font-label text-label-sm text-on-surface-variant">Pergunta da enquete</span>
+              <input
+                value={pollQuestion}
+                onChange={(e) => setPollQuestion(e.target.value)}
+                maxLength={CORPORATE_POST_POLL_QUESTION_MAX_LENGTH}
+                placeholder="Qual proposta de logo você prefere?"
+                className="rounded-lg border border-outline-variant/60 bg-surface px-md py-2 text-body-md text-on-surface"
+              />
+            </label>
+
+            {pollOptions.map((option, i) => (
+              <div key={i} className="flex items-center gap-sm">
+                <label className="flex-1">
+                  <span className="sr-only">{`Opção ${i + 1}`}</span>
+                  <input
+                    value={option}
+                    onChange={(e) =>
+                      setPollOptions((atuais) => atuais.map((o, idx) => (idx === i ? e.target.value : o)))
+                    }
+                    maxLength={CORPORATE_POST_POLL_OPTION_MAX_LENGTH}
+                    placeholder={`Opção ${i + 1}`}
+                    aria-label={`Opção ${i + 1}`}
+                    className="w-full rounded-lg border border-outline-variant/60 bg-surface px-md py-2 text-body-md text-on-surface"
+                  />
+                </label>
+                {pollOptions.length > CORPORATE_POST_POLL_MIN_OPTIONS && (
+                  <button
+                    type="button"
+                    onClick={() => setPollOptions((atuais) => atuais.filter((_, idx) => idx !== i))}
+                    aria-label={`Remover opção ${i + 1}`}
+                    className="text-on-surface-variant transition-colors hover:text-error"
+                  >
+                    <Icon name="close" className="text-[18px]" />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            <div className="flex flex-wrap items-center justify-between gap-sm">
+              {pollOptions.length < CORPORATE_POST_POLL_MAX_OPTIONS ? (
+                <button
+                  type="button"
+                  onClick={() => setPollOptions((atuais) => [...atuais, ''])}
+                  className="font-label text-label-sm font-bold text-primary hover:underline"
+                >
+                  + Adicionar opção
+                </button>
+              ) : (
+                <span />
+              )}
+              {!pollDistinct && (
+                <span role="alert" className="text-label-sm text-error">
+                  Use opções diferentes.
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-sm border-t border-outline-variant/30 pt-sm">
           <div className="flex flex-wrap items-center gap-sm">
             {uploadsEnabled && (
@@ -321,6 +478,20 @@ export function CorporatePostComposer({
                 />
               </>
             )}
+            {/* Enquete entra na mesma fila e NÃO desabilita os outros: no Feed
+                ela convive com anexo, ao contrário da Resenha. */}
+            <button
+              type="button"
+              onClick={() => setPollOpen((aberta) => !aberta)}
+              aria-pressed={pollOpen}
+              className={`flex items-center gap-xs rounded-full border px-md py-1 font-label text-label-sm transition-colors ${
+                pollOpen
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-outline-variant/60 text-on-surface-variant hover:border-primary hover:text-primary'
+              }`}
+            >
+              <Icon name="bar_chart" className="text-[18px]" /> Enquete
+            </button>
             {/* GIF fecha a fila, como no desenho: é o único que não é upload. */}
             {gifsEnabled && (
               <div className="relative">

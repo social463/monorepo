@@ -50,7 +50,7 @@ export function HomeProfileCard() {
   return (
     <aside
       data-testid="home-profile-card"
-      className="flex flex-col gap-lg rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="flex min-w-0 flex-col gap-lg rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       <div className="flex flex-col items-center text-center">
         <Link

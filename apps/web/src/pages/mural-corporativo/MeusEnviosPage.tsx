@@ -40,6 +40,13 @@ function EnvioCard({ post }: { post: PendingCorporatePostDTO }) {
         <span className="font-label text-label-sm text-on-surface-variant">
           enviado em {formatDate(post.createdAt)}
         </span>
+        {/* O agendado só existe aqui até a hora marcada — sem esta linha,
+            agendar seria publicar num buraco (Documento 4, seção 12). */}
+        {post.status === 'SCHEDULED' && post.publishAt && (
+          <span className="font-label text-label-sm text-primary">
+            sai em {formatDate(post.publishAt)}
+          </span>
+        )}
         {post.status === 'PENDING' && !editing && (
           <button
             type="button"

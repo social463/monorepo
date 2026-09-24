@@ -72,12 +72,14 @@ describe("App — navegação do admin", () => {
     window.history.pushState({}, "", "/");
   });
 
-  it("admin cai no painel Admin por padrão, com a barra mostrando os grupos do console", async () => {
+  it("admin cai em People Analytics por padrão, com a barra mostrando os grupos do console", async () => {
     render(<App />);
 
+    // `/admin` redireciona para People Analytics desde o Documento 3, seção 3.
     expect(
-      await screen.findByRole("heading", { name: /dashboard/i }),
+      await screen.findByRole("heading", { name: /people analytics/i }),
     ).toBeInTheDocument();
+    expect(window.location.search).toContain("aba=dashboard");
     // Mesma barra do resto do app, com outro conteúdo — não há mais sidebar
     // dedicada ao console.
     const nav = screen.getByRole("navigation", { name: /navegação principal/i });
@@ -114,7 +116,7 @@ describe("App — navegação do admin", () => {
     expect(await screen.findByRole("heading", { name: "Ranking" })).toBeInTheDocument();
   });
 
-  it("/admin/engajamento abre a leitura da economia de XP", async () => {
+  it("/admin/engajamento redireciona para a aba Engajamento de People Analytics", async () => {
     mockApiFetch.mockResolvedValue({
       overview: {
         monthRef: "2026-08",
@@ -132,10 +134,13 @@ describe("App — navegação do admin", () => {
     window.history.pushState({}, "", "/admin/engajamento");
     render(<App />);
 
+    // O painel virou aba (seção 4.7); a rota antiga sobrevive como
+    // redirecionamento para não quebrar link em favorito.
     expect(
-      await screen.findByRole("heading", { name: "Engajamento" }),
+      await screen.findByRole("heading", { name: /people analytics/i }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("Pessoas no ranking")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/admin/pessoas");
+    expect(window.location.search).toContain("aba=engajamento");
   });
 
   it("/aniversarios redireciona para a tela de aniversariantes", async () => {
@@ -153,6 +158,7 @@ describe("App — navegação do admin", () => {
 describe("App — navegação do subadmin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    adminUser.sectorFeatures = undefined;
     mockApiFetch.mockResolvedValue({
       users: [],
       votes: [],
@@ -191,6 +197,27 @@ describe("App — navegação do subadmin", () => {
     window.history.pushState({}, "", "/votar");
     render(<App />);
     expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
+  });
+
+  it("subadmin SEM o bloco de G&G fica no resumo por setor, não vai para People Analytics", async () => {
+    adminUser.role = "SUBADMIN";
+    adminUser.sectorFeatures = ["desenvolvimento-produto"];
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+
+    // Redirecionar todo mundo mandaria este subadmin para uma tela que ele não
+    // pode ver — e o guard o devolveria para `/admin`, num laço.
+    expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /people analytics/i })).not.toBeInTheDocument();
+  });
+
+  it("subadmin COM o bloco de G&G cai em People Analytics, como o admin", async () => {
+    adminUser.role = "SUBADMIN";
+    adminUser.sectorFeatures = ["gente-gestao"];
+    window.history.pushState({}, "", "/admin");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: /people analytics/i })).toBeInTheDocument();
   });
 
   it("subadmin acessando /time diretamente vê a página, mesmo sem a feature habilitada no setor (bypassa o FeatureGate como o admin)", async () => {
@@ -232,7 +259,8 @@ describe("App — acesso administrativo delegado", () => {
   it("abre o painel de admin mesmo sendo LEGEND", async () => {
     window.history.pushState({}, "", "/admin");
     render(<App />);
-    expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
+    // Acesso delegado é admin PLENO, então cai em People Analytics como o ADMIN.
+    expect(await screen.findByRole("heading", { name: /people analytics/i })).toBeInTheDocument();
   });
 
   // O poder delegado é PLENO: onde o subadmin é barrado, o delegado entra.
@@ -274,11 +302,15 @@ describe("App — organograma pela área de Liderança", () => {
     adminUser.adminAccess = false;
     adminUser.sectorFeatures = ["time"];
     adminUser.enabledFeatures = [];
-    mockApiFetch.mockResolvedValue({
-      company: { id: "company-a", name: "Empresa Teste" },
-      roots: [],
-      totalPeople: 0,
-    });
+    // Quem é barrado cai na Home, e o Feed Corporativo de lá lê `page.items`. O
+    // `QueryClient` do App é de módulo e sobrevive entre os testes: servir o
+    // organograma para toda chamada deixaria um "feed" inválido no cache, e o
+    // teste seguinte quebraria na Home antes de chegar à asserção.
+    mockApiFetch.mockImplementation(async (path: string) =>
+      String(path).startsWith("/corporate-posts")
+        ? { items: [], nextCursor: null }
+        : { company: { id: "company-a", name: "Empresa Teste" }, roots: [], totalPeople: 0 },
+    );
   });
 
   afterEach(() => {
@@ -297,6 +329,20 @@ describe("App — organograma pela área de Liderança", () => {
 
   it("colaborador sem liderança é barrado, como no resto da área de Liderança", async () => {
     adminUser.role = "LEGEND";
+    window.history.pushState({}, "", "/lideranca/organograma");
+    render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(
+      screen.queryByRole("heading", { name: "Organograma do meu time" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // O bloco de G&G é feature do setor e chega a todo mundo lotado lá — um Jovem
+  // Aprendiz de G&G, por exemplo. Só abre a Liderança para o SUBADMIN do setor.
+  it("colaborador lotado num setor com Gente e Gestão também é barrado", async () => {
+    adminUser.role = "LEGEND";
+    adminUser.sectorFeatures = ["time", "gente-gestao"];
     window.history.pushState({}, "", "/lideranca/organograma");
     render(<App />);
 

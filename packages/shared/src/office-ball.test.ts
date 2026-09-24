@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { MapDocumentV1 } from './index'
+import type { MapDocumentV1, OfficeBall } from './index'
 import {
-  BALL_KICK_TILE_MS,
-  BALL_TOUCH_TILE_MS,
   OFFICE_BALL_SHEET,
   createEmptyMapDocumentV1,
   isCollidableAssetCategory,
@@ -10,7 +8,7 @@ import {
   isOfficeBallAssetId,
   isOfficeBallPower,
   isOfficeBallTile,
-  kickBall,
+  officeKickBall,
   officeBallCell,
   mapBalls,
   officeAssetTilesetId,
@@ -31,278 +29,102 @@ function wallAt(document: MapDocumentV1, x: number, y: number): void {
   })
 }
 
-const ball = { id: 'ball-1', x: 5, y: 5 }
+describe('officeKickBall', () => {
+  const bola = (x: number, y: number, over: Partial<OfficeBall> = {}): OfficeBall => ({
+    id: 'ball-1',
+    x,
+    y,
+    vx: 0,
+    vy: 0,
+    memberIds: ['ball-1'],
+    ...over,
+  })
 
-describe('kickBall', () => {
-  it('chute limpo (bola à frente, na direção encarada) leva a bola longe e reto', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
+  it('manda a bola na direção ENCARADA, não na do mouse', () => {
+    // O escritório nunca teve mira: só o gesto vem do cliente, e a direção sai
+    // do facing autoritativo. Migrar para pixel não é motivo para dar uma mira.
+    const chutada = officeKickBall({
+      ball: bola(120, 100),
+      kicker: { x: 100, y: 100, dir: 'right' },
       power: 'kick',
     })
-
-    expect(kick?.grazed).toBe(false)
-    expect(kick?.path).toEqual([
-      { x: 6, y: 5 }, { x: 7, y: 5 }, { x: 8, y: 5 }, { x: 9, y: 5 }, { x: 10, y: 5 },
-    ])
-    expect(kick?.durationMs).toBe(5 * BALL_KICK_TILE_MS)
+    expect(chutada).not.toBeNull()
+    expect(chutada!.vx).toBeGreaterThan(0)
+    expect(chutada!.vy).toBeCloseTo(0, 5)
   })
 
-  it('bola na diagonal pega de raspão: sai torta e mais fraca', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball: { id: 'ball-1', x: 6, y: 4 },
-      kicker: { x: 5, y: 5, dir: 'right' },
+  it('o toque sai mais fraco que o chute', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const toque = officeKickBall({ ball: bola(120, 100), kicker, power: 'touch' })!
+    const chute = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick' })!
+    expect(Math.hypot(toque.vx, toque.vy)).toBeLessThan(Math.hypot(chute.vx, chute.vy))
+  })
+
+  it('a corrida reforça o chute — e a força é do SERVIDOR, não do fio', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const parado = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick' })!
+    const correndo = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick', sprint: true })!
+    expect(Math.hypot(correndo.vx, correndo.vy)).toBeGreaterThan(Math.hypot(parado.vx, parado.vy))
+  })
+
+  it('segurar X mais tempo (carga maior) chuta mais forte', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const fraco = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick', charge: 0 })!
+    const forte = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick', charge: 1 })!
+    expect(Math.hypot(forte.vx, forte.vy)).toBeGreaterThan(Math.hypot(fraco.vx, fraco.vy))
+  })
+
+  it('sem carga informada, o chute sai na força cheia — compatível com quem não carrega', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const semCarga = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick' })!
+    const cargaCheia = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick', charge: 1 })!
+    expect(semCarga.vx).toBeCloseTo(cargaCheia.vx, 5)
+  })
+
+  it('o toque não carrega — a mesma força de sempre, tecla segurada ou não', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const toque = officeKickBall({ ball: bola(120, 100), kicker, power: 'touch' })!
+    const toqueCarregado = officeKickBall({ ball: bola(120, 100), kicker, power: 'touch', charge: 0 })!
+    expect(toqueCarregado.vx).toBeCloseTo(toque.vx, 5)
+  })
+
+  it('segurar C mais tempo também levanta mais a bola, não só chuta mais forte', () => {
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const baixo = officeKickBall({ ball: bola(120, 100), kicker, power: 'lob', charge: 0 })!
+    const alto = officeKickBall({ ball: bola(120, 100), kicker, power: 'lob', charge: 1 })!
+    expect(baixo.airborneMs).toBeGreaterThan(0)
+    expect(alto.airborneMs!).toBeGreaterThan(baixo.airborneMs!)
+  })
+
+  it('o chute alto sai pelo AR — é o que sobra dele no contínuo', () => {
+    // Na grade, o chute alto resolvia a trajetória por cima da mobília. Sem eixo
+    // Z, o que preserva a feature é o PRAZO em que a bola ignora colisão; sem
+    // ele o chute alto viraria rasteiro e bateria na primeira mesa.
+    const kicker = { x: 100, y: 100, dir: 'right' as const }
+    const alto = officeKickBall({ ball: bola(120, 100), kicker, power: 'lob' })!
+    const rasteiro = officeKickBall({ ball: bola(120, 100), kicker, power: 'kick' })!
+    expect(alto.airborneMs).toBeGreaterThan(0)
+    expect(rasteiro.airborneMs).toBeUndefined()
+  })
+
+  it('bola fora do alcance não é chutada', () => {
+    const longe = officeKickBall({
+      ball: bola(400, 100),
+      kicker: { x: 100, y: 100, dir: 'right' },
       power: 'kick',
     })
-
-    expect(kick?.grazed).toBe(true)
-    // 5 tiles × 0.55 = 2.75 → 3, na diagonal.
-    expect(kick?.path).toEqual([{ x: 7, y: 3 }, { x: 8, y: 2 }, { x: 9, y: 1 }])
+    expect(longe).toBeNull()
   })
 
-  it('chutar de costas para a bola também é raspão', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'left' },
-      power: 'kick',
-    })
-
-    expect(kick?.grazed).toBe(true)
-    expect(kick?.path).toHaveLength(3)
-    // A bola continua indo para longe de quem chutou, não para trás dele.
-    expect(kick?.path.at(-1)).toEqual({ x: 8, y: 5 })
-  })
-
-  it('chute com corrida vai mais longe que o parado', () => {
-    const running = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'kick',
-      sprint: true,
-    })
-
-    expect(running?.path).toHaveLength(8)
-  })
-
-  it('toque anda um tile só, na cadência lenta, mesmo correndo', () => {
-    const touch = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'touch',
-      sprint: true,
-    })
-
-    expect(touch?.path).toEqual([{ x: 6, y: 5 }])
-    expect(touch?.durationMs).toBe(BALL_TOUCH_TILE_MS)
-  })
-
-  it('em cima da bola, o chute sai na direção encarada', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 5, y: 5, dir: 'up' },
-      power: 'kick',
-    })
-
-    expect(kick?.grazed).toBe(false)
-    expect(kick?.path.at(-1)).toEqual({ x: 5, y: 0 })
-  })
-
-  it('bate na parede, volta com metade da força e para', () => {
-    const document = emptyRoom()
-    wallAt(document, 8, 5)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'kick',
-    })
-
-    expect(kick?.bounces).toBe(1)
-    // Dois tiles até a parede, rebate e volta com 3 → 1 tile de sobra.
-    expect(kick?.path).toEqual([{ x: 6, y: 5 }, { x: 7, y: 5 }, { x: 6, y: 5 }])
-  })
-
-  it('pessoa no caminho para a bola como uma parede', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'kick',
-      obstacles: [{ x: 7, y: 5 }],
-    })
-
-    expect(kick?.path).toEqual([{ x: 6, y: 5 }, { x: 5, y: 5 }, { x: 4, y: 5 }])
-  })
-
-  it('bola entalada não sai do lugar, e o gesto ainda é válido', () => {
-    const document = emptyRoom()
-    wallAt(document, 6, 5)
-    wallAt(document, 4, 5)
-    wallAt(document, 5, 4)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 5, y: 5, dir: 'down' },
-      power: 'kick',
-      obstacles: [{ x: 5, y: 6 }],
-    })
-
-    expect(kick).not.toBeNull()
-    expect(kick?.path).toEqual([])
-    expect(kick?.durationMs).toBe(0)
-  })
-
-  it('bola de pilates (2×2) sai reta quando o pé pega de lado', () => {
-    const pilates = { id: 'pilates', x: 5, y: 5, w: 2, h: 2 }
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball: pilates,
-      // Ao lado da célula de BAIXO da peça: alinhado no eixo x, e por isso
-      // ainda é chute limpo.
-      kicker: { x: 4, y: 6, dir: 'right' },
-      power: 'kick',
-    })
-
-    expect(kick?.grazed).toBe(false)
-    expect(kick?.path).toEqual([
-      { x: 6, y: 5 }, { x: 7, y: 5 }, { x: 8, y: 5 }, { x: 9, y: 5 }, { x: 10, y: 5 },
-    ])
-  })
-
-  it('bola de pilates não passa por vão de um tile', () => {
-    const document = emptyRoom()
-    // Corredor de um tile à direita da peça: a metade de baixo fica bloqueada.
-    wallAt(document, 7, 6)
-    const kick = kickBall({
-      document,
-      ball: { id: 'pilates', x: 5, y: 5, w: 2, h: 2 },
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'kick',
-    })
-
-    // A metade de baixo não cabe no vão: bate de cara e volta com metade da
-    // força. Uma bola de um tile, no mesmo lugar, passaria.
-    expect(kick?.path).toEqual([{ x: 4, y: 5 }, { x: 3, y: 5 }])
-    expect(kick?.bounces).toBe(1)
-  })
-
-  it('chute alto passa por cima do que está no caminho', () => {
-    const document = emptyRoom()
-    wallAt(document, 6, 5)
-    wallAt(document, 7, 5)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'lob',
-      // Gente no meio também não para: a bola passa por cima.
-      obstacles: [{ x: 8, y: 5 }],
-    })
-
-    expect(kick?.bounces).toBe(0)
-    expect(kick?.path).toEqual([
-      { x: 6, y: 5 }, { x: 7, y: 5 }, { x: 8, y: 5 }, { x: 9, y: 5 },
-    ])
-    // O pouso é o que precisa estar livre — e está.
-    expect(kick?.path.at(-1)).toEqual({ x: 9, y: 5 })
-  })
-
-  it('chute alto cai antes quando o pouso está ocupado', () => {
-    const document = emptyRoom()
-    wallAt(document, 9, 5)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'lob',
-    })
-
-    expect(kick?.path.at(-1)).toEqual({ x: 8, y: 5 })
-  })
-
-  it('chute alto com corrida sobrevoa mais longe', () => {
-    const running = kickBall({
-      document: emptyRoom(),
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'lob',
-      sprint: true,
-    })
-
-    expect(running?.path).toHaveLength(6)
-  })
-
-  it('bola encurralada não sobe: sem pouso livre, fica onde está', () => {
-    const document = emptyRoom()
-    for (let x = 6; x <= 10; x += 1) wallAt(document, x, 5)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 4, y: 5, dir: 'right' },
-      power: 'lob',
-    })
-
-    expect(kick?.path).toEqual([])
-  })
-
-  it('condução empurra um tile na direção do passo, sem raspão nem rebatida', () => {
-    const kick = kickBall({
-      document: emptyRoom(),
-      ball,
-      // Quem conduz está EM CIMA da bola: a direção vem do passo.
-      kicker: { x: 5, y: 5, dir: 'right' },
-      power: 'dribble',
-    })
-
-    expect(kick).toMatchObject({ path: [{ x: 6, y: 5 }], grazed: false, bounces: 0 })
-  })
-
-  it('condução contra a parede não empurra a bola', () => {
-    const document = emptyRoom()
-    wallAt(document, 6, 5)
-    const kick = kickBall({
-      document,
-      ball,
-      kicker: { x: 5, y: 5, dir: 'right' },
-      power: 'dribble',
-    })
-
-    expect(kick?.path).toEqual([])
-    expect(kick?.bounces).toBe(0)
-  })
-
-  it('correndo, a bola conduzida acompanha o passo mais curto', () => {
-    const parado = kickBall({
-      document: emptyRoom(), ball, kicker: { x: 5, y: 5, dir: 'right' }, power: 'dribble',
-    })
-    const correndo = kickBall({
-      document: emptyRoom(), ball, kicker: { x: 5, y: 5, dir: 'right' }, power: 'dribble', sprint: true,
-    })
-
-    expect(correndo?.durationMs).toBeLessThan(parado?.durationMs as number)
-  })
-
-  it('o cliente não pode pedir condução — ela nasce do passo', () => {
-    expect(isOfficeBallPower('kick')).toBe(true)
-    expect(isOfficeBallPower('lob')).toBe(true)
-    expect(isOfficeBallPower('dribble')).toBe(false)
-  })
-
-  it('fora de alcance não chuta', () => {
-    expect(
-      kickBall({
-        document: emptyRoom(),
-        ball,
-        kicker: { x: 3, y: 5, dir: 'right' },
-        power: 'kick',
-      }),
-    ).toBeNull()
+  it('a bola GRANDE é alcançável pela superfície, não pelo centro', () => {
+    // Uma bola de pilates tem raio de um tile: medir do centro exigiria enfiar
+    // o personagem dentro dela.
+    const pilates = bola(150, 100, { r: 32, w: 2, h: 2 })
+    expect(officeKickBall({ ball: pilates, kicker: { x: 100, y: 100, dir: 'right' }, power: 'kick' }))
+      .not.toBeNull()
+    const pequena = bola(150, 100)
+    expect(officeKickBall({ ball: pequena, kicker: { x: 100, y: 100, dir: 'right' }, power: 'kick' }))
+      .toBeNull()
   })
 })
 
@@ -339,9 +161,10 @@ describe('mapBalls', () => {
       },
     )
 
+    // Em PIXEL, no centro do grupo, com o raio derivado do tamanho publicado.
     expect(mapBalls(document)).toEqual([
-      { id: 'ball-a', x: 2, y: 3, memberIds: ['ball-a'] },
-      { id: 'grp-1__0-0', x: 0, y: 0, memberIds: ['grp-1__0-0'] },
+      { id: 'ball-a', x: 80, y: 112, vx: 0, vy: 0, r: 16, memberIds: ['ball-a'] },
+      { id: 'grp-1__0-0', x: 16, y: 16, vx: 0, vy: 0, r: 16, memberIds: ['grp-1__0-0'] },
     ])
   })
 
@@ -366,8 +189,12 @@ describe('mapBalls', () => {
     expect(mapBalls(document)).toEqual([
       {
         id: 'grp-pilates__0-0',
-        x: 4,
-        y: 6,
+        // Centro dos quatro slices; o raio é um tile inteiro.
+        x: 5 * 32,
+        y: 7 * 32,
+        vx: 0,
+        vy: 0,
+        r: 32,
         w: 2,
         h: 2,
         memberIds: [

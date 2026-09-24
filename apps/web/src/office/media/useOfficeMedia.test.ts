@@ -11,10 +11,30 @@ vi.mock('../../lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock
 // passaria se a ordem fosse invertida, já que é mutação por referência).
 let ops: string[] = []
 
+/**
+ * Espelha o contrato real do `LocalAudioTrack`: com `stopOnMute`, o LiveKit
+ * PARA a MediaStreamTrack no mute (é o que apaga o indicador de microfone do
+ * sistema) e a reaquire no unmute. `capturing` representa esse estado do
+ * dispositivo; `failUnmute` simula a reaquisição falhando (mic tomado por
+ * outro app, permissão revogada).
+ */
 class FakeTrack {
   isMuted = false
-  async mute() { this.isMuted = true; ops.push('mute'); return this }
-  async unmute() { this.isMuted = false; return this }
+  stopOnMute = false
+  capturing = true
+  failUnmute = false
+  async mute() {
+    this.isMuted = true
+    if (this.stopOnMute) this.capturing = false
+    ops.push('mute')
+    return this
+  }
+  async unmute() {
+    if (this.failUnmute) throw new Error('mic ocupado')
+    this.isMuted = false
+    this.capturing = true
+    return this
+  }
 }
 const createLocalAudioTrackMock = vi.fn(async (..._args: unknown[]) => new FakeTrack())
 const setCameraEnabledMock = vi.fn(async (_enabled: boolean, _options?: unknown) => {})
@@ -97,6 +117,9 @@ vi.mock('livekit-client', () => ({
     LocalTrackPublished: 'localTrackPublished',
     LocalTrackUnpublished: 'localTrackUnpublished',
     ActiveSpeakersChanged: 'activeSpeakersChanged',
+    Reconnecting: 'reconnecting',
+    Reconnected: 'reconnected',
+    Disconnected: 'disconnected',
   },
   Track: { Source: { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio' } },
   createLocalAudioTrack: (...args: unknown[]) => createLocalAudioTrackMock(...args),
@@ -133,7 +156,13 @@ function useOfficeMedia(occupants: OfficeOccupant[], youId: string | null, conne
   return useOfficeMediaRuntime(occupants, youId, connected, testDocument, 'test-publication')
 }
 
-function occupant(userId: string, x: number, y: number, status?: OfficeOccupant['status']): OfficeOccupant {
+/**
+ * Recebe TILE e converte: é assim que se pensa o cenário ("ele está na sala
+ * 2"). O occupant fala PIXEL desde o movimento livre.
+ */
+function occupant(userId: string, tileX: number, tileY: number, status?: OfficeOccupant['status']): OfficeOccupant {
+  const x = tileX * 32 + 16
+  const y = tileY * 32 + 16
   return {
     userId,
     name: userId,
@@ -412,6 +441,84 @@ describe('useOfficeMedia', () => {
     expect(nearPub.setSubscribed).toHaveBeenLastCalledWith(true)
   })
 
+  it('Ocupado corta o áudio DENTRO da sala de reunião, onde o autoSubscribe assinaria', async () => {
+    const other = new FakeParticipant('bob', 'bob')
+    const pub: FakePub = { isSubscribed: true, source: 'microphone', track: null, setSubscribed: vi.fn() }
+    other.trackPublications.set('a', pub)
+
+    // 18,15 é dentro da sala de reunião: assinatura é do LiveKit, não da proximidade.
+    const { rerender } = renderHook(({ occ }) => useOfficeMedia(occ, 'you', true), {
+      initialProps: { occ: [occupant('you', 18, 15), occupant('bob', 19, 15)] },
+    })
+    await settle(600)
+    const room = FakeRoom.instances.at(-1)!
+    expect(room.connectCalls[0]!.opts.autoSubscribe).toBe(true)
+    room.remoteParticipants.set('bob', other)
+
+    rerender({ occ: [occupant('you', 18, 15, 'busy'), occupant('bob', 19, 15)] })
+
+    expect(pub.setSubscribed).toHaveBeenLastCalledWith(false)
+  })
+
+  it('não se ouve quem está Ocupado, nem dentro da sala', async () => {
+    const other = new FakeParticipant('bob', 'bob')
+    const pub: FakePub = { isSubscribed: true, source: 'microphone', track: null, setSubscribed: vi.fn() }
+    other.trackPublications.set('a', pub)
+
+    const { rerender } = renderHook(({ occ }) => useOfficeMedia(occ, 'you', true), {
+      initialProps: { occ: [occupant('you', 18, 15), occupant('bob', 19, 15)] },
+    })
+    await settle(600)
+    const room = FakeRoom.instances.at(-1)!
+    room.remoteParticipants.set('bob', other)
+
+    rerender({ occ: [occupant('you', 18, 15), occupant('bob', 19, 15, 'busy')] })
+
+    expect(pub.setSubscribed).toHaveBeenLastCalledWith(false)
+  })
+
+  it('sair de Ocupado devolve a assinatura dentro da sala', async () => {
+    const other = new FakeParticipant('bob', 'bob')
+    const pub: FakePub = { isSubscribed: false, source: 'microphone', track: null, setSubscribed: vi.fn() }
+    pub.setSubscribed.mockImplementation((v: boolean) => { pub.isSubscribed = v })
+    other.trackPublications.set('a', pub)
+
+    const { rerender } = renderHook(({ occ }) => useOfficeMedia(occ, 'you', true), {
+      initialProps: { occ: [occupant('you', 18, 15, 'busy'), occupant('bob', 19, 15)] },
+    })
+    await settle(600)
+    FakeRoom.instances.at(-1)!.remoteParticipants.set('bob', other)
+
+    rerender({ occ: [occupant('you', 18, 15), occupant('bob', 19, 15)] })
+
+    expect(pub.setSubscribed).toHaveBeenLastCalledWith(true)
+  })
+
+  it('Ocupado para o microfone, e sair devolve conforme a preferência', async () => {
+    localStorage.setItem('office:mic-enabled', '1')
+    const { rerender, result } = renderHook(({ occ }) => useOfficeMedia(occ, 'you', true), {
+      initialProps: { occ: [occupant('you', 18, 15)] },
+    })
+    await settle(600)
+    // Spawn nasce mutado; desmutar é a preferência do usuário nesta sessão.
+    await act(async () => { await result.current.toggleMic() })
+    const track = FakeRoom.instances.at(-1)!.localParticipant.published[0]
+    expect(track.capturing).toBe(true)
+
+    rerender({ occ: [occupant('you', 18, 15, 'busy')] })
+    await act(async () => { await flushMicrotasks() })
+
+    expect(track.isMuted).toBe(true)
+    expect(track.capturing).toBe(false) // ninguém ouve, e o indicador do sistema apaga
+    expect(result.current.micEnabled).toBe(false)
+
+    rerender({ occ: [occupant('you', 18, 15)] })
+    await act(async () => { await flushMicrotasks() })
+
+    expect(result.current.micEnabled).toBe(true) // volta como estava
+    expect(track.capturing).toBe(true)
+  })
+
   it('desassinar por proximidade limpa `remotes` na hora, sem esperar outro evento de track', async () => {
     const audioTrack = {}
     const near = new FakeParticipant('bob', 'bob')
@@ -596,6 +703,52 @@ describe('useOfficeMedia', () => {
     // idempotente: aplicar o estado atual não lança nem alterna
     await act(async () => { await result.current.applyMicEnabled(false) })
     expect(track.isMuted).toBe(true)
+  })
+
+  it('mic mutado para de capturar: no macOS o indicador do sistema apaga', async () => {
+    const { result } = renderOfficeMedia([occupant('you', 12, 14)])
+    await settle(600)
+
+    // Spawn entra mutado, e é justamente aí que o indicador ficava aceso.
+    const track = FakeRoom.instances.at(-1)!.localParticipant.published[0]
+    expect(track.stopOnMute).toBe(true)
+    expect(track.isMuted).toBe(true)
+    expect(track.capturing).toBe(false)
+
+    await act(async () => { await result.current.toggleMic() }) // desmuta: reabre o dispositivo
+    expect(track.capturing).toBe(true)
+    expect(result.current.micEnabled).toBe(true)
+
+    await act(async () => { await result.current.toggleMic() }) // muta de novo
+    expect(track.capturing).toBe(false)
+    expect(result.current.micEnabled).toBe(false)
+  })
+
+  it('falha ao reabrir o microfone no unmute vira erro, não um botão mentiroso', async () => {
+    const { result } = renderOfficeMedia([occupant('you', 12, 14)])
+    await settle(600)
+    const track = FakeRoom.instances.at(-1)!.localParticipant.published[0]
+    track.failUnmute = true
+
+    await act(async () => { await result.current.toggleMic() })
+
+    expect(result.current.micEnabled).toBe(false)
+    expect(result.current.micError).toBe(true)
+    expect(track.isMuted).toBe(true)
+    // A preferência não pode virar "desmutado": o mic nunca chegou a abrir.
+    expect(localStorage.getItem('office:mic-enabled')).not.toBe('1')
+  })
+
+  it('alto-falante: falha ao restaurar o mic também vira erro', async () => {
+    const { result } = renderOfficeMedia([occupant('you', 12, 14)])
+    await settle(600)
+    const track = FakeRoom.instances.at(-1)!.localParticipant.published[0]
+    track.failUnmute = true
+
+    await act(async () => { await result.current.applyMicEnabled(true) })
+
+    expect(result.current.micEnabled).toBe(false)
+    expect(result.current.micError).toBe(true)
   })
 
   it('preferência de mic (localStorage) sobrevive a troca de sala: desmutado continua desmutado', async () => {
@@ -845,6 +998,70 @@ describe('useOfficeMedia', () => {
     act(() => room.emit('trackMuted'))
 
     expect(result.current.remotes[0]?.cameraTrack).toBeNull()
+  })
+
+  it('RoomEvent.Reconnected resincroniza remotes — reproduz o grid travado após queda de rede', async () => {
+    // O LiveKit reconecta sozinho no nível de rede (ICE/WebRTC) sem que o app
+    // faça nada. Durante a queda, nenhum evento de track é emitido — então o
+    // participante que publicou câmera nesse intervalo só aparece em
+    // `room.remoteParticipants`/`trackPublications`, sem `trackPublished`
+    // correspondente. Sem escutar `Reconnected` para forçar um resync,
+    // `remotes` fica preso vazio até algum evento não relacionado acontecer
+    // por acaso — o refresh manual que os usuários relataram precisar dar.
+    const bob = new FakeParticipant('bob', 'Bob')
+    const cameraTrack = { id: 'cam-1' }
+    const camPub: FakePub = { isSubscribed: true, source: 'camera', track: cameraTrack, isMuted: false, setSubscribed: vi.fn() }
+    bob.trackPublications.set('cam', camPub)
+
+    const { result } = renderHook(() => useOfficeMedia([occupant('you', 10, 5), occupant('bob', 12, 5)], 'you', true))
+    await settle(600)
+    const room = FakeRoom.instances.at(-1)!
+    room.remoteParticipants.set('bob', bob)
+
+    expect(result.current.remotes).toHaveLength(0)
+
+    act(() => room.emit('reconnected'))
+
+    expect(result.current.remotes[0]?.cameraTrack).toBe(cameraTrack)
+  })
+
+  it('RoomEvent.Disconnected reconecta sozinho quando a Room desiste da recuperação automática', async () => {
+    // Quando o LiveKit tenta reconectar sozinho e desiste de vez (rede caiu
+    // por tempo demais), ele dispara `Disconnected` — sem escutar isto, o
+    // hook ficava com `status: 'connected'` para sempre, sem tentar de
+    // novo, só resolvendo com um refresh manual da página.
+    const { result } = renderHook(() => useOfficeMedia([occupant('you', 10, 5)], 'you', true))
+    await settle(600)
+    expect(result.current.status).toBe('connected')
+    expect(FakeRoom.instances).toHaveLength(1)
+    const room = FakeRoom.instances.at(-1)!
+
+    act(() => room.emit('disconnected'))
+    await settle(600)
+
+    expect(FakeRoom.instances).toHaveLength(2) // reconectou sozinho, sem intervenção do usuário
+    expect(result.current.status).toBe('connected')
+  })
+
+  it('desconexão da PRÓPRIA troca de sala não dispara reconexão duplicada via RoomEvent.Disconnected', async () => {
+    // A `room.disconnect()` que o próprio `connectTo` chama ao trocar de
+    // sala/desmontar também dispara `Disconnected` no LiveKit real. Sem a
+    // guarda de `roomRef.current === room`, isso reconectaria a sala VELHA
+    // por cima da nova.
+    const { rerender } = renderHook(({ occ }) => useOfficeMedia(occ, 'you', true), {
+      initialProps: { occ: [occupant('you', 12, 14)] },
+    })
+    await settle(600)
+    const openRoom = FakeRoom.instances.at(-1)!
+
+    rerender({ occ: [occupant('you', 18, 15)] }) // dentro da reuniao-2 → troca de sala
+    await settle(600)
+    expect(FakeRoom.instances).toHaveLength(2)
+
+    act(() => openRoom.emit('disconnected')) // evento tardio da sala antiga
+    await settle(600)
+
+    expect(FakeRoom.instances).toHaveLength(2) // nenhuma reconexão extra
   })
 
   it('áudio da tela remota (ScreenShareAudio) vira screenAudioTrack; mutado/não-assinado é ignorado', async () => {

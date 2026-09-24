@@ -12,11 +12,20 @@ Cada comunicado será publicado em uma destas datas, nesta ordem:
 
 REGRAS
 - Um comunicado por data, na mesma ordem da lista.
-- O corpo tem no máximo 280 caracteres. Este limite é rígido.
-- O título tem no máximo 120 caracteres e é interno (não aparece no post).
+- Desenvolva o comunicado inteiro: cada seção do modelo com conteúdo de verdade,
+  entre 600 e 1500 caracteres de corpo. Não resuma até virar tópico solto:
+  uma frase por seção é raso demais para um comunicado interno.
+- Nunca passe de 2000 caracteres no corpo — aí sim é limite rígido.
+- O título é o do post, aparece para quem lê, e tem no máximo 120 caracteres.
+  O corpo começa pelo texto: não repita o título como primeira linha nem como subtítulo.
 - A campanha deve progredir: abertura, desenvolvimento e encerramento. Não repita o mesmo texto.
 - Não invente número, data, nome de pessoa, benefício ou política que não esteja no tema.
-- Tom caloroso e profissional. Sem markdown, sem emojis, sem aspas.
+- Português do Brasil com ortografia e ACENTUAÇÃO corretas ("saúde", "precisão",
+  "parabéns"). Nunca escreva sem acento para poupar espaço.
+- Tom caloroso e profissional. Sem aspas ao redor do texto.
+- Formatação permitida no corpo, e só ela: **negrito**, *itálico*, "## " para
+  subtítulo, "- " para item de lista, "1. " para item numerado. Emoji com
+  parcimônia, quando o modelo pedir. Nada de tabela, imagem ou HTML.
 
 FORMATO DA RESPOSTA
 Responda APENAS com um array JSON, sem texto antes ou depois, com exatamente 2 objeto(s):

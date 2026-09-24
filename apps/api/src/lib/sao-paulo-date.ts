@@ -165,10 +165,15 @@ export function monthInstantBoundsInSaoPaulo(ref: string): { start: Date; endExc
   }
 }
 
-/** Segunda a sexta (getUTCDay 1..5). Sábado/domingo são fim de semana. */
-export function isBusinessDay(ymd: string): boolean {
+/**
+ * Segunda a sexta (getUTCDay 1..5) e fora do conjunto de feriados, quando
+ * informado. `holidays` é opcional (compatível com quem só quer saber fim de
+ * semana) — quem cuida de feriado por empresa é `companyHolidays`
+ * (`vacation-planning-service.ts`), que lê `CalendarEvent` tipo "feriado".
+ */
+export function isBusinessDay(ymd: string, holidays?: ReadonlySet<string>): boolean {
   const weekday = dayFromYmd(ymd).getUTCDay()
-  return weekday >= 1 && weekday <= 5
+  return weekday >= 1 && weekday <= 5 && !holidays?.has(ymd)
 }
 
 /** Segunda-feira da semana civil de `ymd` (semana de segunda a domingo). */
@@ -178,16 +183,16 @@ export function startOfWeekYmd(ymd: string): string {
   return addDays(ymd, -offset)
 }
 
-/** Dia útil imediatamente anterior a `ymd` (pula sábado/domingo). */
-export function prevBusinessDay(ymd: string): string {
+/** Dia útil imediatamente anterior a `ymd` (pula sábado/domingo e feriado). */
+export function prevBusinessDay(ymd: string, holidays?: ReadonlySet<string>): string {
   let cur = addDays(ymd, -1)
-  while (!isBusinessDay(cur)) cur = addDays(cur, -1)
+  while (!isBusinessDay(cur, holidays)) cur = addDays(cur, -1)
   return cur
 }
 
-/** Dia útil imediatamente seguinte a `ymd` (pula sábado/domingo). */
-export function nextBusinessDay(ymd: string): string {
+/** Dia útil imediatamente seguinte a `ymd` (pula sábado/domingo e feriado). */
+export function nextBusinessDay(ymd: string, holidays?: ReadonlySet<string>): string {
   let cur = addDays(ymd, 1)
-  while (!isBusinessDay(cur)) cur = addDays(cur, 1)
+  while (!isBusinessDay(cur, holidays)) cur = addDays(cur, 1)
   return cur
 }

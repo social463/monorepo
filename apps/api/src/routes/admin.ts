@@ -8,13 +8,14 @@ import { voteInclude } from '../services/voting-service'
 import { isPeriodEditable } from '../lib/period-state'
 import { toAdminUser, toAwardedBadgeDTO, toBadgeDTO, toPeriodDTO, toPublicUser, toVoteDTO, toHighlightDTO, toSquadWithMembersDTO, toRetroRoomSummaryDTO, toSectorDTO, toAuditLogEntryDTO, toRecognitionCategoryDTO } from '../lib/serialize'
 import { generateHighlightDraft, updateHighlightText, generateHighlightImage, publishHighlight, listPublishedHighlights, HighlightError } from '../services/highlight-service'
-import { listSquads, createSquad, updateSquad, addMember, removeMember, SquadError } from '../services/squad-service'
+import { listSquads, createSquad, updateSquad, deleteSquad, addMember, removeMember, SquadError } from '../services/squad-service'
 import { listSectors, createSector, updateSector, SectorError } from '../services/sector-service'
 import { grantBadgeManually, revokeManualBadge, listBadgesForUser, BadgeError } from '../services/badge-service'
 import { listCategories, createCategory, updateCategory, CategoryError } from '../services/category-service'
 import { listBadgesAdmin, getBadgeAdmin, createBadgeAdmin, updateBadgeAdmin, BadgeAdminError } from '../services/badge-admin-service'
 import { findUserInCompany, scopedPrisma } from '../lib/tenant-scope'
-import { notifyBadgesEarned, notifyPeriodOpened, notifyPeriodClosed } from '../services/notification-service'
+import { notifyPeriodOpened, notifyPeriodClosed } from '../services/notification-service'
+import { settleBadgesEarned } from '../services/badge-reward-service'
 import { USER_ROLES, AREAS, MIN_SPRINT, MAX_SPRINT, MIN_VOTES_PER_PARTICIPANT, MAX_VOTES_PER_PARTICIPANT, FEATURE_KEYS, DEFAULT_SECTOR_ID, DEFAULT_COMPANY_ID, RECOGNITION_CATEGORY_NAME_MAX_LENGTH, canReceiveAdminAccess } from '@legends/shared'
 import { listRoomsForAdmin, updateRoomAsAdmin, hardDeleteRoom, RetroError } from '../services/retro-service'
 import {
@@ -32,6 +33,7 @@ import { getAdminDashboard } from '../services/admin-dashboard-service'
 import { getCalendarSettings, updateCalendarSettings } from '../services/calendar-settings-service'
 import { getOrganizationSettings, updateOrganizationSettings, OrganizationSettingsError } from '../services/organization-settings-service'
 import { assertManagerAssignable, OrganizationError } from '../services/organization-service'
+import { revokeAllForUser } from '../services/refresh-token-service'
 
 const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(RECOGNITION_CATEGORY_NAME_MAX_LENGTH),
@@ -141,6 +143,11 @@ const highlightTextSchema = z.object({
   text: z.string().min(1).max(600),
   highlightMonthRef: z.string().regex(/^\d{4}-\d{2}$/).optional(),
 })
+/**
+ * `categorySlug` é a categoria do FEEDBACK (selo de tipo CATEGORY);
+ * `badgeCategoryId` é o TEMA do catálogo (Documento 4, seção 11.4). Campos
+ * diferentes, conceitos diferentes — ver o comentário no schema.
+ */
 const createBadgeSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
@@ -148,6 +155,10 @@ const createBadgeSchema = z.object({
   iconKey: z.string().min(1),
   threshold: z.number().int().min(0).optional(),
   categorySlug: z.string().nullable().optional(),
+  badgeCategoryId: z.string().min(1).nullable().optional(),
+  // Recompensa opcional nos dois: `null` não concede. Teto para o dedo escapado.
+  rewardPoints: z.number().int().min(0).max(100_000).nullable().optional(),
+  rewardCoins: z.number().int().min(0).max(100_000).nullable().optional(),
   global: z.boolean().optional(),
   sectorIds: z.array(z.string().min(1)).optional(),
 })
@@ -158,6 +169,9 @@ const updateBadgeSchema = z.object({
   iconKey: z.string().min(1).optional(),
   threshold: z.number().int().min(0).optional(),
   categorySlug: z.string().nullable().optional(),
+  badgeCategoryId: z.string().min(1).nullable().optional(),
+  rewardPoints: z.number().int().min(0).max(100_000).nullable().optional(),
+  rewardCoins: z.number().int().min(0).max(100_000).nullable().optional(),
   global: z.boolean().optional(),
   sectorIds: z.array(z.string().min(1)).optional(),
 })
@@ -336,6 +350,23 @@ export async function adminRoutes(app: FastifyInstance) {
     try {
       const squad = await updateSquad(id, parsed.data, request.user.sub, request.user.companyId)
       return reply.send({ squad: toSquadWithMembersDTO(squad) })
+    } catch (err) {
+      if (err instanceof SquadError) return reply.code(err.status).send({ message: err.message })
+      throw err
+    }
+  })
+
+  app.delete('/admin/squads/:id', adminOrSubadmin, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (request.user.role === 'SUBADMIN') {
+      const existing = await scopedPrisma(request.user.companyId).squad.findUnique({ where: { id } })
+      if (!existing || existing.sectorId !== request.user.sectorId) {
+        return reply.code(404).send({ message: 'Squad não encontrada.' })
+      }
+    }
+    try {
+      await deleteSquad(id, request.user.sub, request.user.companyId)
+      return reply.code(204).send()
     } catch (err) {
       if (err instanceof SquadError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -625,6 +656,22 @@ export async function adminRoutes(app: FastifyInstance) {
               AND "id" <> ${updated.sectorId}
           `
         }
+        // Papel e acesso delegado viajam no JWT (ver `lib/jwt.ts`). Sem derrubar
+        // a sessão, quem acabou de ganhar — ou perder — o poder ficaria até 15
+        // min com o token antigo: o front libera o painel pelo dado fresco do
+        // banco (`PublicUser.adminAccess`) enquanto cada gravação toma 403.
+        // Senha trocada e conta desativada entram pelo mesmo motivo do
+        // `PATCH /super-admin/companies/:id/admins/:userId`.
+        //
+        // `sectorId` fica de fora de propósito: mudar de setor é rotina — a
+        // importação por planilha move gente às dezenas — e revogar ali
+        // deslogaria meia empresa de uma vez. Ele se acerta no próximo refresh.
+        const mudouPoder =
+          (parsed.data.role !== undefined && parsed.data.role !== existing.role)
+          || (data.adminAccess !== undefined && data.adminAccess !== existing.adminAccess)
+        if (mudouPoder || password !== undefined || updated.active === false) {
+          await revokeAllForUser(id, tx)
+        }
         const { passwordHash: _b, ...safeBefore } = existing
         const { passwordHash: _a, ...safeAfter } = updated
         await recordAuditLog({ actorId: request.user.sub, entityType: 'User', entityId: id, action: 'UPDATE', before: safeBefore, after: safeAfter, companyId: request.user.companyId, tx })
@@ -872,6 +919,9 @@ export async function adminRoutes(app: FastifyInstance) {
           iconKey: parsed.data.iconKey,
           threshold: parsed.data.threshold,
           categorySlug: parsed.data.categorySlug,
+          badgeCategoryId: parsed.data.badgeCategoryId,
+          rewardPoints: parsed.data.rewardPoints,
+          rewardCoins: parsed.data.rewardCoins,
           global,
           sectorIds,
         },
@@ -957,7 +1007,7 @@ export async function adminRoutes(app: FastifyInstance) {
     try {
       const awarded = await grantBadgeManually(userId, parsed.data.badgeId, request.user.sub)
       try {
-        await notifyBadgesEarned(userId, [awarded.badgeId], request.user.companyId)
+        await settleBadgesEarned(userId, [awarded.badgeId], request.user.companyId)
       } catch (notifyErr) {
         request.log.error(notifyErr)
       }

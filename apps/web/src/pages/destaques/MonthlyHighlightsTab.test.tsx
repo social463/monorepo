@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { MonthlyHighlightsTab } from './MonthlyHighlightsTab'
+import { MonthlyHighlightsTab, currentMonthRef, defaultMonthRef } from './MonthlyHighlightsTab'
 import * as api from '../../lib/api'
 
 const mockUseAuth = vi.fn()
@@ -48,8 +48,9 @@ function highlight(id: string, name: string, groupName: string, message: string 
   }
 }
 
-function mockApi(response: Record<string, unknown>) {
+function mockApi(response: Record<string, unknown>, months: string[] = [currentMonthRef()]) {
   return vi.spyOn(api, 'apiFetch').mockImplementation((async (url: string) => {
+    if (url.startsWith('/monthly-highlights/months')) return { months }
     if (url.startsWith('/monthly-highlights')) return response
     if (url === '/users/company') return { users: [person('u9', 'Brenna'), person('u8', 'Caio')] }
     return {}
@@ -73,7 +74,7 @@ describe('MonthlyHighlightsTab', () => {
     mockUseAuth.mockReturnValue({ user: { id: 'u1', name: 'Ana', role: 'LEGEND' } })
   })
 
-  it('mostra o quadro agrupado, com vários nomes no mesmo grupo', async () => {
+  it('mostra todo mundo numa grade só, com o grupo etiquetado em cada card', async () => {
     mockApi({
       monthRef: '2026-08',
       total: 3,
@@ -86,10 +87,13 @@ describe('MonthlyHighlightsTab', () => {
 
     wrap()
 
-    expect(await screen.findByRole('heading', { name: 'Produto' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Receita' })).toBeInTheDocument()
-    expect(screen.getByText('Bia')).toBeInTheDocument()
+    expect(await screen.findByText('Bia')).toBeInTheDocument()
     expect(screen.getByText('Caio')).toBeInTheDocument()
+    expect(screen.getByText('Duda')).toBeInTheDocument()
+    // A etiqueta acompanha a pessoa: o grupo deixou de ser título de seção.
+    expect(screen.getAllByText('Produto')).toHaveLength(2)
+    expect(screen.getAllByText('Receita')).toHaveLength(1)
+    expect(screen.queryByRole('heading', { name: 'Produto' })).toBeNull()
   })
 
   it('mês vazio traz o texto oficial da G&G — sem botão para quem não administra', async () => {
@@ -120,6 +124,34 @@ describe('MonthlyHighlightsTab', () => {
     // Só os ids: nome, setor e foto vêm do cadastro na hora de exibir.
     expect(body.userIds).toEqual(['u9', 'u8'])
     expect(Object.keys(body).sort()).toEqual(['monthRef', 'userIds'])
+  })
+
+  it('abre no último mês registrado quando o mês corrente ainda está vazio', async () => {
+    const current = currentMonthRef()
+    const [year, month] = current.split('-').map(Number)
+    const previous = `${month === 1 ? year - 1 : year}-${String(month === 1 ? 12 : month - 1).padStart(2, '0')}`
+    const spy = mockApi(
+      {
+        monthRef: previous,
+        total: 1,
+        canManage: false,
+        groups: [{ group: { id: 'g-Produto', name: 'Produto' }, people: [highlight('h1', 'Bia', 'Produto')] }],
+      },
+      [previous],
+    )
+
+    wrap()
+
+    expect(await screen.findByText('Bia')).toBeInTheDocument()
+    expect(spy).toHaveBeenCalledWith(`/monthly-highlights?monthRef=${previous}`)
+    expect(spy).not.toHaveBeenCalledWith(`/monthly-highlights?monthRef=${current}`)
+    expect(screen.getByText(/mostrando os de/i)).toBeInTheDocument()
+  })
+
+  it('defaultMonthRef prefere o mês corrente e ignora mês futuro', () => {
+    expect(defaultMonthRef(['2026-09', '2026-08', '2026-06'], '2026-08')).toBe('2026-08')
+    expect(defaultMonthRef(['2026-09', '2026-07'], '2026-08')).toBe('2026-07')
+    expect(defaultMonthRef([], '2026-08')).toBe('2026-08')
   })
 
   it('a justificativa aparece no card quando existe', async () => {

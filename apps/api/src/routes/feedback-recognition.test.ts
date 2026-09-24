@@ -358,6 +358,110 @@ describe('público na origem, busca e filtro do mural', () => {
   })
 })
 
+describe('responder a um feedback avisa quem está na conversa', () => {
+  /** Notificações de resposta de um usuário, mais novas primeiro. */
+  async function respostas(userId: string) {
+    return prisma.notification.findMany({
+      where: { userId, type: 'FEEDBACK_COMMENT' },
+      orderBy: { createdAt: 'desc' },
+    })
+  }
+
+  it('avisa quem escreveu e quem recebeu — nunca quem respondeu', async () => {
+    const { app, token, authorId } = await setup()
+    const bia = await makeUser('Bia')
+    const criado = await app.inject({
+      method: 'POST',
+      url: `/users/${bia.id}/feedbacks`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { message: MESSAGE, category: 'POSITIVO' },
+    })
+    const id = criado.json().feedback.id
+
+    await app.inject({
+      method: 'POST',
+      url: `/feedbacks/${id}/comments`,
+      headers: { authorization: `Bearer ${tokenFor(app, bia)}` },
+      payload: { message: 'Obrigada, isso me ajudou muito!' },
+    })
+
+    const daAna = await respostas(authorId)
+    expect(daAna).toHaveLength(1)
+    expect(daAna[0].title).toBe('Bia respondeu a um feedback seu')
+    // O link é o deep-link do perfil de quem recebeu: é lá que a conversa abre.
+    expect(daAna[0].link).toBe(`/perfil/${bia.id}?feedback=${id}`)
+    expect(await respostas(bia.id)).toHaveLength(0)
+    await app.close()
+  })
+
+  it('quem já tinha respondido fica sabendo que a conversa continuou, com outro texto', async () => {
+    const { app, token, authorId } = await setup()
+    const [bia, carla, dani] = await Promise.all([makeUser('Bia'), makeUser('Carla'), makeUser('Dani')])
+    const criado = await app.inject({
+      method: 'POST',
+      url: `/users/${bia.id}/feedbacks`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { message: MESSAGE, category: 'POSITIVO', isPublic: true },
+    })
+    const id = criado.json().feedback.id
+
+    for (const quem of [carla, dani]) {
+      await app.inject({
+        method: 'POST',
+        url: `/feedbacks/${id}/comments`,
+        headers: { authorization: `Bearer ${tokenFor(app, quem)}` },
+        payload: { message: `Concordo, assinado ${quem.name}.` },
+      })
+    }
+
+    // Carla não é dona do feedback — só respondeu antes.
+    const daCarla = await respostas(carla.id)
+    expect(daCarla).toHaveLength(1)
+    expect(daCarla[0].title).toBe('Dani também respondeu a um feedback que você respondeu')
+    // Ana escreveu e Bia recebeu: para as duas é "um feedback seu", nas duas respostas.
+    expect((await respostas(authorId)).map((n) => n.title)).toEqual([
+      'Dani respondeu a um feedback seu',
+      'Carla respondeu a um feedback seu',
+    ])
+    expect(await respostas(bia.id)).toHaveLength(2)
+    expect(await respostas(dani.id)).toHaveLength(0)
+    await app.close()
+  })
+
+  it('quem é dono E já respondeu recebe um aviso só, o de dono', async () => {
+    const { app, token, authorId } = await setup()
+    const bia = await makeUser('Bia')
+    const criado = await app.inject({
+      method: 'POST',
+      url: `/users/${bia.id}/feedbacks`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { message: MESSAGE, category: 'POSITIVO' },
+    })
+    const id = criado.json().feedback.id
+
+    // Bia responde, e depois Ana — que escreveu o feedback — responde de volta.
+    await app.inject({
+      method: 'POST',
+      url: `/feedbacks/${id}/comments`,
+      headers: { authorization: `Bearer ${tokenFor(app, bia)}` },
+      payload: { message: 'Obrigada!' },
+    })
+    await app.inject({
+      method: 'POST',
+      url: `/feedbacks/${id}/comments`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { message: 'Merecido, de verdade.' },
+    })
+
+    const daBia = await respostas(bia.id)
+    expect(daBia).toHaveLength(1)
+    expect(daBia[0].title).toBe('Ana respondeu a um feedback seu')
+    // Ana só foi avisada da resposta da Bia, não da própria.
+    expect(await respostas(authorId)).toHaveLength(1)
+    await app.close()
+  })
+})
+
 describe('comentários herdam a visibilidade do feedback', () => {
   it('destinatário comenta; terceiro não enxerga feedback privado (404)', async () => {
     const { app, token } = await setup()

@@ -23,12 +23,15 @@ vi.mock('../../auth/AuthContext', () => ({
 
 const mockApiFetch = apiFetch as unknown as Mock
 
+/** Temas do catálogo que o mock devolve; cada teste ajusta antes de renderizar. */
+let badgeCategories: unknown[] = []
+
 function setupFetch() {
   mockApiFetch.mockImplementation((path: string, options?: RequestInit) => {
     const method = options?.method
     if (path === '/admin/badges' && !method) {
       return Promise.resolve({
-        badges: [{ id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 votos em Colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', global: true, sectorIds: [] }],
+        badges: [{ id: 'b1', slug: 'conector', name: 'Conector do Time', description: '5 votos em Colaboração', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] }],
       })
     }
     if (path === '/admin/sectors' && !method) {
@@ -45,17 +48,23 @@ function setupFetch() {
     if (path === '/admin/users/u9/badges' && !method) {
       return Promise.resolve({
         badges: [
-          { id: 'ub1', badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', global: true, sectorIds: [] }, awardedAt: '2026-06-01T00:00:00.000Z', source: 'MANUAL', awardedBy: { id: 'a1', name: 'Admin' } },
+          { id: 'ub1', badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] }, awardedAt: '2026-06-01T00:00:00.000Z', source: 'MANUAL', awardedBy: { id: 'a1', name: 'Admin' } },
         ],
       })
     }
     if (path === '/admin/users/u9/badges' && method === 'POST') {
       return Promise.resolve({
-        badge: { id: 'ub2', badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', global: true, sectorIds: [] }, awardedAt: '2026-06-02T00:00:00.000Z', source: 'MANUAL', awardedBy: { id: 'a1', name: 'Admin' } },
+        badge: { id: 'ub2', badge: { id: 'b1', slug: 'conector', name: 'Conector do Time', description: 'd', kind: 'CATEGORY', iconKey: 'link', threshold: 5, categorySlug: 'colaboracao', badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] }, awardedAt: '2026-06-02T00:00:00.000Z', source: 'MANUAL', awardedBy: { id: 'a1', name: 'Admin' } },
       })
     }
     if (path.startsWith('/admin/users/u9/badges/') && method === 'DELETE') {
       return Promise.resolve({})
+    }
+    if (path === '/admin/badge-categories' && !method) {
+      return Promise.resolve({ categories: badgeCategories })
+    }
+    if (path.startsWith('/admin/badge-claims') && !method) {
+      return Promise.resolve({ claims: [] })
     }
     return Promise.reject(new Error(`unexpected ${path} ${method ?? ''}`))
   })
@@ -78,6 +87,7 @@ async function pickOption(comboboxName: string, optionName: string) {
 describe('BadgesSection — atribuição manual', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    badgeCategories = []
     setupFetch()
   })
 
@@ -123,8 +133,8 @@ describe('BadgesSection — global/setores', () => {
       if (path === '/admin/badges' && !method) {
         return Promise.resolve({
           badges: [
-            { id: 'b1', slug: 'global-badge', name: 'Selo Global', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1, categorySlug: null, global: true, sectorIds: [] },
-            { id: 'b2', slug: 'setor-badge', name: 'Selo Comercial', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1, categorySlug: null, global: false, sectorIds: ['s1'] },
+            { id: 'b1', slug: 'global-badge', name: 'Selo Global', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: true, sectorIds: [] },
+            { id: 'b2', slug: 'setor-badge', name: 'Selo Comercial', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1, categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, global: false, sectorIds: ['s1'] },
           ],
         })
       }
@@ -133,31 +143,40 @@ describe('BadgesSection — global/setores', () => {
       }
       if (path === '/admin/users' && !method) return Promise.resolve({ users: [] })
       if (path === '/admin/categories' && !method) return Promise.resolve({ categories: [] })
+      if (path === '/admin/badge-categories' && !method) return Promise.resolve({ categories: [] })
+      if (path.startsWith('/admin/badge-claims') && !method) return Promise.resolve({ claims: [] })
       return Promise.reject(new Error(`unexpected ${path} ${method ?? ''}`))
     })
   })
 
   it('busca o catálogo em /admin/badges (não em /badges)', async () => {
     renderSection()
-    await screen.findByRole('button', { name: /global \(1\)/i })
+    await screen.findByRole('button', { name: /sem categoria \(2\)/i })
     expect(mockApiFetch).toHaveBeenCalledWith('/admin/badges')
     expect(mockApiFetch).not.toHaveBeenCalledWith('/badges')
   })
 
-  it('agrupa selos em Global e por setor, recolhido por padrão', async () => {
+  /**
+   * O agrupamento deixou de ser por setor e passou a ser por TEMA (Documento 4,
+   * seção 11.3). O escopo por setor continua sendo regra de verdade — só deixou
+   * de ser o eixo da gaveta e virou etiqueta do item.
+   */
+  it('agrupa por tema, recolhido por padrão, com o setor como etiqueta do item', async () => {
     renderSection()
-    const globalToggle = await screen.findByRole('button', { name: /global \(1\)/i })
-    const sectorToggle = screen.getByRole('button', { name: /comercial \(1\)/i })
+    const gaveta = await screen.findByRole('button', { name: /sem categoria \(2\)/i })
     expect(screen.queryByText('Selo Global')).not.toBeInTheDocument()
-    fireEvent.click(globalToggle)
+
+    fireEvent.click(gaveta)
+
     expect(screen.getByText('Selo Global')).toBeInTheDocument()
-    fireEvent.click(sectorToggle)
     expect(screen.getByText('Selo Comercial')).toBeInTheDocument()
+    // Só o não-global carrega a etiqueta de setor, na linha de metadados.
+    expect(screen.getByText(/Impacto · limiar 1 · Comercial$/)).toBeInTheDocument()
   })
 
   it('envia global/sectorIds ao criar um selo específico de setor', async () => {
     renderSection()
-    await screen.findByRole('button', { name: /global \(1\)/i })
+    await screen.findByRole('button', { name: /sem categoria \(2\)/i })
     fireEvent.click(screen.getByRole('button', { name: '+ Adicionar selo' }))
     fireEvent.change(screen.getByLabelText('Nome do selo'), { target: { value: 'Novo Selo' } })
     fireEvent.change(screen.getByLabelText('Descrição do selo'), { target: { value: 'Descrição' } })
@@ -182,5 +201,74 @@ describe('BadgesSection — Subadmin', () => {
     renderSection()
     fireEvent.click(screen.getByRole('button', { name: '+ Adicionar selo' }))
     expect(screen.queryByLabelText(/^global$/i)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Documento 4, seção 11.3: o catálogo era agrupado por SETOR, e a pergunta
+ * "quantos selos de Cultura existem" não tinha resposta na tela.
+ */
+describe('BadgesSection — catálogo por tema', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    badgeCategories = [{ id: 'cat1', name: 'Cultura', slug: 'cultura', order: 0, active: true, badgeCount: 0 }]
+    setupFetch()
+  })
+
+  it('agrupa por tema, com contador — e o selo sem tema cai em "Sem categoria"', async () => {
+    renderSection()
+
+    // O único selo do mock não tem tema.
+    expect(await screen.findByRole('button', { name: /Sem categoria \(1\)/ })).toBeInTheDocument()
+    // Gaveta vazia não vira cabeçalho: contador zero não informa nada.
+    expect(screen.queryByRole('button', { name: /^Cultura/ })).toBeNull()
+  })
+
+  it('cada selo tem Atribuir e Excluir', async () => {
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Sem categoria/ }))
+    expect(screen.getByLabelText('Atribuir selo Conector do Time')).toBeInTheDocument()
+    expect(screen.getByLabelText('Excluir selo Conector do Time')).toBeInTheDocument()
+  })
+
+  it('"Atribuir" abre o seletor de pessoa daquele selo', async () => {
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Sem categoria/ }))
+    fireEvent.click(screen.getByLabelText('Atribuir selo Conector do Time'))
+
+    expect(await screen.findByRole('heading', { name: 'Atribuir "Conector do Time"' })).toBeInTheDocument()
+    await pickOption('Pessoa que recebe o selo', 'Diego Reis')
+    fireEvent.click(screen.getByRole('button', { name: 'Atribuir' }))
+
+    await waitFor(() =>
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        '/admin/users/u9/badges',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ badgeId: 'b1' }) }),
+      ),
+    )
+  })
+
+  it('o formulário aceita tema e as duas recompensas, e vazio não vira zero', async () => {
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '+ Adicionar selo' }))
+    fireEvent.change(screen.getByLabelText('Nome do selo'), { target: { value: 'Novo selo' } })
+    fireEvent.change(screen.getByLabelText('Descrição do selo'), { target: { value: 'Descrição.' } })
+    fireEvent.change(screen.getByLabelText('Recompensa em Pontos'), { target: { value: '50' } })
+    // EMR Coins fica vazio de propósito: os dois campos são opcionais.
+    fireEvent.click(screen.getByRole('button', { name: 'Criar selo' }))
+
+    await waitFor(() => {
+      const chamada = mockApiFetch.mock.calls.find(
+        ([path, options]) => path === '/admin/badges' && options?.method === 'POST',
+      )
+      expect(chamada).toBeTruthy()
+      const corpo = JSON.parse(chamada![1].body)
+      expect(corpo.rewardPoints).toBe(50)
+      expect(corpo.rewardCoins).toBeNull()
+      expect(corpo.badgeCategoryId).toBeNull()
+    })
   })
 })

@@ -71,14 +71,14 @@ export function HomePage({ now = new Date() }: { now?: Date }) {
       <div className="grid items-start gap-lg lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)_400px]">
         {user && <HomeProfileCard />}
 
-        <div className="flex flex-col gap-lg">
+        <div className="flex min-w-0 flex-col gap-lg">
           {showCorporateMural && <CorporateFeedPreview />}
           <FeedbackWallSection />
         </div>
 
         {/* Em xl a coluna da direita é própria; abaixo disso ela vira uma faixa
             de cards lado a lado, para não empurrar o feed para baixo da dobra. */}
-        <div className="grid gap-lg sm:grid-cols-2 lg:col-span-2 xl:col-span-1 xl:grid-cols-1">
+        <div className="grid min-w-0 gap-lg sm:grid-cols-2 lg:col-span-2 xl:col-span-1 xl:grid-cols-1">
           <BirthdaysCard />
           <WorkAnniversariesCard />
           <MonthVacationsCard />

@@ -5,8 +5,8 @@ import type { PublicUser } from '@legends/shared'
 import { MentionTextarea } from './MentionTextarea'
 
 const colleagues: PublicUser[] = [
-  { id: 'u1', name: 'Karina Akina', email: '', role: 'LEGEND', area: null, position: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
-  { id: 'u2', name: 'Bruno Lima', email: '', role: 'LEGEND', area: null, position: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
+  { id: 'u1', name: 'Karina Akina', email: '', role: 'LEGEND', area: null, position: null, positionCategory: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
+  { id: 'u2', name: 'Bruno Lima', email: '', role: 'LEGEND', area: null, position: null, positionCategory: null, squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false },
 ]
 
 function Harness({ onEnterSubmit }: { onEnterSubmit?: () => void } = {}) {

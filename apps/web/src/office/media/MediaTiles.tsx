@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { LocalVideoTrack, RemoteVideoTrack } from 'livekit-client'
 import type { AvatarStyleKey, CharacterOptions, OfficeOccupant } from '@legends/shared'
@@ -120,17 +120,20 @@ function PaginationControls({
   const start = page * pageSize + 1
   const end = Math.min(total, (page + 1) * pageSize)
   return (
-    <div className="flex shrink-0 items-center justify-center gap-xs rounded-full bg-white/10 px-xs py-xs text-white/85">
+    /* `mx-auto w-fit`: filha de um flex-col, a pílula esticava de ponta a
+       ponta da tela e virava uma barra atravessada. Do tamanho do conteúdo e
+       centrada, ela lê como controle, não como divisória. */
+    <div className="mx-auto flex w-fit shrink-0 items-center gap-1 rounded-full bg-white/10 px-1 py-0.5 text-white/85 backdrop-blur-sm">
       <button
         type="button"
         aria-label={`Página anterior de ${label}`}
         disabled={page === 0}
         onClick={() => onPageChange(Math.max(0, page - 1))}
-        className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+        className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
       >
-        <Icon name="chevron_left" className="text-[20px]" />
+        <Icon name="chevron_left" className="text-[18px]" />
       </button>
-      <span className="min-w-[6.25rem] text-center font-label text-label-sm">
+      <span className="min-w-[5.5rem] text-center font-label text-label-sm tabular-nums">
         {start}-{end} de {total}
       </span>
       <button
@@ -138,10 +141,87 @@ function PaginationControls({
         aria-label={`Próxima página de ${label}`}
         disabled={page >= pages - 1}
         onClick={() => onPageChange(Math.min(pages - 1, page + 1))}
-        className="flex h-8 w-8 items-center justify-center rounded-full hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+        className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
       >
-        <Icon name="chevron_right" className="text-[20px]" />
+        <Icon name="chevron_right" className="text-[18px]" />
       </button>
+    </div>
+  )
+}
+
+/**
+ * Tirar alguém da chamada, do próprio tile. Fica aqui (e não só no card do
+ * personagem) porque a grade é onde se enxerga quem está na conversa — é lá
+ * que a pessoa é notada e que a ação é procurada.
+ */
+function RemoveFromRoomButton({ name, onRemove }: { name: string; onRemove: () => void }) {
+  return (
+    <button
+      type="button"
+      title={`Remover ${name} da reunião`}
+      aria-label={`Remover ${name} da reunião`}
+      onClick={(e) => {
+        // O tile inteiro é clicável (destaca/desafixa) — sem isto, remover
+        // também mexeria no destaque.
+        e.stopPropagation()
+        onRemove()
+      }}
+      className="flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white/90 backdrop-blur-sm transition-colors hover:bg-error hover:text-on-error focus-visible:bg-error focus-visible:text-on-error"
+    >
+      <Icon name="person_remove" className="text-[17px]" />
+    </button>
+  )
+}
+
+/**
+ * Faixa de ações do tile, no canto superior direito.
+ *
+ * Só aparece no hover/foco: numa sala cheia, um controle fixo por pessoa vira
+ * ruído sobre o próprio conteúdo que se quer ver. `focus-within` mantém o
+ * caminho de teclado — sem ele, quem navega por Tab nunca alcançaria o botão.
+ */
+function TileActions({ children }: { children: ReactNode }) {
+  return (
+    <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+      {children}
+    </div>
+  )
+}
+
+/**
+ * Identidade da pessoa DENTRO do quadro: nome e estado do microfone juntos,
+ * sobre um véu que garante leitura em cima de vídeo claro.
+ *
+ * Antes o nome era uma legenda solta abaixo do tile e o selo de mic flutuava
+ * na borda do avatar — em grade, os dois se descolavam do rosto a que se
+ * referiam. Juntos e ancorados na base, a leitura é imediata.
+ */
+function TileIdentity({
+  label,
+  micOpen,
+  speaking,
+}: {
+  label: string
+  micOpen: boolean | null
+  speaking: boolean
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 rounded-b-lg bg-gradient-to-t from-black/75 via-black/45 to-transparent px-2.5 pb-2 pt-6">
+      {micOpen !== null && (
+        /* `Icon` é sempre `aria-hidden` — o rótulo (e o pulso de quem fala)
+           vivem neste wrapper, que é o elemento acessível do estado do mic. */
+        <span
+          aria-label={micOpen ? 'Microfone aberto' : 'Microfone mudo'}
+          title={micOpen ? 'Microfone aberto' : 'Microfone mudo'}
+          className={`flex shrink-0 items-center ${speaking ? 'mic-speaking' : ''}`}
+        >
+          <Icon
+            name={micOpen ? 'mic' : 'mic_off'}
+            className={`text-[15px] ${micOpen ? (speaking ? 'text-primary' : 'text-white/85') : 'text-error'}`}
+          />
+        </span>
+      )}
+      <span className="truncate font-label text-label-sm font-medium text-white">{label}</span>
     </div>
   )
 }
@@ -157,6 +237,7 @@ function VideoTile({
   speaking = false,
   micOpen = null,
   volumeControl = null,
+  onRemove = null,
   annotation = null,
 }: {
   track: RemoteVideoTrack | LocalVideoTrack
@@ -170,6 +251,8 @@ function VideoTile({
   /** `null` = tile sem mic próprio (ex.: tela compartilhada) — sem selo. */
   micOpen?: boolean | null
   volumeControl?: { value: number; onChange: (volume: number) => void } | null
+  /** Ausente quando você não modera a sala desta pessoa. */
+  onRemove?: (() => void) | null
   /** Overlay de riscar — só o tile de tela em destaque recebe. */
   annotation?: { sharerId: string; state: ScreenAnnotationsState; active: boolean } | null
 }) {
@@ -183,14 +266,18 @@ function VideoTile({
     }
   }, [track])
   return (
-    <figure className={`${className} cursor-pointer`} onClick={onClick}>
-      <div className="relative min-h-0 flex-1">
+    <figure className={`${className} group cursor-pointer`} onClick={onClick}>
+      <div
+        className={`relative min-h-0 flex-1 overflow-hidden rounded-lg bg-black/40 ring-1 transition-shadow ${
+          speaking ? 'ring-2 ring-primary' : 'ring-white/10'
+        }`}
+      >
         {raisedIndex !== null && <RaisedHandBadge position={raisedIndex + 1} />}
         <video
           ref={ref}
           autoPlay
           playsInline
-          className={`${videoClassName} rounded-md bg-black ${mirrored ? 'scale-x-[-1]' : ''} ${
+          className={`${videoClassName} ${mirrored ? 'scale-x-[-1]' : ''} ${
             raisedIndex !== null ? 'ring-4 ring-yellow-400' : ''
           }`}
         />
@@ -202,20 +289,21 @@ function VideoTile({
             videoRef={ref}
           />
         )}
-        {volumeControl && (
-          <UserVolumeControl
-            name={label}
-            volume={volumeControl.value}
-            onVolumeChange={volumeControl.onChange}
-            compact
-            className="absolute left-2 top-2 z-20"
-          />
+        <TileIdentity label={label} micOpen={micOpen} speaking={speaking} />
+        {(volumeControl || onRemove) && (
+          <TileActions>
+            {volumeControl && (
+              <UserVolumeControl
+                name={label}
+                volume={volumeControl.value}
+                onVolumeChange={volumeControl.onChange}
+                compact
+              />
+            )}
+            {onRemove && <RemoveFromRoomButton name={label} onRemove={onRemove} />}
+          </TileActions>
         )}
-        {micOpen !== null && <MicBadge micOpen={micOpen} speaking={speaking} />}
       </div>
-      {/* O nome fica direto no palco preto, então segue o palco (branco), e não
-          o `on-surface-variant` do tema — que num tenant claro é cinza escuro. */}
-      <figcaption className="truncate font-label text-label-sm text-white/85">{label}</figcaption>
     </figure>
   )
 }
@@ -231,6 +319,7 @@ function AvatarTile({
   micOpen = false,
   raisedIndex = null,
   volumeControl = null,
+  onRemove = null,
 }: {
   user: AvatarSource
   label: string
@@ -243,33 +332,30 @@ function AvatarTile({
   micOpen?: boolean
   raisedIndex?: number | null
   volumeControl?: { value: number; onChange: (volume: number) => void } | null
+  /** Ausente quando você não modera a sala desta pessoa. */
+  onRemove?: (() => void) | null
 }) {
   return (
-    <figure className={`${className} cursor-pointer`} onClick={onClick}>
+    <figure className={`${className} group cursor-pointer`} onClick={onClick}>
       <div
         /*
          * O campo do tile é PALCO, não superfície do tema: `bg-white/10` sobre
-         * o `bg-black/90` do overlay. Com `surface-container-highest` ele saía
-         * quase branco num tenant claro e virava um retângulo ofuscante do
-         * tamanho da tela — a marca continua no anel do avatar e no painel
-         * lateral, que é onde ela é conteúdo. Translúcido de propósito: o mesmo
-         * valor serve aos dois esquemas, sem alpha diferente por tenant.
+         * o fundo do overlay. Com `surface-container-highest` ele saía quase
+         * branco num tenant claro e virava um retângulo ofuscante do tamanho da
+         * tela — a marca continua no anel do avatar e no painel lateral, que é
+         * onde ela é conteúdo. Translúcido de propósito: o mesmo valor serve
+         * aos dois esquemas, sem alpha diferente por tenant.
          */
-        className={`relative flex items-center justify-center overflow-hidden rounded-md bg-white/10 ${
-          fill || circle ? 'min-h-0 w-full flex-1' : 'aspect-square w-full'
-        }`}
+        className={`relative flex items-center justify-center overflow-hidden rounded-lg bg-white/[0.07] ring-1 transition-shadow ${
+          speaking ? 'ring-2 ring-primary' : 'ring-white/10'
+        } ${fill || circle ? 'min-h-0 w-full flex-1' : 'aspect-square w-full'}`}
       >
-        {volumeControl && (
-          <UserVolumeControl
-            name={label}
-            volume={volumeControl.value}
-            onVolumeChange={volumeControl.onChange}
-            compact
-            className="absolute left-2 top-2 z-20"
-          />
-        )}
         {circle ? (
-          <div className="relative flex aspect-square h-[65%] shrink-0 items-center justify-center">
+          /*
+           * Teto de tamanho: sem ele, um único participante rende um círculo do
+           * tamanho da tela, com o avatar perdido no meio de um vazio enorme.
+           */
+          <div className="relative flex aspect-square h-[65%] max-h-[13rem] shrink-0 items-center justify-center">
             {speaking && (
               <>
                 <span className="speaking-wave" style={{ animationDelay: '0s' }} aria-hidden="true" />
@@ -278,24 +364,37 @@ function AvatarTile({
               </>
             )}
             {raisedIndex !== null && <RaisedHandBadge position={raisedIndex + 1} />}
+            {/* `flex items-center justify-center`: quem não tem foto nem
+                personagem cai nas INICIAIS, que são um <span> — sem centrar, o
+                texto encostava na borda e o círculo parecia vazio. */}
             <div
-              className={`relative h-full w-full overflow-hidden rounded-full border-4 bg-surface-container-highest ${
+              className={`relative flex h-full w-full items-center justify-center overflow-hidden rounded-full border-4 bg-surface-container-highest ${
                 raisedIndex !== null ? 'border-yellow-400' : 'border-primary'
               }`}
             >
-              <Avatar preferCharacter user={user} initialsClassName="font-label text-label-lg font-bold text-primary" />
+              <Avatar preferCharacter user={user} initialsClassName="font-label text-headline-sm font-bold text-primary" />
             </div>
-            <MicBadge micOpen={micOpen} speaking={speaking} />
           </div>
         ) : (
-          <div className="relative h-full w-full">
+          <div className="relative flex h-full w-full items-center justify-center">
             <Avatar preferCharacter user={user} initialsClassName="font-label text-label-lg font-bold text-primary" />
           </div>
         )}
+        <TileIdentity label={label} micOpen={micOpen} speaking={speaking} />
+        {(volumeControl || onRemove) && (
+          <TileActions>
+            {volumeControl && (
+              <UserVolumeControl
+                name={label}
+                volume={volumeControl.value}
+                onVolumeChange={volumeControl.onChange}
+                compact
+              />
+            )}
+            {onRemove && <RemoveFromRoomButton name={label} onRemove={onRemove} />}
+          </TileActions>
+        )}
       </div>
-      {/* O nome fica direto no palco preto, então segue o palco (branco), e não
-          o `on-surface-variant` do tema — que num tenant claro é cinza escuro. */}
-      <figcaption className="truncate font-label text-label-sm text-white/85">{label}</figcaption>
     </figure>
   )
 }
@@ -455,6 +554,8 @@ export function MediaTiles({
   expanded = false,
   onToggleExpanded = () => {},
   showAllPresent = false,
+  removableUserIds,
+  onRemoveFromRoom,
   screenShareOrder = new Map(),
   roomPanel = null,
   roomChatMessages = [],
@@ -483,6 +584,10 @@ export function MediaTiles({
   expanded?: boolean
   onToggleExpanded?: () => void
   showAllPresent?: boolean
+  /** Quem está na mesma sala que você: só esses podem ser removidos. */
+  removableUserIds?: readonly string[]
+  /** Ausente quando você não modera a sala — o botão nem aparece. */
+  onRemoveFromRoom?: (userId: string) => void
   screenShareOrder?: ReadonlyMap<string, number>
   roomPanel?: 'chat' | 'people' | null
   roomChatMessages?: RoomChatMessage[]
@@ -626,6 +731,17 @@ export function MediaTiles({
     return () => window.removeEventListener('keydown', onKey)
   }, [expanded, onToggleExpanded, annotating, canAnnotate])
 
+  const removableSet = new Set(removableUserIds ?? [])
+  /**
+   * Mesmo recorte do controle de volume: só faz sentido para OUTRA pessoa, e
+   * nunca num tile de tela compartilhada (ali não há quem remover).
+   */
+  const removeFor = (tile: Tile) => {
+    if (!onRemoveFromRoom || !tile.userId || tile.userId === youId || tile.kind === 'screen') return null
+    if (!removableSet.has(tile.userId)) return null
+    return () => onRemoveFromRoom(tile.userId!)
+  }
+
   const volumeControlFor = (tile: Tile) => {
     if (!remoteUserVolumes || !tile.userId || tile.userId === youId || tile.kind === 'screen') return null
     return {
@@ -638,7 +754,11 @@ export function MediaTiles({
     <div>
       {expanded && hasVisible && createPortal(
         <div
-          className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-black/90"
+          /* O palco isola: com `bg-black/90` o mapa continuava legível por
+             trás dos tiles e competia com os rostos. Um véu quase opaco, com
+             desfoque, mantém a noção de que o escritório está ali sem disputar
+             atenção. Preto tingido (não `#000`) para acompanhar a superfície. */
+          className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[#0d0d10]/95 backdrop-blur-md"
           role="region"
           aria-label="Câmeras em tela cheia"
         >
@@ -685,6 +805,7 @@ export function MediaTiles({
                         micOpen={featured.micOpen}
                         raisedIndex={featured.raisedIndex}
                         volumeControl={volumeControlFor(featured)}
+                        onRemove={removeFor(featured)}
                         // Clicar no destaque desfaz o pin e volta pro grid
                         // uniforme — só faz sentido pra pessoa (avatar/câmera);
                         // tela compartilhada sempre reassume o destaque
@@ -703,6 +824,7 @@ export function MediaTiles({
                         speaking={featured.speaking}
                         micOpen={featured.kind === 'camera' ? featured.micOpen : null}
                         volumeControl={volumeControlFor(featured)}
+                        onRemove={removeFor(featured)}
                         annotation={
                           annotations && annotationSharerId
                             ? { sharerId: annotationSharerId, state: annotations, active: annotating }
@@ -730,6 +852,7 @@ export function MediaTiles({
                             micOpen={t.micOpen}
                             raisedIndex={t.raisedIndex}
                             volumeControl={volumeControlFor(t)}
+                            onRemove={removeFor(t)}
                             onClick={() => setFeaturedPin(t.key)}
                           />
                         ) : (
@@ -744,6 +867,7 @@ export function MediaTiles({
                             speaking={t.speaking}
                             micOpen={t.kind === 'camera' ? t.micOpen : null}
                             volumeControl={volumeControlFor(t)}
+                            onRemove={removeFor(t)}
                             onClick={() => setFeaturedPin(t.key)}
                           />
                         ),
@@ -760,12 +884,24 @@ export function MediaTiles({
                 </div>
               ) : (
                 <div className="flex h-full min-h-0 w-full flex-col gap-sm">
+                  {/*
+                    * Teto de largura por coluna, e centralizado: sem ele, uma
+                    * pessoa sozinha rende um quadro do tamanho da tela, com o
+                    * nome na borda inferior e o avatar solto no meio. O limite
+                    * mantém a proporção de um quadro de chamada em qualquer
+                    * contagem de participantes.
+                    */}
                   <div
-                    className="grid min-h-0 flex-1 gap-md"
+                    className="mx-auto grid min-h-0 w-full flex-1 gap-md"
                     data-testid="uniform-grid"
                     style={{
                       gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`,
                       gridTemplateRows: `repeat(${gridRows}, minmax(0, 1fr))`,
+                      maxWidth: `${gridCols * 30}rem`,
+                      // Altura na mesma proporção da largura: só o teto de
+                      // largura ainda deixava um quadro alto e estreito quando
+                      // sobrava altura de tela.
+                      maxHeight: `${gridRows * 19}rem`,
                     }}
                   >
                     {visibleGridTiles.map((tile) =>
@@ -780,6 +916,7 @@ export function MediaTiles({
                           micOpen={tile.micOpen}
                           raisedIndex={tile.raisedIndex}
                           volumeControl={volumeControlFor(tile)}
+                          onRemove={removeFor(tile)}
                           onClick={() => setFeaturedPin(tile.key)}
                         />
                       ) : (
@@ -794,6 +931,7 @@ export function MediaTiles({
                           speaking={tile.speaking}
                           micOpen={tile.kind === 'camera' ? tile.micOpen : null}
                           volumeControl={volumeControlFor(tile)}
+                          onRemove={removeFor(tile)}
                           onClick={() => setFeaturedPin(tile.key)}
                         />
                       ),

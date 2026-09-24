@@ -27,7 +27,7 @@ function occ(userId: string, name: string, overrides: Partial<OfficeOccupant> = 
 }
 function pub(id: string, name: string): PublicUser {
   return {
-    id, name, email: null, role: 'LEGEND', area: null, position: 'Dev', squad: null,
+    id, name, email: null, role: 'LEGEND', area: null, position: 'Dev', positionCategory: null, squad: null,
     photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null,
     active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false,
   }
@@ -68,6 +68,65 @@ describe('menuActionsFor', () => {
   })
   it('offline → só ver perfil', () => {
     expect(menuActionsFor({ isSelf: false, isOnline: false })).toEqual(['view-profile'])
+  })
+  it('quem modera a sala ganha "remover da reunião" por último', () => {
+    expect(menuActionsFor({ isSelf: false, isOnline: true, canRemove: true })).toEqual([
+      'call',
+      'follow',
+      'view-profile',
+      'remove-from-room',
+    ])
+  })
+  it('nunca oferece remover na própria linha', () => {
+    expect(menuActionsFor({ isSelf: true, isOnline: true, canRemove: true })).toEqual(['view-profile'])
+  })
+  it('convidado também pode ser removido', () => {
+    expect(menuActionsFor({ isSelf: false, isOnline: true, isGuest: true, canRemove: true })).toEqual([
+      'call',
+      'follow',
+      'remove-from-room',
+    ])
+  })
+})
+
+describe('PeopleList — moderação da sala (#22775)', () => {
+  it('marca quem manda na sala com o selo M', () => {
+    renderList({ roomManagerId: 'bruno' })
+
+    expect(screen.getByLabelText('Responsável pela sala')).toBeInTheDocument()
+    const bruno = screen.getByText('Bruno Costa').closest('p')!
+    expect(within(bruno).getByLabelText('Responsável pela sala')).toBeInTheDocument()
+  })
+
+  it('sem manager na sala, ninguém leva selo', () => {
+    renderList()
+    expect(screen.queryByLabelText('Responsável pela sala')).not.toBeInTheDocument()
+  })
+
+  it('remove quem está na mesma sala', async () => {
+    const onRemoveFromRoom = vi.fn()
+    renderList({ removableUserIds: ['bruno'], onRemoveFromRoom })
+
+    fireEvent.click(screen.getByLabelText('Ações para Bruno Costa'))
+    fireEvent.click(await screen.findByText('Remover da reunião'))
+
+    expect(onRemoveFromRoom).toHaveBeenCalledWith('bruno')
+  })
+
+  it('quem não modera não vê a ação', async () => {
+    renderList({ removableUserIds: ['bruno'] }) // sem onRemoveFromRoom
+
+    fireEvent.click(screen.getByLabelText('Ações para Bruno Costa'))
+    await screen.findByText('Chamar')
+    expect(screen.queryByText('Remover da reunião')).not.toBeInTheDocument()
+  })
+
+  it('não oferece remover quem está fora da sala', async () => {
+    renderList({ removableUserIds: [], onRemoveFromRoom: vi.fn() })
+
+    fireEvent.click(screen.getByLabelText('Ações para Bruno Costa'))
+    await screen.findByText('Chamar')
+    expect(screen.queryByText('Remover da reunião')).not.toBeInTheDocument()
   })
 })
 

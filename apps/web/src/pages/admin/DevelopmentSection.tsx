@@ -13,7 +13,8 @@ import { Panel, inputCls } from './shared'
 export function DevelopmentSection() {
   const qc = useQueryClient()
   const [impulseUpUrl, setImpulseUpUrl] = useState('')
-  const [inovaCommunityUrl, setInovaCommunityUrl] = useState('')
+  const [inovaModuleEnabled, setInovaModuleEnabled] = useState(false)
+  const [inovaTeamsWebhookUrl, setInovaTeamsWebhookUrl] = useState('')
   const [leaderApprovalRequired, setLeaderApprovalRequired] = useState(true)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -22,7 +23,8 @@ export function DevelopmentSection() {
   useEffect(() => {
     if (settings.data) {
       setImpulseUpUrl(settings.data.settings.impulseUpUrl ?? '')
-      setInovaCommunityUrl(settings.data.settings.inovaCommunityUrl ?? '')
+      setInovaModuleEnabled(settings.data.settings.inovaModuleEnabled)
+      setInovaTeamsWebhookUrl(settings.data.settings.inovaTeamsWebhookUrl ?? '')
       setLeaderApprovalRequired(settings.data.settings.leaderApprovalRequired)
     }
   }, [settings.data])
@@ -31,7 +33,8 @@ export function DevelopmentSection() {
     mutationFn: () =>
       updateDevelopmentSettings({
         impulseUpUrl: impulseUpUrl.trim() || null,
-        inovaCommunityUrl: inovaCommunityUrl.trim() || null,
+        inovaModuleEnabled,
+        inovaTeamsWebhookUrl: inovaTeamsWebhookUrl.trim() || null,
         leaderApprovalRequired,
       }),
     onSuccess: () => {
@@ -74,21 +77,38 @@ export function DevelopmentSection() {
             className={inputCls}
           />
           <span className="text-body-sm text-on-surface-variant">
-            Sem URL configurada, o item “Avaliações” não aparece no menu.
+            Sem URL configurada, o item "Avaliações" não aparece no menu.
+          </span>
+        </label>
+
+        <label className="flex items-start gap-sm">
+          <input
+            type="checkbox"
+            checked={inovaModuleEnabled}
+            onChange={(event) => setInovaModuleEnabled(event.target.checked)}
+            className="mt-1"
+          />
+          <span>
+            <span className="font-label text-label-md text-on-surface">Habilitar Comunidade INOVA</span>
+            <span className="block text-body-sm text-on-surface-variant">
+              Liga o módulo nativo de projetos de inovação. Sem esta opção, o item some do menu.
+            </span>
           </span>
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="font-label text-label-sm text-on-surface-variant">URL da Comunidade INOVA</span>
+          <span className="font-label text-label-sm text-on-surface-variant">
+            Webhook do Teams para notificações do INOVA
+          </span>
           <input
-            value={inovaCommunityUrl}
-            onChange={(event) => setInovaCommunityUrl(event.target.value)}
-            aria-label="URL da Comunidade INOVA"
-            placeholder="https://comunidade.suaempresa.com/"
+            value={inovaTeamsWebhookUrl}
+            onChange={(event) => setInovaTeamsWebhookUrl(event.target.value)}
+            aria-label="Webhook do Teams para notificações do INOVA"
+            placeholder="https://.../IncomingWebhook/..."
             className={inputCls}
           />
           <span className="text-body-sm text-on-surface-variant">
-            Sem URL configurada, o item “Comunidade INOVA” não aparece no menu.
+            G&amp;G recebe um aviso aqui a cada projeto criado ou atualizado. Sem URL, nenhuma notificação é enviada.
           </span>
         </label>
 

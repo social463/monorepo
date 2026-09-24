@@ -7,7 +7,7 @@ import { CorporateFeedApprovalTab } from './CorporateFeedApprovalTab'
 import * as api from '../../lib/api'
 
 const author = {
-  id: 'u2', name: 'Bia', email: 'b@x.com', role: 'LEGEND' as const, area: null, position: null,
+  id: 'u2', name: 'Bia', email: 'b@x.com', role: 'LEGEND' as const, area: null, position: null, positionCategory: null,
   squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null,
   active: true, joinedAt: '2026-01-01T00:00:00.000Z', leftAt: null, sectorId: 's1',
   companyId: 'c1', companyName: null, enabledFeatures: [], sectorFeatures: [], adminAccess: false,
@@ -22,8 +22,10 @@ const pendente: PendingCorporatePostDTO = {
   body: { blocks: [{ type: 'paragraph', spans: [{ text: 'Vamos juntar agasalhos' }] }] },
   gif: null,
   image: null,
+  poll: null,
   attachments: [],
   status: 'PENDING',
+  publishAt: null,
   audience: 'ALL',
   audienceSectors: [],
   createdAt: '2026-08-17T12:00:00.000Z',
@@ -34,6 +36,8 @@ const pendente: PendingCorporatePostDTO = {
   reactors: [],
   reactorCount: 0,
   commentCount: 0,
+  viewerRead: true,
+  tag: null,
   mentions: [],
   rejectionReason: null,
   reviewedAt: null,

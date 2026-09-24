@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { FeedbackReactionEmoji, MyFeedbackDTO, SharedFeedbackDTO } from '@legends/shared'
 import { FEEDBACK_REACTIONS } from '@legends/shared'
@@ -60,12 +60,19 @@ export function SharedFeedbackCard({
   feedback,
   onToggleReaction,
   clamp = false,
+  badge,
 }: {
   feedback: SharedFeedbackDTO | MyFeedbackDTO
   /** Ausente = card só de leitura (sem barra de reações nem respostas). */
   onToggleReaction?: (emoji: FeedbackReactionEmoji) => void
   /** Corta a mensagem em duas linhas (usado na prévia da home). */
   clamp?: boolean
+  /**
+   * Marcação sobreposta ao canto do card — o selo "Novo" da Home. Entra por
+   * prop, e não por um `<li>` em volta, porque o card JÁ é o `<li>` da lista:
+   * aninhar um dentro do outro é HTML inválido.
+   */
+  badge?: ReactNode
 }) {
   const [showComments, setShowComments] = useState(false)
   const chips = [...feedback.categories.map((c) => c.name), ...(feedback.customCategory ? [feedback.customCategory] : [])]
@@ -73,8 +80,9 @@ export function SharedFeedbackCard({
   return (
     <li
       data-testid="shared-feedback-card"
-      className="rounded-xl border border-outline-variant/30 bg-surface-container-low transition-colors hover:border-outline-variant/60"
+      className="relative rounded-xl border border-outline-variant/30 bg-surface-container-low transition-colors hover:border-outline-variant/60"
     >
+      {badge}
       <Link
         to={`/perfil/${feedback.target.id}?feedback=${feedback.id}`}
         className="block rounded-xl p-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"

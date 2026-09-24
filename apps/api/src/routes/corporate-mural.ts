@@ -7,7 +7,12 @@ import {
   CORPORATE_POST_AUDIENCES,
   CORPORATE_POST_BODY_MAX_LENGTH,
   CORPORATE_POST_REACTIONS,
+  CORPORATE_POST_TAG_NAME_MAX_LENGTH,
   CORPORATE_POST_TITLE_MAX_LENGTH,
+  CORPORATE_POST_POLL_QUESTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_OPTION_MAX_LENGTH,
+  CORPORATE_POST_POLL_MIN_OPTIONS,
+  CORPORATE_POST_POLL_MAX_OPTIONS,
   MAX_CORPORATE_POST_ATTACHMENTS,
   MAX_CORPORATE_POST_MENTIONS,
   RICH_BLOCK_TYPES,
@@ -22,6 +27,7 @@ import {
 } from '@legends/shared'
 import {
   CorporateMuralError,
+  announceCorporatePostPublished,
   approvePost,
   createComment,
   createPost,
@@ -42,6 +48,8 @@ import {
   unpinPost,
   updatePost,
   type CorporateMuralViewer,
+  voteCorporatePostPoll,
+  listCorporatePostPollVotes,
 } from '../services/corporate-mural-service'
 import {
   notifyCorporatePostApproved,
@@ -49,12 +57,24 @@ import {
   notifyCorporatePostComment,
   notifyCorporatePostCommentReply,
   notifyCorporatePostMention,
-  notifyCorporatePostPublished,
   notifyCorporatePostReaction,
   notifyCorporatePostRejected,
 } from '../services/notification-service'
 import { awardXp, revokeXp } from '../services/xp-service'
-import { toCorporatePostCommentDTO, toCorporatePostDTO, toPendingCorporatePostDTO } from '../lib/serialize'
+import {
+  toCorporatePostCommentDTO,
+  toCorporatePostDTO,
+  toPendingCorporatePostDTO,
+  toReactorRef,
+} from '../lib/serialize'
+import {
+  assertUsableTag,
+  createCorporatePostTag,
+  CorporatePostTagError,
+  listCorporatePostTags,
+  toCorporatePostTagDTO,
+  updateCorporatePostTag,
+} from '../services/corporate-post-tag-service'
 import { corporateMuralHub } from '../lib/corporate-mural-hub'
 
 /** Limite do feed: default 20, mínimo 1, máximo 50. */
@@ -130,6 +150,25 @@ const attachmentSchema = z.object({
   height: z.number().int().nonnegative().optional(),
 })
 
+/**
+ * Enquete. As mesmas regras estão em `normalizePoll`, no service — aqui elas
+ * devolvem erro de CAMPO para o formulário, lá elas valem para qualquer
+ * chamador. Duplicação deliberada, igual à da enquete da Resenha.
+ */
+const pollSchema = z
+  .object({
+    question: z.string().trim().min(1).max(CORPORATE_POST_POLL_QUESTION_MAX_LENGTH),
+    options: z
+      .array(z.string().trim().min(1).max(CORPORATE_POST_POLL_OPTION_MAX_LENGTH))
+      .min(CORPORATE_POST_POLL_MIN_OPTIONS)
+      .max(CORPORATE_POST_POLL_MAX_OPTIONS),
+  })
+  .refine(
+    (poll) =>
+      new Set(poll.options.map((opt) => opt.toLocaleLowerCase('pt-BR'))).size === poll.options.length,
+    { message: 'Use opções diferentes.', path: ['options'] },
+  )
+
 const postSchema = z.object({
   title: z.string().trim().max(CORPORATE_POST_TITLE_MAX_LENGTH).optional(),
   body: richDocSchema.optional(),
@@ -141,7 +180,34 @@ const postSchema = z.object({
   attachments: z.array(attachmentSchema).max(MAX_CORPORATE_POST_ATTACHMENTS).optional(),
   audience: z.enum(CORPORATE_POST_AUDIENCES).optional(),
   audienceSectorIds: z.array(z.string()).max(50).optional(),
+  // Tipo de comunicação (seção 13). `null` limpa; ausente não mexe.
+  tagId: z.string().min(1).nullable().optional(),
+  // `null` remove a enquete na edição; ausente não mexe.
+  poll: pollSchema.nullable().optional(),
+  /**
+   * Agendamento (Documento 4, seção 12). ISO com data e hora; ausente ou null
+   * publica na hora. Instante no passado é 400 — não é agendamento, é confusão
+   * de fuso ou dedo trocado, e publicar na hora escondendo isso seria pior.
+   */
+  publishAt: z
+    .string()
+    .datetime({ offset: true })
+    .nullable()
+    .optional()
+    .refine((valor) => !valor || new Date(valor).getTime() > Date.now(), {
+      message: 'Escolha uma data e hora no futuro para agendar o comunicado.',
+    }),
 })
+
+const tagSchema = z.object({
+  name: z.string().trim().min(1).max(CORPORATE_POST_TAG_NAME_MAX_LENGTH),
+  color: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'Use uma cor em hexadecimal, como #6CE190.')
+    .optional(),
+})
+
+const tagUpdateSchema = tagSchema.partial().extend({ active: z.boolean().optional() })
 
 const commentSchema = z
   .object({
@@ -188,16 +254,69 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
   // Fixar/moderar/medir não tem recorte de setor: quem administra, administra o
   // feed inteiro, igual ao que a exclusão já fazia.
   const adminGuard = { onRequest: [app.authenticate, app.requireAdminOrSubadmin] }
+  // O catálogo de tipos de comunicação é do bloco de G&G — a OBS da seção 13
+  // pede que a lista seja gerenciável sem depender do time de TI.
+  const tagAdminGuard = { onRequest: [app.authenticate, app.requireSectorFeature('gente-gestao')] }
+
+  /**
+   * Catálogo de tipos de comunicação. Leitura aberta a quem vê o Feed — são as
+   * pílulas do filtro e o seletor do editor; só as **ativas** viajam aqui.
+   */
+  app.get('/corporate-post-tags', guard, async (request, reply) => {
+    const tags = await listCorporatePostTags(request.user.companyId, { activeOnly: true })
+    return reply.send({ tags: tags.map(toCorporatePostTagDTO) })
+  })
+
+  /** Administração do catálogo: bloco de Gente e Gestão. */
+  app.get('/admin/corporate-post-tags', tagAdminGuard, async (request, reply) => {
+    const tags = await listCorporatePostTags(request.user.companyId)
+    return reply.send({ tags: tags.map(toCorporatePostTagDTO) })
+  })
+
+  app.post('/admin/corporate-post-tags', tagAdminGuard, async (request, reply) => {
+    const parsed = tagSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    try {
+      const tag = await createCorporatePostTag(parsed.data, request.user.companyId)
+      return reply.code(201).send({ tag: toCorporatePostTagDTO(tag) })
+    } catch (err) {
+      if (err instanceof CorporatePostTagError) return reply.code(err.status).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Renomear, recolorir e **desativar**. Não há DELETE de propósito: apagar
+   * deixaria comunicado órfão e sumiria com a série do painel de Comunicação
+   * Interna — mesma regra do catálogo de categorias de feedback.
+   */
+  app.patch('/admin/corporate-post-tags/:id', tagAdminGuard, async (request, reply) => {
+    const parsed = tagUpdateSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
+    }
+    const { id } = request.params as { id: string }
+    try {
+      const tag = await updateCorporatePostTag(id, parsed.data, request.user.companyId)
+      return reply.send({ tag: toCorporatePostTagDTO(tag) })
+    } catch (err) {
+      if (err instanceof CorporatePostTagError) return reply.code(err.status).send({ message: err.message })
+      throw err
+    }
+  })
 
   app.get('/corporate-posts', guard, async (request, reply) => {
-    const query = request.query as { cursor?: string; limit?: string }
+    const query = request.query as { cursor?: string; limit?: string; tagId?: string }
     try {
       const { items, nextCursor } = await listFeed(viewerOf(request), {
         cursor: query.cursor,
         limit: clampLimit(query.limit),
+        tagId: query.tagId,
       })
       return reply.send({
-        items: items.map((p) => toCorporatePostDTO(p, request.user.sub)),
+        items: items.map((p) => toCorporatePostDTO(p, viewerOf(request))),
         nextCursor,
         // Todo mundo publica agora; isto diz se sai publicado ou pendente, e é o
         // que a web usa para avisar "vai para aprovação" no composer.
@@ -221,7 +340,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
     const query = request.query as { mine?: string }
     try {
       const items = await listPendingPosts(viewerOf(request), { mine: query.mine === 'true' })
-      return reply.send({ items: items.map((p) => toPendingCorporatePostDTO(p, request.user.sub)) })
+      return reply.send({ items: items.map((p) => toPendingCorporatePostDTO(p, viewerOf(request))) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -236,7 +355,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string }
     try {
       const post = await getPost(id, viewerOf(request))
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -247,6 +366,9 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
     const parsed = postSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ ...invalidPost, issues: parsed.error.flatten() })
     try {
+      // Tag inativa não entra em post novo: desativar existe para tirar a
+      // categoria de circulação, e aceitá-la pelo corpo seria a porta dos fundos.
+      if (parsed.data.tagId) await assertUsableTag(parsed.data.tagId, request.user.companyId)
       const post = await createPost({
         authorId: request.user.sub,
         title: parsed.data.title,
@@ -258,11 +380,16 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
         attachments: parsed.data.attachments,
         audience: parsed.data.audience,
         audienceSectorIds: parsed.data.audienceSectorIds,
+        poll: parsed.data.poll,
+        tagId: parsed.data.tagId ?? undefined,
+        publishAt: parsed.data.publishAt ? new Date(parsed.data.publishAt) : null,
         companyId: request.user.companyId,
       })
+      // O agendado não avisa ninguém agora: quem notifica é o scheduler, no
+      // instante marcado — avisar duas vezes seria pior que não avisar.
       if (post.status === 'PUBLISHED') {
-        await announcePublished(request, post)
-      } else {
+        await announceCorporatePostPublished(post, request.user.companyId, request.log)
+      } else if (post.status === 'PENDING') {
         // Pendente não vai para o feed nem para o sininho da empresa: quem
         // precisa saber é quem aprova.
         try {
@@ -271,9 +398,11 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
           request.log.error(notifyErr)
         }
       }
-      return reply.code(201).send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.code(201).send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
-      if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
+      if (err instanceof CorporateMuralError || err instanceof CorporatePostTagError) {
+        return reply.code(err.status).send({ message: err.message })
+      }
       throw err
     }
   })
@@ -284,6 +413,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ ...invalidPost, issues: parsed.error.flatten() })
     const { id } = request.params as { id: string }
     try {
+      if (parsed.data.tagId) await assertUsableTag(parsed.data.tagId, request.user.companyId)
       const post = await updatePost({
         postId: id,
         actorId: request.user.sub,
@@ -296,11 +426,15 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
         attachments: parsed.data.attachments,
         audience: parsed.data.audience,
         audienceSectorIds: parsed.data.audienceSectorIds,
+        tagId: parsed.data.tagId,
+        poll: parsed.data.poll,
       })
       corporateMuralHub.broadcast({ type: 'post:changed', postId: id })
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
-      if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
+      if (err instanceof CorporateMuralError || err instanceof CorporatePostTagError) {
+        return reply.code(err.status).send({ message: err.message })
+      }
       throw err
     }
   })
@@ -317,8 +451,8 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
       } catch (notifyErr) {
         request.log.error(notifyErr)
       }
-      await announcePublished(request, post)
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      await announceCorporatePostPublished(post, request.user.companyId, request.log)
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -349,7 +483,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
       } catch (notifyErr) {
         request.log.error(notifyErr)
       }
-      return reply.send({ post: toPendingCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toPendingCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -459,9 +593,59 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
         }
       }
       corporateMuralHub.broadcast({ type: 'post:changed', postId: id })
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
+      throw err
+    }
+  })
+
+  /**
+   * Voto na enquete. Reusa `post:changed` no broadcast — o hub do mural é canal
+   * único e global, e o contrato manda o evento ser magro: só o id, nunca
+   * conteúdo. Quem recebe refaz a busca, e cada um recebe a sua visão do
+   * resultado (quem não votou continua sem ver número nenhum).
+   */
+  app.post('/corporate-posts/:id/poll/vote', guard, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const parsed = z.object({ optionId: z.string().min(1) }).safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ message: 'Escolha uma opção.', issues: parsed.error.flatten() })
+    }
+    try {
+      const post = await voteCorporatePostPoll({
+        postId: id,
+        optionId: parsed.data.optionId,
+        viewer: viewerOf(request),
+      })
+      corporateMuralHub.broadcast({ type: 'post:changed', postId: id })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
+    } catch (err) {
+      if (err instanceof CorporateMuralError) {
+        return reply.code(err.status).send({ message: err.message })
+      }
+      throw err
+    }
+  })
+
+  app.get('/corporate-posts/:id/poll/votes', guard, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    try {
+      const resultado = await listCorporatePostPollVotes({ postId: id, viewer: viewerOf(request) })
+      return reply.send({
+        pollId: resultado.pollId,
+        question: resultado.question,
+        totalVotes: resultado.options.reduce((total, opt) => total + opt.voters.length, 0),
+        options: resultado.options.map((opt) => ({
+          optionId: opt.optionId,
+          text: opt.text,
+          voters: opt.voters.map(toReactorRef),
+        })),
+      })
+    } catch (err) {
+      if (err instanceof CorporateMuralError) {
+        return reply.code(err.status).send({ message: err.message })
+      }
       throw err
     }
   })
@@ -594,7 +778,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
       })
       // Fixar reordena o feed inteiro — mesmo evento que o post novo emite.
       corporateMuralHub.broadcast({ type: 'feed:changed' })
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -610,7 +794,7 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
         companyId: request.user.companyId,
       })
       corporateMuralHub.broadcast({ type: 'feed:changed' })
-      return reply.send({ post: toCorporatePostDTO(post, request.user.sub) })
+      return reply.send({ post: toCorporatePostDTO(post, viewerOf(request)) })
     } catch (err) {
       if (err instanceof CorporateMuralError) return reply.code(err.status).send({ message: err.message })
       throw err
@@ -668,43 +852,4 @@ export async function corporateMuralRoutes(app: FastifyInstance) {
   })
 }
 
-/**
- * Comunicado no ar: menções, sininho do público-alvo e os dois eventos de
- * WebSocket. `post:published` é o que vira toast — magro de propósito, só o id:
- * o hub é canal único e global, então título no broadcast vazaria comunicado de
- * uma empresa para conexão de outra (ver `corporate-mural-hub.ts`).
- */
-async function announcePublished(
-  request: FastifyRequest,
-  post: {
-    id: string
-    title: string | null
-    authorId: string
-    mentions: { userId: string }[]
-    sectors: { sectorId: string }[]
-  },
-): Promise<void> {
-  try {
-    await notifyCorporatePostMention(
-      { recipientIds: post.mentions.map((m) => m.userId), actorId: post.authorId, postId: post.id },
-      request.user.companyId,
-    )
-  } catch (notifyErr) {
-    request.log.error(notifyErr)
-  }
-  try {
-    await notifyCorporatePostPublished(
-      {
-        postId: post.id,
-        title: post.title,
-        authorId: post.authorId,
-        sectorIds: post.sectors.map((s) => s.sectorId),
-      },
-      request.user.companyId,
-    )
-  } catch (notifyErr) {
-    request.log.error(notifyErr)
-  }
-  corporateMuralHub.broadcast({ type: 'feed:changed' })
-  corporateMuralHub.broadcast({ type: 'post:published', postId: post.id })
-}
+

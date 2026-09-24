@@ -38,6 +38,23 @@ vocabulários paralelos (voto + `Category` de um lado, feedback +
   nome/slug leva `companyId` junto;
 - o perfil não tem mais aba "Reconhecimentos": há uma lista só, a de feedbacks.
 
+**Felicitação de aniversário é a exceção: ela NÃO é feedback.** É o único lugar
+onde o vocabulário se separa de novo, e de propósito. Dar os parabéns abria o
+`FeedbackComposer` com um rascunho, então "Parabéns, Victoria!" nascia com tipo,
+categoria, coins e peso de selo, e ia parar no meio da lista de feedbacks da
+pessoa. A unificação juntou voto e feedback porque os dois respondem "o que essa
+pessoa fez que valeu"; felicitação não responde — não tem situação,
+comportamento nem impacto. Hoje é model próprio (`BirthdayGreeting`), fora do
+`feedback-service`, e o **mural de aniversário** vive no perfil, ao lado do
+feedback (`BirthdayWallCard`), servindo as duas datas: nascimento e tempo de
+casa. Um mural é `(pessoa, kind, ano)`, com **uma assinatura editável por
+pessoa** (a unique), janela de 3 dias antes a 30 depois decidida pelo
+**servidor** (`canSign`), e leitura livre fora dela — é o histórico. Assinar é
+de todo mundo menos de si mesmo: `canSignBirthdayWall` não reaproveita
+`canWriteFeedbackTo`, que barra o ADMIN. O ❤️ do card de aniversariantes
+continua levando ao perfil e ao feedback de sempre. Spec:
+`docs/superpowers/specs/2026-08-31-mural-de-aniversarios-design.md`.
+
 A lista do perfil é por **destinatário** (`FeedbackRecipient`), não por
 `Feedback.targetId`: no feedback grupal o `targetId` é só o primeiro da lista, e
 filtrar pela coluna escondia do perfil o que a pessoa recebeu junto com o time —
@@ -176,9 +193,35 @@ Nas telas, use `<BrandLogo>` / `<BrandName>` / `<BrandTagline>` — não crave
 produto, porque é o console interno que administra todas as empresas.
 
 No servidor, o card do Destaque do Mês deriva as cores dele da marca
-(`cardBrandFrom`) e o rodapé do Teams usa `teamsBrandFor`. O **certificado** tem
-mecanismo próprio e mais antigo (`CertificateTemplateVisual`: accent, logo e
-assinatura por modelo) — personalize por lá, não pelo branding.
+(`cardBrandFrom`), o rodapé do Teams usa `teamsBrandFor` e o **certificado** usa
+`certificateBrandFor`. Os três derivam da mesma cor institucional e cada um
+escolhe o tom que o próprio fundo pede: o certificado é impresso em papel claro,
+então entra o tom legível do matiz da marca, e não a cor crua — a mesma
+armadilha do `primary`. A logo do certificado é a do esquema **claro** (o papel
+é branco), e o que ela descarta é só **caminho relativo**, que não resolve fora
+do navegador. **SVG entra**, ao contrário do card do Teams: aqui quem desenha é
+o resvg, que rasteriza SVG dentro de `<image>` — e a logo embutida do
+certificado sempre foi um SVG. Descartar SVG aqui deixaria a empresa com a logo
+cadastrada e o certificado sem ela (as logos da EMR em produção são SVG).
+
+No **card do Teams** quem desenha é a Microsoft, que não rasteriza SVG: logo em
+SVG vira ícone de imagem quebrada e o `altText` ainda rouba a linha do rodapé
+(`isTeamsRenderableLogo`, no `teams-client`). Só que descartá-la assinava o card
+da empresa com a arte do produto — a EMR ficou meses com "Portal EMR" ao lado do
+punho do Legends. Então a API converte: `teamsBrandFor` manda a URL pública de
+`GET /branding/logo.png`, que baixa a logo cadastrada e devolve o mesmo desenho
+em PNG (`lib/logo-raster.ts`, resvg, com cache por URL de origem). A rota é
+**pública** porque quem busca a imagem é o servidor da Microsoft, e leva
+`?company=` porque a URL nasce do `APP_BASE_URL`, não do Host do tenant. Quem já
+cadastrou PNG/JPEG/GIF continua indo direto, sem o round-trip.
+
+No certificado a marca é o **padrão** e o modelo (`CertificateTemplate`) é a
+**exceção**: `accentColor` e `logoUrl` nulos herdam, preenchidos mandam. Quem
+aplica a herança é `toCertificateTemplateVisual` — o renderer só recebe
+`CertificateTemplateVisual` já resolvido. Duas coisas ficam de fora: a
+**assinatura**, que é de uma pessoa e não da empresa, e o certificado **sem
+modelo nenhum**, que sai com o visual embutido de sempre para que um certificado
+antigo, re-renderizado, não mude de cara.
 
 **Quem lidera quem é `User.managerId`.** Fonte única: é a cadeia que desenha o
 organograma (`organization-service`) **e** que recorta a área de Liderança —
@@ -195,13 +238,139 @@ ou pela importação por planilha). O organograma pela entrada da Liderança
 diretos; a empresa inteira continua em `/time`. Spec:
 `docs/superpowers/specs/2026-08-17-organograma-da-lideranca-e-escopo-por-manager-design.md`.
 
+**Treinamento é UM registro, não dois.** `TrainingRecord` é o fato do módulo de
+T&D: uma pessoa fez uma ação de desenvolvimento, em tal data, com tanta carga
+horária e tanto investimento. Ele SUCEDE o envio de certificado externo
+(`CertificateRequest` com `origin = EXTERNAL`), que era a mesma coisa sem carga
+horária, instituição nem data de conclusão — a migration
+`20260912161148_modulo_treinamentos_td` fez o backfill e apagou as linhas
+copiadas. `CertificateRequest` ficou só com o que sempre foi dele: a emissão do
+certificado INTERNO, a partir de matrícula concluída. `/aprendizado/enviar-certificado`
+redireciona para `/treinamentos`.
+
+Quatro consequências que se pagam ao mexer nele:
+
+- **Snapshot, não join.** `sectorName`, `squad`, `leaderName`, `position`,
+  `positionCategory` e `employmentType` são copiados na escrita. Quem muda de
+  setor em março não leva o treinamento de janeiro para o setor novo.
+- **Dois eixos de situação.** `validationStatus` (`PENDING`/`APPROVED`/`REJECTED`)
+  é a G&G conferindo o comprovante; `participationStatus` (Participou, Inscrito,
+  Ausente…) é presença na ação. **Indicador conta o validado**; a Central mostra
+  tudo, porque é lá que a pendência é resolvida. Registro de autoatendimento
+  nasce `PENDING`; o que o T&D cadastra nasce `APPROVED`.
+- **Derivado é função pura.** Ano, trimestre, semestre e SLA não são coluna (na
+  ferramenta de origem eram `GENERATED ALWAYS AS`): saem de `trainingYear`,
+  `trainingQuarter`, `trainingSemester` e `trainingSlaDays`, em
+  `@legends/shared` (`training.ts`), junto dos agregados do painel
+  (`computeTrainingKpis`, `groupTrainingBy`, `computeTrainingCoverage`) — que
+  rodam no SERVIDOR, sobre as linhas que o filtro já recortou.
+- **SLA só onde há prazo.** Ele conta os dias entre `requestDate` e
+  `completionDate`, e só vale para o que veio de LNT, PDI ou pedido do líder
+  (`isDemandDrivenTraining`) — curso feito por conta própria não tem prazo de
+  ninguém, e contá-lo afundaria o indicador do time sem que houvesse falha. O
+  prazo é da empresa: `training_sla_days` em `AppSetting`, padrão 90.
+
+Não confunda com `training-analytics-service.ts`, que é outra pergunta: lá o
+fato é a conclusão de curso do CATÁLOGO INTERNO (`CourseEnrollment.completedAt`),
+para a aba Desenvolvimento & IA do People Analytics. Spec:
+`docs/superpowers/specs/2026-09-12-modulo-de-treinamentos-td-design.md`.
+
+**Eu Aprendiz é a área do programa Jovem Aprendiz, e quem a abre é o CARGO.**
+Área à parte, no formato da Liderança (`/eu-aprendiz`, layout próprio com
+`Outlet`): trilha de seis encontros, fichas, mural, contrato e portfólio. Entra
+quem tem `User.positionCategory === 'Jovem Aprendiz'` — valor que já era canônico
+em `POSITION_CATEGORIES` —, mais quem facilita: ADMIN pleno ou SUBADMIN com
+`gente-gestao` (é o painel, `app.requireSectorFeature`). Não é feature de setor:
+`positionCategory` não é feature nenhuma, daí a flag `apprenticeOnly` no menu, ao
+lado de `leadershipOnly`. No servidor a decisão também **não** vai para o JWT
+(`apprenticeContextOf` lê usuário e matrícula numa consulta): cargo mudando não
+espera os 15 min do refresh, e a rota precisa da turma de qualquer jeito.
+
+Quatro coisas que se pagam ao mexer:
+
+- **Toda ficha é dinâmica.** Inclusive Mapa de Forças e Linha do Tempo, que no
+  protótipo eram componentes fixos. `ApprenticeActivity.schema` é JSON
+  (`ApprenticeActivitySchema`, no shared) e o `kind` dá o comportamento:
+  `COMMITMENT` é o Compromisso do Mês, `REVIEW` é a revisão do compromisso do
+  encontro ANTERIOR — a única ficha que olha para trás, e por isso só existe a
+  partir do 2º. Renomear `vou` ou `status` quebra a revisão e o indicador.
+- **O status do encontro é derivado da data** (`meetingStatusesOf`), como os
+  períodos de votação. E a trava do encontro (`isMeetingUnlocked`) morde só
+  depois da chamada: ausência de lançamento NÃO bloqueia — no protótipo
+  bloqueava, e um esquecimento do facilitador parava a turma inteira. Quem
+  faltou volta a passar quando a chamada é corrigida; a reposição agendada não
+  destrava sozinha.
+- **A pesquisa é anônima no banco, não na tela.** `ApprenticeSurveyResponse` não
+  tem `userId`; quem já respondeu fica em `ApprenticeSurveyReceipt`, outra
+  tabela, sem coluna ligando as duas. Com três aprendizes, porém, o texto livre
+  identifica quem escreveu — a garantia é estrutural, não estatística.
+- **O mural mostra status, nunca conteúdo.** O que a pessoa escreveu é dela e do
+  facilitador; `ApprenticeWallEntryDTO` não carrega texto de ficha.
+
+No acompanhamento da jornada, `ApprenticeJourney` guarda **só o que o cadastro
+não tem**: fim previsto do contrato, atividades sob responsabilidade e
+observações. Setor, squad, líder e admissão são lidos de `User` a cada consulta,
+nunca copiados. E `ApprenticeSectorMove` existe por um motivo só: sem o
+histórico, a elegibilidade de troca de setor contaria da admissão, e quem trocou
+mês passado pareceria elegível por estar há um ano na empresa. Ela **avisa, não
+barra** — o registro grava a mudança que aconteceu.
+
+A área **veste as cores do programa**, e não as da empresa — exceção deliberada ao
+white label, como o `SuperAdminLayout`. O `EuAprendizLayout` redefine as variáveis
+`--brand-*` no próprio contêiner (`pages/eu-aprendiz/program-theme.ts`, paleta da
+versão 2.0 do manual: branco, menta `#E4F9EB`, verde vivo `#6CE190`, verde mata
+`#16603C` e verde profundo `#264641`), então todo token do Tailwind lá dentro herda
+dali. A cor é do programa, mas o **esquema é da pessoa**: há uma paleta clara e uma
+escura, escolhidas por `useBrandContext().scheme`. A fonte é **Poppins** e as cores
+seguem o Manual de Marca do Eu Aprendiz (G&G, 2026).
+A arte oficial mora em `apps/web/public/eu-aprendiz/` e foi toda trocada no pacote de
+setembro/2026, que trouxe duas coisas que faltavam: a **trilha negativa** (o escuro
+ficava sem grafismo) e os **selos dos encontros em PNG**. O selo conquistado agora é a
+arte; `MeetingSeal` só desenha o que a arte não tem, que é estado — bloqueado e em
+andamento. A cor do selo é fixa por encontro e não segue o tema, porque o manual proíbe
+trocar cor e ordem.
+O verde vivo é só preenchimento (1.8:1 como texto, menos ainda que o `#35BD78` de
+antes): **texto verde na área é `text-on-primary-container`**, nunca `text-primary`.
+Modal da área não pode usar portal para fora do contêiner, senão perde o tema.
+
+O **quadro de gestão** (`ApprenticeTask`) é do facilitador e nunca aparece para o
+aprendiz — não confunda com `ApprenticeActivity`, que é a ficha que ele preenche.
+
+O **portfólio do facilitador é o da turma**, não o dele: ele não é aprendiz e não tem
+portfólio próprio, então pedir o do próprio id devolvia 404 e a aba abria vazia.
+`GET /apprentice/portfolio/overview` responde a situação de entrega de todo mundo —
+nunca o conteúdo da ficha, que continua no portfólio individual, autorizado caso a
+caso.
+
+O **assistente** é mais um `AgentKind`, na rota genérica `/admin/agents/:agent/ask`:
+nenhuma tabela nova, porque o que muda entre agentes é o system prompt, não o
+armazenamento. O chat mora em `components/AgentChat`, compartilhado com o
+Benchmarking.
+
+Não confunda com Treinamentos (`TrainingRecord`), que é ação de desenvolvimento
+de qualquer colaborador. Spec:
+`docs/superpowers/specs/2026-09-14-eu-aprendiz-design.md`.
+
+**Metas e OKRs: o check-in é o fato, e o KR não tem coluna de valor.** O valor
+atual sai do check-in mais recente por **competência** (`effectiveAt`, não
+`createdAt`), e meta que é razão guarda numerador e denominador para que o
+acumulado do ciclo seja Σnum ÷ Σden — a média das porcentagens não é a
+porcentagem do total. Progresso linear (`progressLinear`) existe só por paridade
+com a ImpulseUp; quem decide cor e "cumprimos?" é o **atingimento**, que respeita
+`direction`: em `LOWER_IS_BETTER` a meta é um teto, e a ImpulseUp, que ignora
+`inverted`, pintava churn estourado de azul. Regras puras e `permissions` moram
+em `@legends/shared` (`okr.ts`) e a escrita confere o MESMO predicado que o DTO
+devolve. Os dados vêm da ImpulseUp por `scripts/import-impulseup-okr.ts`
+(one-way, só GET, dry-run por padrão, idempotente por `externalId`). Spec e
+README: `docs/superpowers/specs/2026-09-17-modulo-metas-okr-design.md`.
+
 **Blocos de administração por setor.** Partes do `/admin` pertencem a um time
 específico. Quem entra: o ADMIN global sempre, e o SUBADMIN do setor com a feature de
 bloco ligada (`Sector.enabledFeatures`). Duas hoje:
 
 | Feature | Bloco | Telas |
 |---|---|---|
-| `gente-gestao` | Gente e Gestão | People Analytics, Painéis de RH, Termômetro de humor, Cursos, Manifesto, Manuais, Benefícios, Benchmarking, Avaliações externas |
+| `gente-gestao` | Gente e Gestão | People Analytics, Painéis de RH, Termômetro de humor, Cursos, Treinamentos (T&D), Manifesto, Manuais, Benefícios, Benchmarking, Avaliações externas |
 | `desenvolvimento-produto` | Desenvolvimento de Produto | Retrospectivas, Quinta de Dev |
 
 Use `app.requireSectorFeature(key)` na rota e `AdminSectorFeatureOnly` no front —
@@ -327,6 +496,31 @@ ajuste os dois lados — é a única fonte de verdade do contrato. Ex.:
 - Código novo segue o padrão da camada vizinha (route fina, lógica no service, DTO no serialize).
 - Não commitar segredos; `.env` é local (use `.env.example` como base).
 
+## Ferramentas de design (MCP e skills)
+
+Configuradas no repo, para trabalho de frontend:
+
+| O quê | Onde | Para quê |
+|---|---|---|
+| **shadcn** (MCP) | `.mcp.json` | catálogo de componentes prontos para consultar e adaptar |
+| **chrome-devtools** (MCP) | `.mcp.json` | abrir o app num Chrome de verdade: console, rede, performance, screenshot |
+| **frontend-design** (skill) | plugin oficial, ligado em `.claude/settings.json` | direção visual: tipografia, paleta, o que não fazer para não sair "cara de IA" |
+| **web-design-guidelines** (skill) | `.claude/skills/` | revisar a tela contra as Web Interface Guidelines da Vercel |
+
+Três avisos que se pagam ao usar:
+
+- **Componente de fora não entra como está.** O shadcn vem com Tailwind 4, Radix
+  e as variáveis dele (`--background`, `--muted-foreground`). Aqui é Tailwind 3 e
+  a paleta é **por empresa**, em tokens Material (`bg-surface`, `text-on-surface`,
+  `border-outline-variant`). Traga a estrutura e o comportamento; a cor é sempre
+  a nossa. Hex cravado em componente é regressão de white label.
+- **O `components.json` da raiz é só para o MCP do shadcn**, que o exige para
+  subir. Não instalamos shadcn: `npx shadcn add` escreveria em `components/ui`
+  com a config dele. Copie o que interessa para `apps/web/src/components`.
+- **Nada de MCP que dependa de chave paga** no `.mcp.json` versionado: ele vale
+  para todo mundo que clona o repo, e servidor que exige credencial pessoal
+  sobe quebrado para quem não a tem.
+
 ## Fluxo de feature (docs/superpowers)
 
 **Antes de escrever a primeira linha de qualquer feature ou correção:**
@@ -378,11 +572,25 @@ para a API. Entrega via **AWS CodeDeploy** (`appspec.yml` → `clean.sh` no stop
   `document.objects`. A grade é memoizada pela IDENTIDADE do array
   `document.objects` (+ tamanho): mapa novo sempre traz array novo
   (`cloneDocument`, `{...doc, objects}`), então mutar um documento no lugar sem
-  trocar o array serviria grade velha. `isMapTileWalkable` continua sendo a
-  regra única de colisão — só que lendo a grade. O que o cliente **não** tem
-  como prever é a recusa de entrada em sala (trancada, lotada, allowlist): o
-  `FollowController` aprende com o `sync` do servidor e devolve os tiles
-  recusados em `blocked`, senão o personagem bate na mesma porta até desistir.
+  trocar o array serviria grade velha. O que o Dijkstra devolve, porém, deixou
+  de ser executado como passo: com o movimento livre, o `FollowController`
+  persegue os tiles como **waypoints**, esterçando para o centro do próximo
+  como se segurasse a tecla (`bridge.emitAutoWalk`) — quem vira isso em
+  deslocamento é a mesma amostragem de input do teclado, na cena. Ele esterça
+  pela posição **prevista** (`bridge.onSelfBody`, na cadência do input), não
+  pelo snapshot: o snapshot chega um round-trip atrasado, e o personagem
+  viraria depois da esquina. Corolário: quem termina uma caminhada (chegada,
+  falha, `cancel`) tem de **soltar a tecla** — `emitAutoWalk(null)` —, senão
+  ele sai andando sozinho. E como o esterço viaja pelo MESMO `input` do teclado,
+  o `emitInput` carrega a procedência (`OfficeInputSource`): quem cancela o
+  Seguir porque "alguém assumiu o controle" só pode reagir a `keyboard` — reagir
+  a `auto` é a caminhada se autocancelando no primeiro quadro (um passo e para).
+  O que o cliente **não** tem como prever é a recusa de entrada em sala
+  (trancada, lotada, allowlist). Ele descobre por dois caminhos, e os dois
+  alimentam `blocked` no recálculo: `room-entry-denied` (preciso, e o único
+  aviso de recusa que sobreviveu ao fim do `sync`) e **não sair do lugar** com a
+  tecla segurada, que também cobre kart recém-estacionado e tile cujo CENTRO o
+  Dijkstra deu por livre mas em que o corpo não cabe.
 - `JWT_SECRET` ausente: usa fallback em dev, **lança erro em produção**.
 - Front sempre fala com a API por `/api` (nginx proxy) — não cravar `localhost:3333`.
 - Avaliação de selos pós-voto é **best-effort** (falha logada, não derruba o voto).

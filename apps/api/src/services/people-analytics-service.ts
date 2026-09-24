@@ -1,31 +1,33 @@
 import { Prisma } from '@prisma/client'
 import type {
   AccessHeatmapCellDTO,
+  AccessHeatmapDTO,
   AccessSeriesPointDTO,
+  AnalyticsWindowRequest,
   DistributionSliceDTO,
   EngagementOverviewDTO,
+  EngagementSeriesPointDTO,
+  InovaAccessLogRowDTO,
+  InovaAnalyticsDTO,
   MoodLevel,
   MoodSummaryDTO,
   MuralPostReachDTO,
   MuralReachDTO,
-  PeopleAnalyticsRange,
   PeopleOverviewDTO,
   ScreenAccessDTO,
-  VotingAdoptionDTO,
 } from '@legends/shared'
 import {
+  ANALYTICS_WINDOW_MAX_DAYS,
+  INOVA_ACCESS_LOG_LIMIT,
   MOOD_OPTIONS,
   MOOD_SCORES,
   PEOPLE_ANALYTICS_RANGE_DAYS,
+  SESSION_GAP_MINUTES,
   USER_ROLE_LABELS,
 } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { scopedPrisma } from '../lib/tenant-scope'
 import { addDays, saoPauloMidnightUtc, ymdInSaoPaulo, ymdOf } from '../lib/sao-paulo-date'
-import { derivePeriodState } from '../lib/period-state'
-
-/** Papéis que não votam nem aparecem como base de adesão da votação. */
-const NON_VOTING_ROLES = ['ADMIN', 'SUBADMIN', 'SUPER_ADMIN'] as const
 
 /** Quantos posts do Mural o bloco de alcance devolve (os mais recentes). */
 const MURAL_REACH_POST_LIMIT = 10
@@ -37,7 +39,7 @@ export interface AnalyticsScope {
   companyId: string
   /** Null = empresa inteira (ADMIN sem filtro). */
   sectorId: string | null
-  range: PeopleAnalyticsRange
+  window: AnalyticsWindowRequest
   now?: Date
 }
 
@@ -66,17 +68,17 @@ export interface AnalyticsWindow {
 
 type Window = AnalyticsWindow
 
-/**
- * A janela é sempre "os últimos N dias civis em São Paulo, incluindo hoje" —
- * não N*24h para trás. Isso mantém a série alinhada com o calendário que o
- * usuário vê, em vez de cortar o dia atual pela metade.
- */
-export function resolveWindow(range: PeopleAnalyticsRange, now: Date): Window {
-  const totalDays = PEOPLE_ANALYTICS_RANGE_DAYS[range]
-  const endYmd = ymdInSaoPaulo(now)
-  const startYmd = addDays(endYmd, -(totalDays - 1))
+export class AnalyticsWindowError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AnalyticsWindowError'
+  }
+}
+
+/** Monta a janela a partir das duas pontas civis, inclusivas nos dois lados. */
+function windowBetween(startYmd: string, endYmd: string): Window {
   const days: string[] = []
-  for (let i = 0; i < totalDays; i += 1) days.push(addDays(startYmd, i))
+  for (let ymd = startYmd; ymd <= endYmd; ymd = addDays(ymd, 1)) days.push(ymd)
   return {
     since: saoPauloMidnightUtc(startYmd),
     until: saoPauloMidnightUtc(addDays(endYmd, 1)),
@@ -84,9 +86,35 @@ export function resolveWindow(range: PeopleAnalyticsRange, now: Date): Window {
   }
 }
 
-/** Janela dos últimos `days` dias civis terminando hoje (para os KPIs 7d/30d). */
-function trailingSince(days: number, now: Date): Date {
-  return saoPauloMidnightUtc(addDays(ymdInSaoPaulo(now), -(days - 1)))
+/**
+ * A janela é sempre em **dias civis de São Paulo, hoje incluso** — não N*24h
+ * para trás. Isso mantém a série alinhada com o calendário que o usuário vê, em
+ * vez de cortar o dia atual pela metade.
+ *
+ * `custom` recebe as duas pontas da tela; os atalhos derivam de hoje. `ano` é
+ * "este ano" (1º de janeiro até hoje), então o tamanho dele muda com a data —
+ * é por isso que ele não tem entrada em `PEOPLE_ANALYTICS_RANGE_DAYS`.
+ */
+export function resolveWindow(request: AnalyticsWindowRequest, now: Date): Window {
+  const todayYmd = ymdInSaoPaulo(now)
+
+  if (request.range === 'custom') {
+    const { from, to } = request
+    if (!from || !to) throw new AnalyticsWindowError('Informe a data inicial e a final do período.')
+    if (from > to) throw new AnalyticsWindowError('A data inicial não pode ser depois da final.')
+    const window = windowBetween(from, to)
+    if (window.days.length > ANALYTICS_WINDOW_MAX_DAYS) {
+      throw new AnalyticsWindowError(
+        `O período personalizado é de no máximo ${ANALYTICS_WINDOW_MAX_DAYS} dias.`,
+      )
+    }
+    return window
+  }
+
+  if (request.range === 'ano') return windowBetween(`${todayYmd.slice(0, 4)}-01-01`, todayYmd)
+
+  const totalDays = PEOPLE_ANALYTICS_RANGE_DAYS[request.range]
+  return windowBetween(addDays(todayYmd, -(totalDays - 1)), todayYmd)
 }
 
 const ID_SEGMENT = /^(?:[a-z0-9]{20,}|\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
@@ -182,6 +210,29 @@ async function countUniqueAccessUsers(
   return rows[0]?.total ?? 0
 }
 
+/**
+ * Distintos e total na mesma passada — são os cards "Únicos no período" e
+ * "Acessos no período", e ler a mesma faixa de `AccessLog` duas vezes para
+ * responder os dois seria desperdício.
+ */
+async function loadAccessTotals(
+  companyId: string,
+  audience: AnalyticsAudience,
+  window: Window,
+): Promise<{ uniqueUsers: number; accesses: number }> {
+  const rows = await prisma.$queryRaw<{ uniqueUsers: number; accesses: number }[]>`
+    SELECT COUNT(DISTINCT al."userId")::int AS "uniqueUsers",
+           COUNT(*)::int AS accesses
+    FROM "AccessLog" al
+    JOIN "User" u ON u."id" = al."userId"
+    WHERE al."companyId" = ${companyId}
+      AND al."createdAt" >= ${window.since}
+      AND al."createdAt" < ${window.until}
+      ${audienceFilter(audience)}
+  `
+  return { uniqueUsers: rows[0]?.uniqueUsers ?? 0, accesses: rows[0]?.accesses ?? 0 }
+}
+
 async function loadAccessSeries(
   companyId: string,
   audience: AnalyticsAudience,
@@ -208,6 +259,125 @@ async function loadAccessSeries(
     accesses: byDay.get(day)?.accesses ?? 0,
     uniqueUsers: byDay.get(day)?.uniqueUsers ?? 0,
   }))
+}
+
+/**
+ * Série diária do gráfico de engajamento do Dashboard: feedbacks escritos,
+ * reações e comentários por dia.
+ *
+ * Três consultas Prisma agrupadas em JS, e não SQL cru: as três tabelas são
+ * independentes, e um `UNION ALL` de três selects com fuso de São Paulo em cada
+ * um seria mais difícil de ler do que três `groupBy` óbvios. O volume é de
+ * dias, não de linhas — a janela tem teto de `ANALYTICS_WINDOW_MAX_DAYS`.
+ */
+async function loadEngagementSeries(
+  companyId: string,
+  sectorId: string | null,
+  window: Window,
+): Promise<EngagementSeriesPointDTO[]> {
+  const [feedbacks, reactions, comments] = await Promise.all([
+    prisma.$queryRaw<{ day: string; total: number }[]>`
+      SELECT to_char((f."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS day,
+             COUNT(*)::int AS total
+      FROM "Feedback" f JOIN "User" u ON u."id" = f."authorId"
+      WHERE f."companyId" = ${companyId} AND f."createdAt" >= ${window.since} AND f."createdAt" < ${window.until}
+        ${sectorId ? Prisma.sql`AND u."sectorId" = ${sectorId}` : Prisma.empty}
+      GROUP BY 1
+    `,
+    prisma.$queryRaw<{ day: string; total: number }[]>`
+      SELECT to_char((r."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS day,
+             COUNT(*)::int AS total
+      FROM "FeedbackReaction" r JOIN "User" u ON u."id" = r."userId"
+      WHERE r."companyId" = ${companyId} AND r."createdAt" >= ${window.since} AND r."createdAt" < ${window.until}
+        ${sectorId ? Prisma.sql`AND u."sectorId" = ${sectorId}` : Prisma.empty}
+      GROUP BY 1
+    `,
+    prisma.$queryRaw<{ day: string; total: number }[]>`
+      SELECT to_char((c."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS day,
+             COUNT(*)::int AS total
+      FROM "FeedbackComment" c JOIN "User" u ON u."id" = c."authorId"
+      WHERE c."companyId" = ${companyId} AND c."createdAt" >= ${window.since} AND c."createdAt" < ${window.until}
+        ${sectorId ? Prisma.sql`AND u."sectorId" = ${sectorId}` : Prisma.empty}
+      GROUP BY 1
+    `,
+  ])
+  const map = (rows: { day: string; total: number }[]) => new Map(rows.map((r) => [r.day, r.total]))
+  const [f, r, c] = [map(feedbacks), map(reactions), map(comments)]
+  return window.days.map((day) => ({
+    day,
+    feedbacks: f.get(day) ?? 0,
+    reactions: r.get(day) ?? 0,
+    comments: c.get(day) ?? 0,
+  }))
+}
+
+/**
+ * Feedbacks por **competência** do catálogo da empresa, na janela.
+ *
+ * Conta VÍNCULOS (`FeedbackRecognitionCategory`), não feedbacks: um feedback com
+ * três competências entra nas três. A soma passar do total de feedbacks é
+ * esperado, e a tela diz isso.
+ */
+async function loadFeedbackCategoryDistribution(
+  companyId: string,
+  sectorId: string | null,
+  window: Window,
+): Promise<DistributionSliceDTO[]> {
+  const rows = await scopedPrisma(companyId).feedbackRecognitionCategory.findMany({
+    where: {
+      feedback: {
+        createdAt: { gte: window.since, lt: window.until },
+        ...(sectorId ? { author: { sectorId } } : {}),
+      },
+    },
+    select: { categoryId: true, category: { select: { name: true } } },
+  })
+  const counts = new Map<string, { label: string; count: number }>()
+  for (const row of rows) {
+    const current = counts.get(row.categoryId)
+    if (current) current.count += 1
+    else counts.set(row.categoryId, { label: row.category.name, count: 1 })
+  }
+  return [...counts.entries()]
+    .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'pt-BR'))
+}
+
+/**
+ * Feedbacks por **tag**: a `customCategory`, texto livre digitado por quem
+ * escreve quando a competência não estava no catálogo.
+ *
+ * Agrupa sem caixa e sem acento — "Proatividade" e "proatividade" são a mesma
+ * tag para quem lê o painel, e separá-las só produziria duas barras de 1.
+ */
+async function loadFeedbackTagDistribution(
+  companyId: string,
+  sectorId: string | null,
+  window: Window,
+): Promise<DistributionSliceDTO[]> {
+  const rows = await scopedPrisma(companyId).feedback.findMany({
+    where: {
+      createdAt: { gte: window.since, lt: window.until },
+      customCategory: { not: null },
+      ...(sectorId ? { author: { sectorId } } : {}),
+    },
+    select: { customCategory: true },
+  })
+  const counts = new Map<string, { label: string; count: number }>()
+  for (const row of rows) {
+    const raw = row.customCategory?.trim()
+    if (!raw) continue
+    const key = raw
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+    const current = counts.get(key)
+    if (current) current.count += 1
+    else counts.set(key, { label: raw, count: 1 })
+  }
+  return [...counts.entries()]
+    .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'pt-BR'))
 }
 
 export async function loadTopScreens(
@@ -276,7 +446,21 @@ const SCREEN_LABELS: Record<string, string> = {
   '/retrospectivas': 'Retrospectivas',
   '/admin': 'Admin — Dashboard',
   '/admin/pessoas': 'Admin — People Analytics',
+  '/comunidade-inova/guia': 'Guia: Início',
+  '/comunidade-inova/guia/bussola': 'Guia: Bússola',
+  '/comunidade-inova/guia/situacoes': 'Guia: Situações',
+  '/comunidade-inova/guia/na-pratica': 'Guia: Na prática',
+  '/comunidade-inova/guia/videos': 'Guia: Vídeos',
+  '/comunidade-inova/guia/prompts': 'Guia: Prompts',
+  '/comunidade-inova/guia/maturidade': 'Guia: Maturidade',
+  '/comunidade-inova/guia/lideranca': 'Guia: Liderança',
+  '/comunidade-inova/guia/seguranca': 'Guia: Segurança',
+  '/comunidade-inova/guia/cases': 'Guia: Casos',
+  '/comunidade-inova/guia/completo': 'Guia: Guia completo',
 }
+
+/** Prefixo de path das 11 páginas do Guia AI First (Comunidade INOVA). */
+const INOVA_GUIA_PATH_PREFIX = '/comunidade-inova/guia'
 
 function screenLabel(path: string): string {
   return SCREEN_LABELS[path] ?? path
@@ -316,92 +500,147 @@ async function loadSquadDistribution(companyId: string, sectorId: string | null)
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'pt-BR'))
 }
 
-/**
- * Adesão da votação: quantas das pessoas elegíveis votaram no período aberto.
- * Segue a mesma prioridade de `admin-dashboard-service` (ACTIVE vence
- * SCHEDULED). Sem período aberto no recorte, devolve null.
- */
-async function loadVotingAdoption(
-  companyId: string,
-  sectorId: string | null,
-  now: Date,
-): Promise<VotingAdoptionDTO | null> {
-  const db = scopedPrisma(companyId)
-  const periods = await db.votingPeriod.findMany({
-    where: sectorId ? { sectorId } : undefined,
-    orderBy: { startsAt: 'desc' },
-  })
-  const active = periods.find((period) => derivePeriodState(period, now) === 'ACTIVE')
-  const period = active ?? periods.filter((p) => derivePeriodState(p, now) === 'SCHEDULED').at(-1)
-  if (!period) return null
-
-  const [eligible, voted] = await Promise.all([
-    db.user.count({
-      where: { active: true, sectorId: period.sectorId, role: { notIn: [...NON_VOTING_ROLES] } },
-    }),
-    db.vote.count({ where: { periodId: period.id } }),
-  ])
-
-  return {
-    periodId: period.id,
-    monthRef: period.monthRef,
-    eligible,
-    voted,
-    rate: eligible > 0 ? Math.round((voted / eligible) * 100) : 0,
-  }
-}
-
 export async function getPeopleOverview(scope: AnalyticsScope): Promise<PeopleOverviewDTO> {
   const now = scope.now ?? new Date()
-  const { companyId, sectorId, range } = scope
-  const window = resolveWindow(range, now)
+  const { companyId, sectorId } = scope
+  const window = resolveWindow(scope.window, now)
   const db = scopedPrisma(companyId)
   const sectorWhere = sectorId ? { sectorId } : {}
   const inWindow = { gte: window.since, lt: window.until }
   const audience = sectorAudience(sectorId)
+  // O recorte de setor do feedback é pelo AUTOR: "feedbacks do setor" é o que o
+  // setor escreveu. Pelo destinatário, o número mudaria de significado no meio
+  // da mesma tela — a distribuição por competência usa o mesmo critério.
+  const authorWhere = sectorId ? { author: { sectorId } } : {}
 
   const [
     activePeople,
-    uniqueUsers7d,
-    uniqueUsers30d,
+    accessTotals,
     accessSeries,
-    votingAdoption,
+    engagementSeries,
     feedbacksCount,
     feedbackReactionsCount,
+    postsPublished,
+    feedbacksByCategory,
+    feedbacksByTag,
     byRole,
     bySquad,
-    accessHeatmap,
   ] = await Promise.all([
     db.user.count({ where: { active: true, ...sectorWhere } }),
-    countUniqueAccessUsers(companyId, audience, trailingSince(7, now), window.until),
-    countUniqueAccessUsers(companyId, audience, trailingSince(30, now), window.until),
+    // Uma passada só devolve os dois cards: distintos e total. Duas queries
+    // separadas leriam a mesma faixa de `AccessLog` duas vezes.
+    loadAccessTotals(companyId, audience, window),
     loadAccessSeries(companyId, audience, window),
-    loadVotingAdoption(companyId, sectorId, now),
-    db.feedback.count({
-      where: { createdAt: inWindow, ...(sectorId ? { author: { sectorId } } : {}) },
-    }),
+    loadEngagementSeries(companyId, sectorId, window),
+    db.feedback.count({ where: { createdAt: inWindow, ...authorWhere } }),
     db.feedbackReaction.count({
       where: { createdAt: inWindow, ...(sectorId ? { user: { sectorId } } : {}) },
     }),
+    db.corporatePost.count({ where: { status: 'PUBLISHED', createdAt: inWindow } }),
+    loadFeedbackCategoryDistribution(companyId, sectorId, window),
+    loadFeedbackTagDistribution(companyId, sectorId, window),
     loadRoleDistribution(companyId, sectorId),
     loadSquadDistribution(companyId, sectorId),
-    loadAccessHeatmap(companyId, audience, window),
   ])
 
   return {
-    range,
+    range: scope.window.range,
+    from: window.days[0]!,
+    to: window.days[window.days.length - 1]!,
+    days: window.days.length,
     sectorId,
     activePeople,
-    uniqueUsers7d,
-    uniqueUsers30d,
-    adoptionRate: activePeople > 0 ? Math.round((uniqueUsers30d / activePeople) * 100) : 0,
+    uniqueUsersInRange: accessTotals.uniqueUsers,
+    accessesInRange: accessTotals.accesses,
+    adoptionRate: activePeople > 0 ? Math.round((accessTotals.uniqueUsers / activePeople) * 100) : 0,
     accessSeries,
-    votingAdoption,
+    engagementSeries,
     feedbacksCount,
     feedbackReactionsCount,
+    postsPublished,
+    feedbacksByCategory,
+    feedbacksByTag,
     byRole,
     bySquad,
-    accessHeatmap,
+  }
+}
+
+/**
+ * Tempo médio de sessão, **derivado** do `AccessLog`.
+ *
+ * O portal não captura duração: `AccessLog` guarda (usuário, tela, instante) e
+ * nada mais. A sessão é reconstruída aqui — acessos consecutivos da mesma pessoa
+ * pertencem à mesma sessão enquanto o intervalo entre eles for menor que
+ * `SESSION_GAP_MINUTES`; a duração vai do primeiro ao último acesso.
+ *
+ * Derivar em vez de instrumentar foi escolha do recorte: o painel tem filtro de
+ * período, e um heartbeat só mediria daqui para frente — a G&G ficaria sem
+ * número para qualquer mês passado. O histórico que já existe responde hoje.
+ *
+ * O número é **piso**, não média exata: a última tela da sessão não tem acesso
+ * seguinte que a feche, então uma sessão de um acesso só vale zero. É o mesmo
+ * limite de qualquer analytics baseado em pageview, e a tela diz isso.
+ */
+async function computeSessionStats(
+  companyId: string,
+  audience: AnalyticsAudience,
+  window: Window,
+): Promise<{ avgSessionMinutes: number | null; sessions: number }> {
+  const rows = await prisma.$queryRaw<{ userId: string; at: Date }[]>`
+    SELECT al."userId" AS "userId", al."createdAt" AS at
+    FROM "AccessLog" al
+    JOIN "User" u ON u."id" = al."userId"
+    WHERE al."companyId" = ${companyId}
+      AND al."createdAt" >= ${window.since}
+      AND al."createdAt" < ${window.until}
+      ${audienceFilter(audience)}
+    ORDER BY al."userId", al."createdAt"
+  `
+  const gapMs = SESSION_GAP_MINUTES * 60_000
+  let sessions = 0
+  let totalMs = 0
+  let currentUser: string | null = null
+  let sessionStart = 0
+  let lastAt = 0
+
+  const closeSession = () => {
+    if (currentUser === null) return
+    sessions += 1
+    totalMs += lastAt - sessionStart
+  }
+
+  for (const row of rows) {
+    const at = row.at.getTime()
+    if (row.userId !== currentUser) {
+      closeSession()
+      currentUser = row.userId
+      sessionStart = at
+    } else if (at - lastAt > gapMs) {
+      closeSession()
+      sessionStart = at
+    }
+    lastAt = at
+  }
+  closeSession()
+
+  if (sessions === 0) return { avgSessionMinutes: null, sessions: 0 }
+  return { avgSessionMinutes: Math.round((totalMs / sessions / 60_000) * 10) / 10, sessions }
+}
+
+export async function getAccessHeatmap(scope: AnalyticsScope): Promise<AccessHeatmapDTO> {
+  const window = resolveWindow(scope.window, scope.now ?? new Date())
+  const audience = sectorAudience(scope.sectorId)
+  const [cells, sessionStats] = await Promise.all([
+    loadAccessHeatmap(scope.companyId, audience, window),
+    computeSessionStats(scope.companyId, audience, window),
+  ])
+  return {
+    from: window.days[0]!,
+    to: window.days[window.days.length - 1]!,
+    days: window.days.length,
+    sectorId: scope.sectorId,
+    cells,
+    ...sessionStats,
   }
 }
 
@@ -546,8 +785,8 @@ async function countUniqueMuralViewers(companyId: string, audience: AnalyticsAud
 
 export async function getEngagementOverview(scope: AnalyticsScope): Promise<EngagementOverviewDTO> {
   const now = scope.now ?? new Date()
-  const { companyId, sectorId, range } = scope
-  const window = resolveWindow(range, now)
+  const { companyId, sectorId } = scope
+  const window = resolveWindow(scope.window, now)
 
   const audience = sectorAudience(sectorId)
   const [mood, muralReach, topScreens] = await Promise.all([
@@ -556,5 +795,139 @@ export async function getEngagementOverview(scope: AnalyticsScope): Promise<Enga
     loadTopScreens(companyId, audience, window),
   ])
 
-  return { range, sectorId, mood, muralReach, topScreens }
+  return {
+    range: scope.window.range,
+    from: window.days[0]!,
+    to: window.days[window.days.length - 1]!,
+    days: window.days.length,
+    sectorId,
+    mood,
+    muralReach,
+    topScreens,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Comunidade INOVA — sub-aba de Desenvolvimento (Guia AI First)
+// ---------------------------------------------------------------------------
+
+/** Acessos por página do Guia no recorte — mesma forma de `loadTopScreens`, filtrado ao prefixo. */
+async function loadInovaByPage(
+  companyId: string,
+  audience: AnalyticsAudience,
+  window: Window,
+): Promise<ScreenAccessDTO[]> {
+  const rows = await prisma.$queryRaw<{ path: string; accesses: number; uniqueUsers: number }[]>`
+    SELECT al."path" AS path,
+           COUNT(*)::int AS accesses,
+           COUNT(DISTINCT al."userId")::int AS "uniqueUsers"
+    FROM "AccessLog" al
+    JOIN "User" u ON u."id" = al."userId"
+    WHERE al."companyId" = ${companyId}
+      AND al."createdAt" >= ${window.since}
+      AND al."createdAt" < ${window.until}
+      AND al."path" LIKE ${`${INOVA_GUIA_PATH_PREFIX}%`}
+      ${audienceFilter(audience)}
+    GROUP BY 1
+    ORDER BY 2 DESC, 1 ASC
+  `
+  return rows.map((row) => ({
+    path: row.path,
+    label: screenLabel(row.path),
+    accesses: row.accesses,
+    uniqueUsers: row.uniqueUsers,
+  }))
+}
+
+/** Total de acessos e usuários únicos no recorte — só páginas do Guia. */
+async function loadInovaTotals(
+  companyId: string,
+  audience: AnalyticsAudience,
+  window: Window,
+): Promise<{ totalAccesses: number; uniqueUsers: number }> {
+  const rows = await prisma.$queryRaw<{ totalAccesses: number; uniqueUsers: number }[]>`
+    SELECT COUNT(*)::int AS "totalAccesses",
+           COUNT(DISTINCT al."userId")::int AS "uniqueUsers"
+    FROM "AccessLog" al
+    JOIN "User" u ON u."id" = al."userId"
+    WHERE al."companyId" = ${companyId}
+      AND al."createdAt" >= ${window.since}
+      AND al."createdAt" < ${window.until}
+      AND al."path" LIKE ${`${INOVA_GUIA_PATH_PREFIX}%`}
+      ${audienceFilter(audience)}
+  `
+  return { totalAccesses: rows[0]?.totalAccesses ?? 0, uniqueUsers: rows[0]?.uniqueUsers ?? 0 }
+}
+
+/**
+ * Log de acessos recentes ao Guia, com quem acessou — diferente do resto do
+ * People Analytics (só agregados): aqui o pedido explícito foi listar pessoa,
+ * página e horário, como "quem visitou o quê". Limitado a
+ * `INOVA_ACCESS_LOG_LIMIT` linhas; `total` é o recorte inteiro, para a tela
+ * poder dizer "mostrando X de Y".
+ */
+async function loadInovaRecentLogs(
+  companyId: string,
+  audience: AnalyticsAudience,
+  window: Window,
+): Promise<{ rows: InovaAccessLogRowDTO[]; total: number }> {
+  const db = scopedPrisma(companyId)
+  const where: Prisma.AccessLogWhereInput = {
+    path: { startsWith: INOVA_GUIA_PATH_PREFIX },
+    createdAt: { gte: window.since, lt: window.until },
+    ...(audience.kind === 'users'
+      ? { userId: { in: audience.userIds } }
+      : audience.sectorId
+        ? { user: { sectorId: audience.sectorId } }
+        : {}),
+  }
+
+  const [rows, total] = await Promise.all([
+    db.accessLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: INOVA_ACCESS_LOG_LIMIT,
+      select: { id: true, path: true, createdAt: true, user: { select: { name: true, email: true } } },
+    }),
+    db.accessLog.count({ where }),
+  ])
+
+  return {
+    rows: rows.map((row) => ({
+      id: row.id,
+      userName: row.user.name,
+      userEmail: row.user.email,
+      path: row.path,
+      label: screenLabel(row.path),
+      createdAt: row.createdAt.toISOString(),
+    })),
+    total,
+  }
+}
+
+export async function getInovaOverview(scope: AnalyticsScope): Promise<InovaAnalyticsDTO> {
+  const now = scope.now ?? new Date()
+  const { companyId, sectorId } = scope
+  const window = resolveWindow(scope.window, now)
+  const audience = sectorAudience(sectorId)
+
+  const [byPage, totals, { rows: recentLogs, total: recentLogsTotal }] = await Promise.all([
+    loadInovaByPage(companyId, audience, window),
+    loadInovaTotals(companyId, audience, window),
+    loadInovaRecentLogs(companyId, audience, window),
+  ])
+
+  return {
+    range: scope.window.range,
+    from: window.days[0]!,
+    to: window.days[window.days.length - 1]!,
+    days: window.days.length,
+    sectorId,
+    totalAccesses: totals.totalAccesses,
+    uniqueUsers: totals.uniqueUsers,
+    topPage: byPage[0] ?? null,
+    byPage,
+    recentLogs,
+    recentLogsTotal,
+  }
 }

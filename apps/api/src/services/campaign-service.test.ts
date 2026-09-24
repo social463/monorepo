@@ -10,7 +10,9 @@ import {
   cancelCampaignPost,
   confirmCampaign,
   createCampaignPost,
+  deleteCampaignPost,
   generateCampaignPreview,
+  listCampaignBands,
   listCampaignPosts,
   publishCampaignPost,
   updateCampaignPost,
@@ -181,6 +183,36 @@ describe('calendário', () => {
     expect(setembro[0].scheduledFor.getTime()).toBeLessThan(setembro[1].scheduledFor.getTime())
 
     const outubro = await listCampaignPosts(ator, {
+      from: new Date('2026-10-01T00:00:00.000Z'),
+      to: new Date('2026-10-31T23:59:59.000Z'),
+    })
+    expect(outubro).toHaveLength(0)
+  })
+
+  // A faixa da campanha na grade do mês. O filtro é de SOBREPOSIÇÃO, e não de
+  // "começa dentro da janela": a campanha que atravessa a virada do mês é
+  // justamente o caso que a faixa contínua existe para mostrar.
+  it('devolve a campanha que atravessa a janela, não só a que começa nela', async () => {
+    const ator = await criarAtor('faixa@empresa.com')
+    await confirmCampaign(ator, confirmacao) // 01/09 → 10/09
+
+    // Janela que começa DEPOIS do início da campanha e termina antes do fim.
+    const meioDaCampanha = await listCampaignBands(ator, {
+      from: new Date('2026-09-05T00:00:00.000Z'),
+      to: new Date('2026-09-07T23:59:59.000Z'),
+    })
+    expect(meioDaCampanha).toHaveLength(1)
+    expect(meioDaCampanha[0].theme).toBe('Semana da segurança')
+
+    // Janela que encosta na ponta inicial.
+    const bordaInicial = await listCampaignBands(ator, {
+      from: new Date('2026-08-20T00:00:00.000Z'),
+      to: new Date('2026-09-01T12:00:00.000Z'),
+    })
+    expect(bordaInicial).toHaveLength(1)
+
+    // Mês inteiro depois do fim: nada.
+    const outubro = await listCampaignBands(ator, {
       from: new Date('2026-10-01T00:00:00.000Z'),
       to: new Date('2026-10-31T23:59:59.000Z'),
     })
@@ -367,6 +399,148 @@ describe('publicar item', () => {
     expect(posts[0].id).toBe(publicado.publishedPostId)
   })
 
+  // O comunicado nasce de um modelo de linguagem e traz marcação. Publicado como
+  // texto puro, `**precisão**` chegava ao Feed com os asteriscos à mostra — foi
+  // por isso que o prompt proibia markdown e o comunicado saía chapado.
+  it('publica o corpo como documento rico, com o negrito preservado', async () => {
+    const ator = await criarAtor('rico@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Dia do Contador',
+      body: '## Por que isso importa\n\nGarante a **precisão** dos números.\n\n- Agradeça ao time',
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+
+    const publicado = await publishCampaignPost(ator, item.id)
+    const post = await prisma.corporatePost.findUniqueOrThrow({
+      where: { id: publicado.publishedPostId as string },
+    })
+
+    expect(post.contentJson).toEqual({
+      blocks: [
+        { type: 'heading', spans: [{ text: 'Por que isso importa' }] },
+        {
+          type: 'paragraph',
+          spans: [{ text: 'Garante a ' }, { text: 'precisão', bold: true }, { text: ' dos números.' }],
+        },
+        { type: 'bullet', spans: [{ text: 'Agradeça ao time' }] },
+      ],
+    })
+    // O texto puro do card e das prévias sai do documento, já sem os asteriscos.
+    expect(post.content).toContain('Garante a precisão dos números.')
+    expect(post.content).not.toContain('**')
+  })
+
+  // O título deixou de ser rótulo interno da grade: a fórmula do comunicado abre
+  // por ele, e escondê-lo gastava a linha de maior impacto num campo invisível.
+  it('leva o título do item para o título do post', async () => {
+    const ator = await criarAtor('titulo@empresa.com')
+    const item = await itemAgendado(ator)
+
+    const publicado = await publishCampaignPost(ator, item.id)
+    const post = await prisma.corporatePost.findUniqueOrThrow({
+      where: { id: publicado.publishedPostId as string },
+    })
+
+    expect(post.title).toBe('Aviso')
+  })
+
+  it('leva a arte do item para a imagem do comunicado no Mural', async () => {
+    // A "sugestão visual" é briefing em texto e continua sendo só isso; a arte
+    // é a peça pronta, e é ela que precisa chegar no feed.
+    vi.stubEnv('S3_BUCKET', 'legends-teste')
+    vi.stubEnv('S3_REGION', 'us-east-1')
+    vi.stubEnv('S3_PUBLIC_BASE_URL', 'https://cdn.exemplo.com')
+
+    const ator = await criarAtor('arte@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Aviso',
+      body: 'Corpo do comunicado.',
+      visualHint: 'Imagem do MKT.',
+      image: { url: 'https://cdn.exemplo.com/images/arte.png', width: 1200, height: 630 },
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+    expect(item.imageUrl).toBe('https://cdn.exemplo.com/images/arte.png')
+    expect(item.visualHint).toBe('Imagem do MKT.')
+
+    const publicado = await publishCampaignPost(ator, item.id)
+    const post = await prisma.corporatePost.findUniqueOrThrow({
+      where: { id: publicado.publishedPostId as string },
+    })
+    expect(post.imageUrl).toBe('https://cdn.exemplo.com/images/arte.png')
+    expect(post.imageWidth).toBe(1200)
+    expect(post.imageHeight).toBe(630)
+
+    vi.unstubAllEnvs()
+  })
+
+  it('recusa arte hospedada fora do bucket configurado', async () => {
+    // Quem valida o host é o `assertImageHost` do mural, na publicação — não
+    // há segunda cópia da regra no calendário.
+    vi.stubEnv('S3_BUCKET', 'legends-teste')
+    vi.stubEnv('S3_REGION', 'us-east-1')
+    vi.stubEnv('S3_PUBLIC_BASE_URL', 'https://cdn.exemplo.com')
+
+    const ator = await criarAtor('arte-de-fora@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Aviso',
+      body: 'Corpo do comunicado.',
+      image: { url: 'https://site-qualquer.com/arte.png', width: 100, height: 100 },
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+
+    await expect(publishCampaignPost(ator, item.id)).rejects.toMatchObject({ status: 400 })
+    const inalterado = await prisma.campaignPost.findUniqueOrThrow({ where: { id: item.id } })
+    expect(inalterado.status).toBe('SCHEDULED')
+    expect(await prisma.corporatePost.count()).toBe(0)
+
+    vi.unstubAllEnvs()
+  })
+
+  it('remover a arte zera as três colunas juntas', async () => {
+    // Largura e altura órfãs apontariam para uma URL que não existe mais.
+    const ator = await criarAtor('arte-removida@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Aviso',
+      body: 'Corpo do comunicado.',
+      image: { url: 'https://cdn.exemplo.com/images/arte.png', width: 10, height: 20 },
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+
+    const semArte = await updateCampaignPost(ator, item.id, { image: null })
+    expect(semArte.imageUrl).toBeNull()
+    expect(semArte.imageWidth).toBeNull()
+    expect(semArte.imageHeight).toBeNull()
+  })
+
+  it('não mexe na arte quando a edição não fala dela', async () => {
+    const ator = await criarAtor('arte-preservada@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Aviso',
+      body: 'Corpo do comunicado.',
+      image: { url: 'https://cdn.exemplo.com/images/arte.png', width: 10, height: 20 },
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+
+    const editado = await updateCampaignPost(ator, item.id, { body: 'Corpo novo.' })
+    expect(editado.imageUrl).toBe('https://cdn.exemplo.com/images/arte.png')
+  })
+
+  it('guarda quem agendou, que é quem a publicação automática usa como autor', async () => {
+    const ator = await criarAtor('quem-agendou@empresa.com')
+    const item = await itemAgendado(ator)
+    expect(item.createdById).toBe(ator.id)
+  })
+
   it('recusa publicar duas vezes', async () => {
     const ator = await criarAtor('duasvezes@empresa.com')
     const item = await itemAgendado(ator)
@@ -421,6 +595,12 @@ describe('publicar item', () => {
     const { createPost: publicarDeVerdade } = await vi.importActual<typeof import('./corporate-mural-service')>(
       './corporate-mural-service',
     )
+    // Guarda contra o modo de falha que este teste já teve: o mock instalado,
+    // mas o service ligado ao módulo REAL por causa de um ciclo de imports
+    // (`corporate-mural-service` → `lib/serialize` → `campaign-service`). Sem
+    // isto, o teste passa a publicar de verdade e a sabotagem nunca roda — que
+    // é exatamente como ele começou a falhar, sem ninguém tocar nele.
+    const chamadasAntes = vi.mocked(muralService.createPost).mock.calls.length
     vi.mocked(muralService.createPost).mockImplementationOnce(async (input) => {
       const post = await publicarDeVerdade(input)
       await input.tx!.campaignPost.delete({ where: { id: item.id } })
@@ -428,11 +608,71 @@ describe('publicar item', () => {
     })
 
     await expect(publishCampaignPost(ator, item.id)).rejects.toThrow()
+    expect(vi.mocked(muralService.createPost).mock.calls.length).toBe(chamadasAntes + 1)
 
     expect(await prisma.corporatePost.count()).toBe(0)
     const inalterado = await prisma.campaignPost.findUniqueOrThrow({ where: { id: item.id } })
     expect(inalterado.status).toBe('SCHEDULED')
     expect(inalterado.publishedPostId).toBeNull()
+  })
+})
+
+describe('excluir item', () => {
+  it('apaga a linha, ao contrário do cancelamento', async () => {
+    const ator = await criarAtor('exclui@empresa.com')
+    const item = await itemAgendado(ator)
+
+    await deleteCampaignPost(ator, item.id)
+
+    expect(await prisma.campaignPost.findUnique({ where: { id: item.id } })).toBeNull()
+  })
+
+  it('exclui também o que já foi cancelado', async () => {
+    // É o caso que motivou a ação: o cancelado fica riscado na grade e não sai
+    // de lá.
+    const ator = await criarAtor('exclui-cancelado@empresa.com')
+    const item = await itemAgendado(ator)
+    await cancelCampaignPost(ator, item.id)
+
+    await deleteCampaignPost(ator, item.id)
+
+    expect(await prisma.campaignPost.findUnique({ where: { id: item.id } })).toBeNull()
+  })
+
+  it('recusa excluir item já publicado', async () => {
+    // O comunicado está no Mural: apagar só o item perderia o registro
+    // editorial de algo que a empresa inteira viu.
+    const ator = await criarAtor('exclui-publicado@empresa.com')
+    const item = await itemAgendado(ator)
+    await publishCampaignPost(ator, item.id)
+
+    await expect(deleteCampaignPost(ator, item.id)).rejects.toMatchObject({ status: 409 })
+    expect(await prisma.campaignPost.findUnique({ where: { id: item.id } })).not.toBeNull()
+  })
+
+  it('não deixa excluir item de outra empresa', async () => {
+    const ator = await criarAtor('exclui-tenant@empresa.com')
+    const item = await itemAgendado(ator)
+    const outraEmpresa = await prisma.company.create({
+      data: { name: 'Outra', slug: `outra-${Math.random()}` },
+    })
+
+    await expect(
+      deleteCampaignPost({ id: ator.id, companyId: outraEmpresa.id }, item.id),
+    ).rejects.toMatchObject({ status: 404 })
+    expect(await prisma.campaignPost.findUnique({ where: { id: item.id } })).not.toBeNull()
+  })
+
+  it('registra a exclusão na auditoria', async () => {
+    const ator = await criarAtor('exclui-auditoria@empresa.com')
+    const item = await itemAgendado(ator)
+
+    await deleteCampaignPost(ator, item.id)
+
+    const log = await prisma.adminAuditLog.findFirst({
+      where: { entityType: 'CampaignPost', entityId: item.id, action: 'DELETE' },
+    })
+    expect(log).not.toBeNull()
   })
 })
 
@@ -455,5 +695,69 @@ describe('cancelar item', () => {
     await publishCampaignPost(ator, item.id)
 
     await expect(cancelCampaignPost(ator, item.id)).rejects.toMatchObject({ status: 409 })
+  })
+})
+
+const JANELA_SETEMBRO = { from: new Date('2026-09-01T00:00:00.000Z'), to: new Date('2026-09-30T23:59:59.999Z') }
+
+/**
+ * Documento 4, seção 13.2: apagado o comunicado, o item continuava no
+ * calendário editorial — `PUBLISHED` com `publishedPostId` nulo, apontando
+ * para um post que não existe mais.
+ */
+describe('comunicado apagado sai do calendário de campanhas', () => {
+  it('apagar o post do mural leva junto o item que o publicou', async () => {
+    const ator = await criarAtor('gg-delete@empresa.com')
+    const item = await createCampaignPost(ator, {
+      title: 'Aviso de manutenção',
+      body: 'O sistema ficará indisponível no sábado.',
+      scheduledFor: '2026-09-05T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+    const publicado = await publishCampaignPost(ator, item.id)
+    expect(publicado.publishedPostId).not.toBeNull()
+
+    await muralService.deletePost({
+      postId: publicado.publishedPostId as string,
+      userId: ator.id,
+      role: 'ADMIN',
+      companyId: ator.companyId,
+    })
+
+    expect(await listCampaignPosts(ator, JANELA_SETEMBRO)).toHaveLength(0)
+  })
+
+  it('os outros itens da campanha ficam — cai só o que publicou aquele post', async () => {
+    const ator = await criarAtor('gg-delete-2@empresa.com')
+    const publicado = await publishCampaignPost(
+      ator,
+      (
+        await createCampaignPost(ator, {
+          title: 'Sai agora',
+          body: 'Corpo.',
+          scheduledFor: '2026-09-05T12:00:00.000Z',
+          channel: 'MURAL',
+          audience: 'ALL',
+        })
+      ).id,
+    )
+    const outro = await createCampaignPost(ator, {
+      title: 'Fica',
+      body: 'Corpo.',
+      scheduledFor: '2026-09-06T12:00:00.000Z',
+      channel: 'MURAL',
+      audience: 'ALL',
+    })
+
+    await muralService.deletePost({
+      postId: publicado.publishedPostId as string,
+      userId: ator.id,
+      role: 'ADMIN',
+      companyId: ator.companyId,
+    })
+
+    const restantes = await listCampaignPosts(ator, JANELA_SETEMBRO)
+    expect(restantes.map((entry) => entry.id)).toEqual([outro.id])
   })
 })

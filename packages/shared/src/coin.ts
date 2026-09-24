@@ -12,6 +12,8 @@ export const COIN_EVENTS = [
   'FEEDBACK_REACTION',
   'MOOD_ANSWERED',
   'CHALLENGE_APPROVED',
+  'BADGE_EARNED',
+  'COURSE_COMPLETED',
 ] as const
 export type CoinEvent = (typeof COIN_EVENTS)[number]
 
@@ -21,6 +23,8 @@ export const COIN_EVENT_LABELS: Record<CoinEvent, string> = {
   FEEDBACK_REACTION: 'Reagir a um feedback',
   MOOD_ANSWERED: 'Registrar o humor do dia',
   CHALLENGE_APPROVED: 'Desafio aprovado',
+  BADGE_EARNED: 'Selo conquistado',
+  COURSE_COMPLETED: 'Curso concluído',
 }
 
 /** Frase de ajuda por evento — usada no formulário do admin e no "como ganhar". */
@@ -30,15 +34,20 @@ export const COIN_EVENT_DESCRIPTIONS: Record<CoinEvent, string> = {
   FEEDBACK_REACTION: 'Creditado a quem reage; cada emoji num feedback conta uma vez.',
   MOOD_ANSWERED: 'Creditado uma vez por dia, na primeira resposta do humor.',
   CHALLENGE_APPROVED: 'Creditado quando a participação num desafio é aprovada; o valor vem do próprio desafio.',
+  BADGE_EARNED: 'Creditado ao conquistar um selo; o valor vem do próprio selo. Paga uma vez por selo.',
+  COURSE_COMPLETED: 'Creditado ao concluir um curso; o valor vem do próprio curso. Paga uma vez por curso.',
 }
 
 /**
  * Eventos com valor configurável por `CoinRule` — o que o admin escolhe no CRUD
  * de regras. `CHALLENGE_APPROVED` fica de fora de propósito: a recompensa é do
  * desafio, não de uma regra, e `awardFixedCoins` nunca consulta `CoinRule`.
- * Uma regra criada para ele não teria efeito nenhum.
+ * Uma regra criada para ele não teria efeito nenhum. `BADGE_EARNED` fica de
+ * fora pelo mesmo motivo: o valor é do selo (Documento 4, seção 11.4).
  */
-export const COIN_RULE_EVENTS = COIN_EVENTS.filter((event) => event !== 'CHALLENGE_APPROVED')
+export const COIN_RULE_EVENTS = COIN_EVENTS.filter(
+  (event) => event !== 'CHALLENGE_APPROVED' && event !== 'BADGE_EARNED' && event !== 'COURSE_COMPLETED',
+)
 
 /** Janela em que o teto da regra é contado (dia civil de America/Sao_Paulo). */
 export const COIN_CAP_WINDOWS = ['NONE', 'DAY', 'WEEK', 'MONTH'] as const

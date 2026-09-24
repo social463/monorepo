@@ -81,6 +81,18 @@ const feedPage = (canPublishDirectly: boolean) => ({
   canPublishDirectly,
 })
 
+/**
+ * O feed consulta duas rotas: o próprio feed e o catálogo de tipos de
+ * comunicação (seção 13). Um `mockResolvedValue` único devolveria a página do
+ * feed para as duas e o catálogo chegaria com a forma errada.
+ */
+function mockFetch(page: unknown, tags: unknown[] = []) {
+  return vi.spyOn(api, 'apiFetch').mockImplementation(async (path: string) => {
+    if (path.startsWith('/corporate-post-tags')) return { tags } as never
+    return page as never
+  })
+}
+
 describe('MuralCorporativoFeed', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -88,7 +100,7 @@ describe('MuralCorporativoFeed', () => {
   })
 
   it('lista as publicações do mural', async () => {
-    vi.spyOn(api, 'apiFetch').mockResolvedValue(feedPage(false))
+    mockFetch(feedPage(false))
     wrap(<MuralCorporativoFeed />)
     expect(await screen.findByText('Comunicado da empresa toda')).toBeInTheDocument()
   })
@@ -96,7 +108,7 @@ describe('MuralCorporativoFeed', () => {
   // A 2ª rodada da G&G abriu a escrita para todo mundo: o composer aparece
   // sempre, e o que muda por papel é o destino do comunicado.
   it('mostra o composer para a lenda, avisando que vai para aprovação', async () => {
-    vi.spyOn(api, 'apiFetch').mockResolvedValue(feedPage(false))
+    mockFetch(feedPage(false))
     wrap(<MuralCorporativoFeed />)
     await screen.findByText('Comunicado da empresa toda')
     expect(screen.getByPlaceholderText('Enviar para aprovação')).toBeInTheDocument()
@@ -104,7 +116,7 @@ describe('MuralCorporativoFeed', () => {
 
   it('quem publica direto não vê o aviso de aprovação', async () => {
     mockUseAuth.mockReturnValue(user('ADMIN'))
-    vi.spyOn(api, 'apiFetch').mockResolvedValue(feedPage(true))
+    mockFetch(feedPage(true))
     wrap(<MuralCorporativoFeed />)
     await waitFor(() => expect(screen.getByPlaceholderText('Publicar')).toBeInTheDocument())
   })

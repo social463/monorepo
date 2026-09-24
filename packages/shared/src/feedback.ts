@@ -80,6 +80,17 @@ export interface SharedFeedbackDTO {
 export interface FeedbackWallResponse {
   feedbacks: SharedFeedbackDTO[]
   hasMore: boolean
+  /**
+   * Última vez que quem está olhando abriu o Mural de Feedbacks — null se nunca
+   * abriu. É novo o feedback cujo `sharedAt` é posterior a este instante.
+   *
+   * Vem na RESPOSTA, e não como `isNew` em cada item, porque "novo" é relação
+   * entre o feedback e o leitor, não propriedade do feedback: o mesmo item é
+   * novo para quem não abriu a aba e velho para quem abriu. Com um campo por
+   * item, `toSharedFeedbackDTO` — que também serve Recebidos e Enviados, onde a
+   * marcação não existe — teria de mentir um `false`.
+   */
+  wallSeenAt: string | null
 }
 
 /**
@@ -151,7 +162,7 @@ export const FEEDBACK_WALL_PAGE_SIZE = 10
 export const PROFILE_FEEDBACK_PAGE_SIZE = 5
 
 /** Quantos feedbacks a prévia do mural na home mostra. */
-export const FEEDBACK_WALL_PREVIEW_SIZE = 2
+export const FEEDBACK_WALL_PREVIEW_SIZE = 3
 
 export interface CreateFeedbackRequest {
   message: string

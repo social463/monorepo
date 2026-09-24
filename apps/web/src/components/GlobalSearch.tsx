@@ -83,7 +83,7 @@ export function GlobalSearch() {
       enabledFeatures: user?.enabledFeatures,
       sectorFeatures: user?.sectorFeatures,
       impulseUpUrl: developmentSettings?.settings?.impulseUpUrl,
-      inovaCommunityUrl: developmentSettings?.settings?.inovaCommunityUrl,
+      inovaModuleEnabled: developmentSettings?.settings?.inovaModuleEnabled,
     });
   }, [user, developmentSettings]);
 

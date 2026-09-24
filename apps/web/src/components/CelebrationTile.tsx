@@ -25,11 +25,17 @@ export function CelebrationTile({
   caption,
   dateLabel,
   highlighted = false,
+  celebrating = false,
+  canCongratulate = false,
 }: {
   user: PublicUser
   caption?: string
   dateLabel?: ReactNode
   highlighted?: boolean
+  /** É HOJE: rende bolo e balões animados ao lado do nome. */
+  celebrating?: boolean
+  /** Falso, o botão de parabéns não aparece — quem decide é o card. */
+  canCongratulate?: boolean
 }) {
   const subtitle = user.sectorName
   return (
@@ -44,6 +50,18 @@ export function CelebrationTile({
           "Em 12 dias · 11/08/2026" é largo demais para caber no canto sem
           espremer o nome. */}
       {highlighted && dateLabel && <div className="absolute right-sm top-sm">{dateLabel}</div>}
+      {celebrating && (
+        // Decoração pura, ancorada no canto inferior direito — onde a linha
+        // tem espaço livre. Dentro do nome (que trunca) ela era cortada por
+        // nomes longos; o chip "Hoje" já diz, em texto, o que o bolo comemora.
+        <span
+          aria-hidden="true"
+          className="absolute bottom-sm right-sm inline-flex items-baseline gap-0.5"
+        >
+          <span className="inline-block animate-bounce">🎂</span>
+          <span className="inline-block animate-bounce [animation-delay:150ms]">🎈</span>
+        </span>
+      )}
       <div
         className={`flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-surface-container-highest ${
           highlighted ? 'border-primary/50' : 'border-outline-variant/50'
@@ -63,16 +81,31 @@ export function CelebrationTile({
           >
             {user.name}
           </p>
-          {/* Ação secundária: ícone só, com o texto no title. Escrito por
-              extenso em cada linha, competia com o nome da pessoa. */}
-          <Link
-            to={`/perfil/${user.id}`}
-            title={`Deixe um feedback para ${user.name}`}
-            aria-label={`Deixe um feedback para ${user.name}`}
-            className="-mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-on-surface-variant opacity-0 transition-all hover:bg-surface-container-highest hover:text-primary focus:opacity-100 group-hover/tile:opacity-100"
-          >
-            <Icon name="favorite" className="text-[16px]" />
-          </Link>
+          {/* Ação única da linha: ícone só, com o texto no title. Escrito por
+              extenso em cada linha, competia com o nome da pessoa. O coração
+              (deixar feedback) saiu daqui: duas ações lado a lado numa lista de
+              aniversário faziam escolher entre parabenizar e elogiar, quando a
+              data só pede a primeira — o feedback continua a um clique, no
+              perfil para onde este botão leva.
+
+              É um link, e não um diálogo: parabenizar agora é assinar o mural
+              de aniversário, que vive no perfil da pessoa (spec
+              2026-08-31-mural-de-aniversarios). `?parabens=1` faz o perfil rolar
+              até o mural e focar o campo. Como é a única ação, fica sempre
+              visível — escondê-la no hover deixava a linha sem nada para fazer
+              no toque. */}
+          {canCongratulate && (
+            <Link
+              to={`/perfil/${user.id}?parabens=1`}
+              title={`Dê os parabéns a ${user.name}`}
+              aria-label={`Dê os parabéns a ${user.name}`}
+              className={`-mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-surface-container-highest hover:text-primary ${
+                celebrating ? 'text-primary' : 'text-on-surface-variant'
+              }`}
+            >
+              <Icon name="celebration" className="text-[16px]" />
+            </Link>
+          )}
         </div>
 
         {/* Setor e data em linhas próprias, sem separador: "Desenvolvimento de

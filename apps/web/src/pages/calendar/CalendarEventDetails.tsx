@@ -75,6 +75,15 @@ export function CalendarEventDetails({
                 📌 Comunicação Interna
               </span>
             )}
+            {/* Etiqueta primeiro, categoria depois: a etiqueta é o que a pessoa
+                reconhece ("Simulado"); a categoria é o recorte que dá a cor e o
+                filtro. Só a categoria vem pintada — duas cores brigando aqui
+                fariam a etiqueta parecer um segundo filtro. */}
+            {event.tag && event.tag !== event.typeName && (
+              <span className="rounded-full border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface">
+                {event.tag}
+              </span>
+            )}
             <span
               className="rounded-full px-3 py-1 font-label text-label-sm"
               style={{ backgroundColor: event.color, color: readableOn(event.color) }}

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import {
   CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH,
+  CALENDAR_EVENT_TAG_MAX_LENGTH,
   CALENDAR_EVENT_TITLE_MAX_LENGTH,
   CALENDAR_RECURRENCES,
   canManageCalendarEvents,
@@ -15,6 +16,7 @@ import {
   getManagedEvent,
   listEventTypes,
   listEvents,
+  listCalendarCampaignPosts,
   listOccurrences,
   updateEvent,
 } from '../services/calendar-event-service'
@@ -38,6 +40,7 @@ const hhmm = z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida')
 const eventSchema = z.object({
   title: z.string().trim().min(1).max(CALENDAR_EVENT_TITLE_MAX_LENGTH),
   description: z.string().trim().max(CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH).optional(),
+  tag: z.string().trim().max(CALENDAR_EVENT_TAG_MAX_LENGTH).nullish(),
   date: ymd,
   endDate: ymd.nullish(),
   startTime: hhmm.nullish(),
@@ -52,6 +55,10 @@ const eventSchema = z.object({
   audienceTags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
   isInternalComm: z.boolean().optional(),
   sectorIds: z.array(z.string().min(1)).optional(),
+  // Convidados nominais (seção 11). Teto de 200 pelo mesmo motivo das tags: o
+  // campo é lista, e sem limite uma colagem viraria uma notificação por pessoa
+  // da empresa inteira. Quem quer chamar todo mundo usa o público-alvo.
+  guestIds: z.array(z.string().min(1)).max(200).optional(),
   recurrence: z.enum(CALENDAR_RECURRENCES).optional(),
   recurrenceUntil: ymd.nullish(),
   recurrenceCount: z.number().int().min(1).max(500).nullish(),
@@ -204,20 +211,25 @@ export async function calendarRoutes(app: FastifyInstance) {
         return reply.code(400).send({ message: 'Dados inválidos', issues: parsed.error.issues })
       }
       try {
-        const [occurrences, types] = await Promise.all([
-          listOccurrences({
-            userId: request.user.sub,
-            companyId: request.user.companyId,
-            sectorId: request.user.sectorId ?? null,
-            sectorFeatures: request.user.features ?? [],
-            role: request.user.role,
-            adminAccess: request.user.adminAccess,
-            from: parsed.data.from,
-            to: parsed.data.to,
-          }),
+        const viewer = {
+          userId: request.user.sub,
+          companyId: request.user.companyId,
+          sectorId: request.user.sectorId ?? null,
+          sectorFeatures: request.user.features ?? [],
+          role: request.user.role,
+          adminAccess: request.user.adminAccess,
+          from: parsed.data.from,
+          to: parsed.data.to,
+        }
+        // O calendário editorial de Campanhas entra na mesma janela (Documento
+        // 4, seção 13.2). Volta vazio para quem não é G&G — o recorte é do
+        // service, não desta rota.
+        const [occurrences, types, campaignPosts] = await Promise.all([
+          listOccurrences(viewer),
           listEventTypes(request.user.companyId),
+          listCalendarCampaignPosts(viewer),
         ])
-        return reply.send({ occurrences, types })
+        return reply.send({ occurrences, types, campaignPosts })
       } catch (err) {
         if (err instanceof CalendarEventError) return reply.code(err.status).send({ message: err.message })
         throw err

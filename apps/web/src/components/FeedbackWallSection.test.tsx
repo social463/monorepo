@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
@@ -118,6 +118,54 @@ describe('FeedbackWallSection', () => {
     const spy = vi.spyOn(api, 'apiFetch').mockResolvedValue({ feedbacks: [], hasMore: false })
     wrap(<FeedbackWallSection />)
     await screen.findByTestId('feedback-wall-empty')
-    expect(spy).toHaveBeenCalledWith('/feedbacks/mural?offset=0&limit=2')
+    expect(spy).toHaveBeenCalledWith('/feedbacks/mural?offset=0&limit=3')
+  })
+
+  it('marca "Novo" só o que foi compartilhado depois da última visita à aba', async () => {
+    vi.spyOn(api, 'apiFetch').mockResolvedValue({
+      feedbacks: [
+        feedback('f-novo', '2026-07-10T00:00:00.000Z', 'Chegou depois da última visita.'),
+        feedback('f-velho', '2026-07-01T00:00:00.000Z', 'Já estava lá quando ela abriu.'),
+      ],
+      hasMore: false,
+      wallSeenAt: '2026-07-05T00:00:00.000Z',
+    })
+
+    wrap(<FeedbackWallSection />)
+
+    const novo = await screen.findByText(/Chegou depois da última visita/i)
+    expect(within(novo.closest('li')!).getByText('Novo')).toBeInTheDocument()
+    const velho = screen.getByText(/Já estava lá quando ela abriu/i)
+    expect(within(velho.closest('li')!).queryByText('Novo')).not.toBeInTheDocument()
+  })
+
+  it('quem nunca abriu a aba vê tudo como novo', async () => {
+    vi.spyOn(api, 'apiFetch').mockResolvedValue({
+      feedbacks: [feedback('f1', '2020-01-01T00:00:00.000Z', 'Feedback antigo pra caramba.')],
+      hasMore: false,
+      wallSeenAt: null,
+    })
+
+    wrap(<FeedbackWallSection />)
+
+    expect(await screen.findByText('Novo')).toBeInTheDocument()
   })
 })
+
+/** Feedback compartilhado mínimo, só com o que os testes de marcação olham. */
+function feedback(id: string, sharedAt: string, message: string) {
+  return {
+    id,
+    author: person('u2', 'Maria'),
+    target: person('u3', 'Mariana'),
+    targets: [person('u3', 'Mariana')],
+    message,
+    category: 'POSITIVO',
+    categories: [],
+    customCategory: null,
+    createdAt: sharedAt,
+    sharedAt,
+    reactions: [],
+    commentCount: 0,
+  }
+}

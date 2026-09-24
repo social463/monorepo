@@ -79,25 +79,49 @@ async function countPdiActionsDone(userId: string): Promise<number> {
   return scopedPrisma(user.companyId).pdiAction.count({ where: { status: 'DONE', plan: { userId } } })
 }
 
+/**
+ * O limiar foi atingido? Limiar 0 nunca atinge — e é por isso que isto é uma
+ * função, e não `contagem >= limiar` solto em oito lugares.
+ *
+ * `Badge.threshold` é `@default(0)` e toda regra automática compara
+ * `contagem >= limiar`. Com 0 a comparação é verdadeira para quem tem zero de
+ * tudo, então o selo caía na EMPRESA INTEIRA na primeira avaliação. Não é
+ * hipótese: a planilha de emblemas da G&G tinha 15 dos 36 selos com a coluna
+ * Limiar vazia, e vazio vira 0 na importação.
+ *
+ * Zero passa a significar "não configurado" — a mesma leitura que
+ * `rewardPoints`/`rewardCoins` já fazem com nulo. O selo continua existindo e
+ * continua saindo por concessão manual ou por solicitação aprovada; o que ele
+ * não faz é sair sozinho para todo mundo.
+ *
+ * Consequência deliberada em `syncThresholdBadges`: selo de limiar 0 que já
+ * tinha sido concedido automaticamente é REVOGADO na próxima sincronização.
+ * É o conserto retroativo do estrago — e só atinge `source: 'AUTO'`, nunca o
+ * que um admin concedeu à mão.
+ */
+export function meetsThreshold(count: number, threshold: number): boolean {
+  return threshold >= 1 && count >= threshold
+}
+
 async function qualifies(userId: string, badge: Badge): Promise<boolean> {
   if (badge.kind === 'CATEGORY') {
     if (!badge.categorySlug) return false
-    return (await countFeedbacksInCategory(userId, badge.categorySlug)) >= badge.threshold
+    return meetsThreshold(await countFeedbacksInCategory(userId, badge.categorySlug), badge.threshold)
   }
   if (badge.kind === 'IMPACT') {
-    return (await countFeedbacksReceived(userId)) >= badge.threshold
+    return meetsThreshold(await countFeedbacksReceived(userId), badge.threshold)
   }
   if (badge.kind === 'RECURRENCE') {
-    return (await countDistinctMonths(userId)) >= badge.threshold
+    return meetsThreshold(await countDistinctMonths(userId), badge.threshold)
   }
   if (badge.kind === 'FEEDBACK') {
-    return (await countFeedbacksAuthored(userId)) >= badge.threshold
+    return meetsThreshold(await countFeedbacksAuthored(userId), badge.threshold)
   }
   if (badge.kind === 'COURSE') {
-    return (await countCoursesCompleted(userId)) >= badge.threshold
+    return meetsThreshold(await countCoursesCompleted(userId), badge.threshold)
   }
   if (badge.kind === 'PDI') {
-    return (await countPdiActionsDone(userId)) >= badge.threshold
+    return meetsThreshold(await countPdiActionsDone(userId), badge.threshold)
   }
   return false
 }
@@ -156,7 +180,7 @@ export async function evaluateTenureBadgesForUser(
   const newlyAwarded: UserBadge[] = []
   for (const badge of tenureBadges) {
     if (ownedIds.has(badge.id)) continue
-    if (years < badge.threshold) continue
+    if (!meetsThreshold(years, badge.threshold)) continue
     try {
       newlyAwarded.push(await prisma.userBadge.create({ data: { userId, badgeId: badge.id } }))
     } catch (err) {
@@ -192,7 +216,7 @@ export async function evaluateStreakBadgesForUser(
   const newlyAwarded: UserBadge[] = []
   for (const badge of streakBadges) {
     if (ownedIds.has(badge.id)) continue
-    if (bestStreak < badge.threshold) continue
+    if (!meetsThreshold(bestStreak, badge.threshold)) continue
     try {
       newlyAwarded.push(await prisma.userBadge.create({ data: { userId, badgeId: badge.id } }))
     } catch (err) {
@@ -236,7 +260,7 @@ export async function evaluateTenureBadgesForAllUsers(companyId: string, now: Da
     const years = completedYears(user.joinedAt, now)
     const ownedIds = ownedByUser.get(user.id)
     for (const badge of tenureBadges) {
-      if (years < badge.threshold) continue
+      if (!meetsThreshold(years, badge.threshold)) continue
       if (ownedIds?.has(badge.id)) continue
       const inScope = badge.global || badge.sectors.some((s) => s.sectorId === user.sectorId)
       if (!inScope) continue
@@ -278,7 +302,7 @@ async function syncThresholdBadges(
   const awarded: UserBadge[] = []
   const toRevoke: string[] = []
   for (const badge of badges) {
-    const qualifies = count >= badge.threshold
+    const qualifies = meetsThreshold(count, badge.threshold)
     const ownedUserBadgeId = ownedByBadgeId.get(badge.id)
     if (qualifies && !ownedUserBadgeId) {
       try {
@@ -371,6 +395,12 @@ export interface BadgeCatalogEntry {
 }
 
 function buildRequirement(badge: Badge, categoryName: string | null): string {
+  // Sem limiar configurado não há regra a anunciar: "Faça 0 feedbacks" prometia
+  // um selo que `meetsThreshold` nunca concede. Quem chega nele por concessão
+  // manual ou por solicitação precisa ler isso, e não uma meta de zero.
+  if (badge.kind !== 'HIGHLIGHT' && badge.threshold < 1) {
+    return 'Concedido pela liderança ou por solicitação aprovada'
+  }
   switch (badge.kind) {
     case 'FEEDBACK':
       return `Faça ${badge.threshold} feedbacks`
@@ -397,6 +427,9 @@ function buildRequirement(badge: Badge, categoryName: string | null): string {
 
 async function computeProgress(userId: string, companyId: string, badge: Badge): Promise<BadgeProgress | null> {
   const target = badge.threshold
+  // Sem limiar não existe barra de progresso: a fração seria dividida por zero,
+  // e "0 de 0" apareceria como 100% concluído num selo que ninguém ganhou.
+  if (target < 1) return null
   switch (badge.kind) {
     case 'FEEDBACK':
       return { current: await countFeedbacksAuthored(userId), target }

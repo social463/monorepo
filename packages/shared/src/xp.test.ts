@@ -77,7 +77,15 @@ describe('cores dos níveis', () => {
 describe('XP_RULE_EVENTS', () => {
   // Diferença deliberada em relação aos coins: lá CHALLENGE_APPROVED fica de fora
   // porque a recompensa é do desafio; aqui o XP do desafio é um valor só, da empresa.
-  it('inclui todos os eventos, inclusive desafio aprovado', () => {
-    expect(XP_RULE_EVENTS).toEqual(XP_EVENTS)
+  it('inclui desafio aprovado, que do lado dos coins fica de fora', () => {
+    expect(XP_RULE_EVENTS).toContain('CHALLENGE_APPROVED')
+  })
+
+  // BADGE_EARNED é a exceção dos DOIS lados: o valor é do selo (Documento 4,
+  // seção 11.4), e `awardFixedXp` nunca consulta `XpRule` — regra criada para
+  // ele não teria efeito nenhum.
+  it('deixa de fora o selo conquistado, cujo valor vem do próprio selo', () => {
+    expect(XP_RULE_EVENTS).not.toContain('BADGE_EARNED')
+    expect(XP_RULE_EVENTS).toEqual(XP_EVENTS.filter((event) => event !== 'BADGE_EARNED'))
   })
 })

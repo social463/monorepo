@@ -51,6 +51,13 @@ enum CoinEvent {
   FEEDBACK_REACTION
   MOOD_ANSWERED
   CHALLENGE_APPROVED
+  /// Recompensa do selo conquistado (Documento 4, seção 11.4). O valor vem do
+  /// `Badge`, não de `CoinRule` — por isso o crédito passa por
+  /// `awardFixedCoins`, e não por `awardCoins`.
+  BADGE_EARNED
+  /// Recompensa do curso concluído (Documento 4, seção 9.6). O valor vem do
+  /// próprio curso, e paga uma vez por curso.
+  COURSE_COMPLETED
 }
 
 /// Janela em que o teto de uma regra é contado (dia civil de America/Sao_Paulo).
@@ -73,10 +80,19 @@ enum XpEvent {
   CORPORATE_POST_REACTION
   CORPORATE_POST_COMMENT
   CORPORATE_POST_READ_FULL
+  /// Par do `CoinEvent.BADGE_EARNED`: o selo paga nas duas moedas, e cada uma
+  /// é opcional por selo.
+  BADGE_EARNED
+  /// Recompensa do curso concluído (Documento 4, seção 9.6). O valor vem do
+  /// próprio curso, e paga uma vez por curso.
+  COURSE_COMPLETED
 }
 
 enum CorporatePostStatus {
   PENDING
+  /// Publicação marcada para um instante futuro (`publishAt`). Fora do feed
+  /// até o scheduler virar para PUBLISHED — que é também quem notifica.
+  SCHEDULED
   PUBLISHED
   REJECTED
 }
@@ -84,6 +100,10 @@ enum CorporatePostStatus {
 enum CorporatePostAudience {
   ALL
   SECTORS
+  /// Só quem tem papel de liderança (LEAD, MANAGER, HEAD) — o mesmo
+  /// `LEADER_ROLES` que define a "visão de líder" no resto do produto.
+  /// É a liderança INTEIRA da empresa, sem cruzamento com setor.
+  LEADERS
 }
 
 enum CorporatePostAttachmentKind {
@@ -176,12 +196,188 @@ enum CalendarConnectionStatus {
   REVOKED
 }
 
+enum InovaProjectPhase {
+  IDEA
+  EXPLORING_SOLUTION
+  TESTING_SOLUTION
+  ROUTINE_USE
+  EXPANDING
+  COMPLETED
+}
+
+enum InovaDiaryEntryType {
+  MANUAL
+  AUTOMATIC
+}
+
+enum InovaTaskStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+}
+
+model InovaProject {
+  id                   String            @id @default(cuid())
+  title                String
+  category             String
+  sector               String
+  description          String
+  problemDescription   String?
+  results              String?
+  hoursSaved           Float?
+  costReduction        Float?
+  otherMetrics         String?
+  projectCosts         String?
+  toolsUsed            String?
+  deadline             DateTime?         @db.Date
+  priority             Boolean           @default(false)
+  leadershipChallenge  Boolean           @default(false)
+  estimatedDeadline    String?
+  sectorRepresentative String?
+  responsible1Id       String?
+  responsible2Id       String?
+  phase                InovaProjectPhase @default(IDEA)
+  archived             Boolean           @default(false)
+  createdById          String
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  companyId            String            @default("company-emr")
+
+  createdBy    User                @relation("InovaProjectCreatedBy", fields: [createdById], references: [id])
+  responsible1 User?               @relation("InovaProjectResponsible1", fields: [responsible1Id], references: [id])
+  responsible2 User?               @relation("InovaProjectResponsible2", fields: [responsible2Id], references: [id])
+  company      Company             @relation(fields: [companyId], references: [id])
+  phaseHistory InovaPhaseHistory[]
+  diaryEntries InovaDiaryEntry[]
+  tasks        InovaProjectTask[]
+  activity     InovaActivity[]
+
+  @@index([companyId])
+  @@index([phase])
+}
+
+model InovaPhaseHistory {
+  id         String            @id @default(cuid())
+  projectId  String
+  phase      InovaProjectPhase
+  note       String?
+  occurredAt DateTime          @default(now())
+  companyId  String            @default("company-emr")
+
+  project InovaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  company Company      @relation(fields: [companyId], references: [id])
+
+  @@index([projectId])
+  @@index([companyId])
+}
+
+model InovaDiaryEntry {
+  id            String              @id @default(cuid())
+  projectId     String
+  title         String
+  description   String?
+  learnings     String?
+  tools         String?
+  entryType     InovaDiaryEntryType @default(MANUAL)
+  occurredAt    DateTime            @default(now())
+  imageUrls     String[]
+  videoLinks    String[]
+  externalLinks String[]
+  createdById   String
+  createdAt     DateTime            @default(now())
+  companyId     String              @default("company-emr")
+
+  project   InovaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User         @relation("InovaDiaryEntryCreatedBy", fields: [createdById], references: [id])
+  company   Company      @relation(fields: [companyId], references: [id])
+
+  @@index([projectId])
+  @@index([companyId])
+}
+
+model InovaProjectTask {
+  id          String          @id @default(cuid())
+  projectId   String
+  title       String
+  description String?
+  responsible String?
+  dueDate     DateTime?       @db.Date
+  status      InovaTaskStatus @default(PENDING)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  companyId   String          @default("company-emr")
+
+  project InovaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  company Company      @relation(fields: [companyId], references: [id])
+
+  @@index([projectId])
+  @@index([companyId])
+}
+
+model InovaActivity {
+  id        String   @id @default(cuid())
+  projectId String
+  action    String
+  entity    String
+  summary   String
+  actorId   String
+  details   Json?
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  project InovaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  actor   User         @relation("InovaActivityActor", fields: [actorId], references: [id])
+  company Company      @relation(fields: [companyId], references: [id])
+
+  @@index([projectId])
+  @@index([companyId])
+}
+
+/// Vídeo do Guia AI First (Comunidade INOVA), editável pelo admin.
+///
+/// `videoId` referencia o catálogo estático em `content/videos.ts`
+/// (`apps/web`) — quando bate com um id de lá, esta linha é uma
+/// SOBRESCRITA (texto e/ou vídeo) do card estático; quando não bate, é um
+/// card CUSTOM, que só existe porque esta linha existe. É por isso que
+/// `title`/`description`/etc. são opcionais aqui: um override parcial não
+/// precisa repetir o que já está no catálogo, e o merge (no service) usa o
+/// catálogo como fallback.
+model InovaGuiaVideo {
+  id          String   @id @default(cuid())
+  videoId     String
+  title       String?
+  description String?
+  category    String?
+  duration    String?
+  behavior    String?
+  /// Link externo (YouTube, Vimeo…). Nulo quando o vídeo foi enviado como arquivo.
+  videoUrl    String?
+  /// Chave do objeto no S3, quando o vídeo foi enviado como arquivo. Nulo quando é link externo.
+  storagePath String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  companyId   String   @default("company-emr")
+
+  createdBy User    @relation("InovaGuiaVideoCreatedBy", fields: [createdById], references: [id])
+  company   Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, videoId])
+  @@index([companyId])
+}
+
 model User {
   id                    String                @id @default(cuid())
   email                 String                @unique
   passwordHash          String
   name                  String
   position              String?
+  /// Categoria do cargo (Documento 4, seção 9.2): a lista fechada da planilha de
+  /// colaboradores — Auxiliar, Assistente, Analista… É ela que segmenta curso.
+  /// `position` guarda o TÍTULO completo ("Analista de CRM"), que tem 80 valores
+  /// distintos e não serve para isso. Não é derivável do título: em 23 dos 80,
+  /// a primeira palavra não bate com a categoria.
+  positionCategory      String?
   squad                 String?
   photoUrl              String?
   avatarStyle           String?
@@ -216,6 +412,24 @@ model User {
   // Coluna crua, e não uma tabela de sessões: o dado é sempre o ÚLTIMO sinal,
   // nunca o histórico — histórico de navegação já é `AccessLog`.
   lastSeenAt            DateTime?
+  // Última vez que a pessoa abriu o Mural de Feedbacks. É o que sustenta a
+  // marcação "Novo" na prévia da Home: é novo o feedback compartilhado depois
+  // deste instante.
+  //
+  // Por ABA, e não por item: uma tabela `FeedbackWallRead` inteira (o que o
+  // comunicado tem, em `CorporatePostRead`) seria escrita a cada card visto
+  // para sustentar um selo visual. Null = nunca abriu, e aí tudo é novo — que é
+  // o comportamento certo para quem chega.
+  feedbackWallSeenAt    DateTime?
+  /// Data-base de férias. Null é o caso normal — vale `joinedAt`. Só o
+  /// afastamento pelo INSS acima de 180 dias a preenche, com a data de volta:
+  /// a interrupção não desloca um ciclo aquisitivo, desloca todos os seguintes,
+  /// então guardá-la como correção de um ciclo obrigaria o DP a corrigir a
+  /// mesma pessoa todo ano.
+  vacationAnchorDate    DateTime?             @db.Date
+  /// Regime de contratação. `CLT` é o padrão e o caso da maioria; o `PJ` segue
+  /// outro padrão de férias (20 dias, divisão livre, sem abono).
+  employmentType        EmploymentType        @default(CLT)
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
 
@@ -229,6 +443,9 @@ model User {
   badgesAwarded               UserBadge[]                @relation("BadgesAwarded")
   periodsWon                  VotingPeriod[]             @relation("PeriodWinner")
   refreshTokens               RefreshToken[]
+  birthdayGreetingsReceived   BirthdayGreeting[]         @relation("BirthdayGreetingTarget")
+  birthdayGreetingsWritten    BirthdayGreeting[]         @relation("BirthdayGreetingAuthor")
+  birthdayGreetingReactions   BirthdayGreetingReaction[]
   monthlyHighlights           MonthlyHighlight[]         @relation("MonthlyHighlightPerson")
   monthlyHighlightsCreated    MonthlyHighlight[]         @relation("MonthlyHighlightCreator")
   feedbacksGiven              Feedback[]                 @relation("FeedbacksGiven")
@@ -241,6 +458,13 @@ model User {
   officeDeskRemindersSent     OfficeDeskReminder[]       @relation("OfficeDeskReminderSender")
   officeDeskRemindersReceived OfficeDeskReminder[]       @relation("OfficeDeskReminderRecipient")
   developmentThursdayEvents   DevelopmentThursdayEvent[] @relation("DevelopmentThursdayPresenter")
+
+  inovaProjectsCreated      InovaProject[]    @relation("InovaProjectCreatedBy")
+  inovaProjectsResponsible1 InovaProject[]    @relation("InovaProjectResponsible1")
+  inovaProjectsResponsible2 InovaProject[]    @relation("InovaProjectResponsible2")
+  inovaDiaryEntries         InovaDiaryEntry[] @relation("InovaDiaryEntryCreatedBy")
+  inovaActivityAsActor      InovaActivity[]   @relation("InovaActivityActor")
+  inovaGuiaVideosCreated    InovaGuiaVideo[]  @relation("InovaGuiaVideoCreatedBy")
 
   retroRoomsCreated             RetroRoom[]                    @relation("RetroRoomsCreated")
   retroRoomsArchived            RetroRoom[]                    @relation("RetroRoomsArchived")
@@ -261,6 +485,7 @@ model User {
   reviews                       Review[]                       @relation("ReviewsAuthored")
   campaignsCreated              Campaign[]                     @relation("CampaignsCreated")
   campaignPostsAssigned         CampaignPost[]                 @relation("CampaignPostsResponsible")
+  campaignPostsCreated          CampaignPost[]                 @relation("CampaignPostsCreatedBy")
   reviewComments                ReviewComment[]                @relation("ReviewCommentsAuthored")
   reviewReactions               ReviewReaction[]
   reviewCommentReactions        ReviewCommentReaction[]
@@ -277,6 +502,7 @@ model User {
   corporatePostsPinned          CorporatePost[]                @relation("CorporatePostsPinned")
   corporatePostsReviewed        CorporatePost[]                @relation("CorporatePostsReviewed")
   corporatePostReads            CorporatePostRead[]            @relation("CorporatePostReads")
+  corporatePostPollVotes        CorporatePostPollVote[]        @relation("CorporatePostPollVotes")
   officeMapDraftsEdited         OfficeMapDraft[]               @relation("OfficeMapDraftEditor")
   officeMapAssetsCreated        OfficeMapAsset[]               @relation("OfficeMapAssetCreator")
   officeMapLocks                OfficeMapEditLock[]            @relation("OfficeMapLockOwner")
@@ -298,6 +524,9 @@ model User {
   xpTransactions                XpTransaction[]                @relation("XpTransactions")
   vacations                     Vacation[]                     @relation("Vacations")
   vacationsCreated              Vacation[]                     @relation("VacationsCreated")
+  vacationEntitlements          VacationEntitlement[]          @relation("VacationEntitlements")
+  vacationPlansConfirmed        VacationPlan[]                 @relation("VacationPlansConfirmed")
+  vacationPlansValidated        VacationPlan[]                 @relation("VacationPlansValidated")
   accessLogs                    AccessLog[]                    @relation("AccessLogs")
   analyticsEvents               AnalyticsEvent[]               @relation("AnalyticsEvents")
   hrDashboards                  HrDashboard[]
@@ -316,9 +545,36 @@ model User {
   pdiEvidencesUploaded PdiActionEvidence[] @relation("PdiEvidencesUploaded")
   pdiActionEvents      PdiActionHistory[]  @relation("PdiActionEvents")
 
-  quizAttempts                QuizAttempt[]        @relation("QuizAttempts")
+  okrAssignments      OkrAssignment[] @relation("OkrAssignments")
+  okrCheckInsAuthored OkrCheckIn[]    @relation("OkrCheckInAuthor")
+  okrCheckInsCreated  OkrCheckIn[]    @relation("OkrCheckInCreatedBy")
+
+  quizAttempts        QuizAttempt[] @relation("QuizAttempts")
+  badgeClaims         BadgeClaim[]  @relation("BadgeClaims")
+  badgeClaimsReviewed BadgeClaim[]  @relation("BadgeClaimsReviewed")
+
   certificateRequests         CertificateRequest[] @relation("CertificateRequestUser")
   certificateRequestsReviewed CertificateRequest[] @relation("CertificateRequestReviewedBy")
+
+  trainingRecords         TrainingRecord[] @relation("TrainingRecords")
+  trainingRecordsReviewed TrainingRecord[] @relation("TrainingRecordsReviewed")
+  trainingRecordsCreated  TrainingRecord[] @relation("TrainingRecordsCreated")
+  trainingEventsCreated   TrainingEvent[]  @relation("TrainingEventsCreated")
+
+  apprenticeEnrollments         ApprenticeEnrollment[]        @relation("ApprenticeEnrollments")
+  apprenticeSubmissions         ApprenticeSubmission[]        @relation("ApprenticeSubmissions")
+  apprenticeAttendances         ApprenticeAttendance[]        @relation("ApprenticeAttendances")
+  apprenticeAttendancesRecorded ApprenticeAttendance[]        @relation("ApprenticeAttendancesRecorded")
+  apprenticeMakeupsCreated      ApprenticeMakeup[]            @relation("ApprenticeMakeupsCreated")
+  apprenticeMakeupAttendances   ApprenticeMakeupAttendee[]    @relation("ApprenticeMakeupAttendances")
+  apprenticeSurveyReceipts      ApprenticeSurveyReceipt[]     @relation("ApprenticeSurveyReceipts")
+  apprenticeContractsUpdated    ApprenticeContract[]          @relation("ApprenticeContractsUpdated")
+  apprenticeContractSignatures  ApprenticeContractSignature[] @relation("ApprenticeContractSignatures")
+  apprenticeJourney             ApprenticeJourney?            @relation("ApprenticeJourney")
+  apprenticeJourneysUpdated     ApprenticeJourney[]           @relation("ApprenticeJourneysUpdated")
+  apprenticeSectorMoves         ApprenticeSectorMove[]        @relation("ApprenticeSectorMoves")
+  apprenticeSectorMovesCreated  ApprenticeSectorMove[]        @relation("ApprenticeSectorMovesCreated")
+  apprenticeTasksCreated        ApprenticeTask[]              @relation("ApprenticeTasksCreated")
 
   benchmarkPracticesCreated    BenchmarkPractice[]   @relation("BenchmarkPracticesCreated")
   glassReviewsCreated          GlassReview[]         @relation("GlassReviewsCreated")
@@ -335,7 +591,8 @@ model User {
   eventPhotoReactions  EventPhotoReaction[] @relation("EventPhotoReactions")
   eventPhotoComments   EventPhotoComment[]  @relation("EventPhotoComments")
 
-  calendarEventsCreated CalendarEvent[] @relation("CalendarEventsCreated")
+  calendarEventsCreated CalendarEvent[]      @relation("CalendarEventsCreated")
+  calendarEventGuests   CalendarEventGuest[] @relation("CalendarEventGuests")
 
   oneOnOneAsUserA          OneOnOneSeries[]      @relation("OneOnOneUserA")
   oneOnOneAsUserB          OneOnOneSeries[]      @relation("OneOnOneUserB")
@@ -344,6 +601,8 @@ model User {
   oneOnOneNotes            OneOnOnePrivateNote[] @relation("OneOnOneNotes")
   oneOnOneActionsOwned     OneOnOneAction[]      @relation("OneOnOneActionsOwned")
   oneOnOneActionsCompleted OneOnOneAction[]      @relation("OneOnOneActionsCompleted")
+  /// Perfil de instrutor, quando este colaborador dá aula (Documento 4, 9.7).
+  instructorProfile        Instructor[]          @relation("InstructorUser")
 
   @@index([companyId])
   @@index([managerId])
@@ -531,6 +790,7 @@ model Sector {
   knowledgeEntries       KnowledgeEntry[]
   challenges             Challenge[]
   calendarEvents         CalendarEventSector[]
+  courseAudiences        CourseAudienceSector[]
 
   @@unique([companyId, slug])
   @@index([companyId])
@@ -553,12 +813,16 @@ model Company {
   squads                        Squad[]
   thirdPartyInvites             ThirdPartyInvite[]
   badges                        Badge[]
+  badgeCategories               BadgeCategory[]
+  badgeClaims                   BadgeClaim[]
   feedbacks                     Feedback[]
   feedbackReactions             FeedbackReaction[]
   feedbackRecipients            FeedbackRecipient[]
   feedbackComments              FeedbackComment[]
   feedbackRecognitionCategories FeedbackRecognitionCategory[]
   recognitionCategories         RecognitionCategory[]
+  birthdayGreetings             BirthdayGreeting[]
+  birthdayGreetingReactions     BirthdayGreetingReaction[]
   monthlyHighlights             MonthlyHighlight[]
   moodEntries                   MoodEntry[]
   coinRules                     CoinRule[]
@@ -585,7 +849,12 @@ model Company {
   corporatePostCommentMentions  CorporatePostCommentMention[]
   corporatePostReads            CorporatePostRead[]
   corporatePostSectors          CorporatePostSector[]
+  corporatePostTags             CorporatePostTag[]
+  calendarEventGuests           CalendarEventGuest[]
   corporatePostAttachments      CorporatePostAttachment[]
+  corporatePostPolls            CorporatePostPoll[]
+  corporatePostPollOptions      CorporatePostPollOption[]
+  corporatePostPollVotes        CorporatePostPollVote[]
   userBadges                    UserBadge[]
   retroRooms                    RetroRoom[]
   retroRoomSquads               RetroRoomSquad[]
@@ -614,12 +883,24 @@ model Company {
   developmentThursdayEvents  DevelopmentThursdayEvent[]
   appSettings                AppSetting[]
 
+  inovaProjects     InovaProject[]
+  inovaPhaseHistory InovaPhaseHistory[]
+  inovaDiaryEntries InovaDiaryEntry[]
+  inovaProjectTasks InovaProjectTask[]
+  inovaActivity     InovaActivity[]
+  inovaGuiaVideos   InovaGuiaVideo[]
+
   culturePages          CulturePage[]
   cultureManuals        CultureManual[]
   cultureBenefits       CultureBenefit[]
   cultureVisualAssets   CultureVisualAsset[]
   culturePersonalAssets CulturePersonalAsset[]
   vacations             Vacation[]
+  vacationCampaigns     VacationCampaign[]
+  vacationEntitlements  VacationEntitlement[]
+  vacationPlans         VacationPlan[]
+  vacationPlanPeriods   VacationPlanPeriod[]
+  vacationRequests      VacationRequest[]
   accessLogs            AccessLog[]
   analyticsEvents       AnalyticsEvent[]
   hrDashboards          HrDashboard[]
@@ -642,11 +923,20 @@ model Company {
   pdiActionEvidences   PdiActionEvidence[]
   pdiActionHistory     PdiActionHistory[]
 
+  okrCycles         OkrCycle[]
+  okrObjectives     OkrObjective[]
+  okrKeyResults     OkrKeyResult[]
+  okrAssignments    OkrAssignment[]
+  okrCheckIns       OkrCheckIn[]
+  okrKrDependencies OkrKrDependency[]
+
   courseQuizzes        CourseQuiz[]
   courseQuestions      CourseQuestion[]
   quizAttempts         QuizAttempt[]
   certificateTemplates CertificateTemplate[]
   certificateRequests  CertificateRequest[]
+  trainingEvents       TrainingEvent[]
+  trainingRecords      TrainingRecord[]
 
   benchmarkPractices   BenchmarkPractice[]
   glassReviews         GlassReview[]
@@ -673,6 +963,27 @@ model Company {
   oneOnOneNotes          OneOnOnePrivateNote[]
   oneOnOneActions        OneOnOneAction[]
   oneOnOneTopicTemplates OneOnOneTopicTemplate[]
+  courseCategories       CourseCategory[]
+  competencies           Competency[]
+  instructors            Instructor[]
+
+  apprenticeClasses            ApprenticeClass[]
+  apprenticeEnrollments        ApprenticeEnrollment[]
+  apprenticeMeetings           ApprenticeMeeting[]
+  apprenticeMeetingMaterials   ApprenticeMeetingMaterial[]
+  apprenticeActivities         ApprenticeActivity[]
+  apprenticeSubmissions        ApprenticeSubmission[]
+  apprenticeAttendances        ApprenticeAttendance[]
+  apprenticeMakeups            ApprenticeMakeup[]
+  apprenticeMakeupAttendees    ApprenticeMakeupAttendee[]
+  apprenticeSurveyResponses    ApprenticeSurveyResponse[]
+  apprenticeSurveyReceipts     ApprenticeSurveyReceipt[]
+  apprenticeContract           ApprenticeContract?
+  apprenticeContractSignatures ApprenticeContractSignature[]
+  apprenticeJourneys           ApprenticeJourney[]
+  apprenticeSectorMoves        ApprenticeSectorMove[]
+  apprenticeTasks              ApprenticeTask[]
+  apprenticeTaskItems          ApprenticeTaskItem[]
 }
 
 model CompanyResponsible {
@@ -780,6 +1091,69 @@ model MonthlyHighlight {
   @@index([userId])
 }
 
+/// Que celebração um mural de aniversário comemora. As duas datas convivem no
+/// mesmo model porque o mural é o mesmo objeto — muda só o que se comemora.
+enum CelebrationKind {
+  /// Aniversário de nascimento (`User.birthDate`).
+  BIRTH
+  /// Aniversário de casa (`User.joinedAt`), o "tempo de casa".
+  WORK
+}
+
+/// Uma assinatura no mural de aniversário de alguém.
+///
+/// NÃO é feedback, de propósito: felicitação não tem situação/comportamento/
+/// impacto, não escolhe categoria, não paga coins e não conta para selo. Era
+/// isso que o botão de parabéns fazia antes — abria o `FeedbackComposer` com
+/// um rascunho —, e o resultado era "Parabéns, Victoria!" no meio da lista de
+/// feedbacks da pessoa. Ver a spec `2026-08-31-mural-de-aniversarios-design`.
+///
+/// O mural é identificado por (pessoa, tipo, ano): o de 2026 não se mistura
+/// com o de 2025, e o de nascimento não se mistura com o de casa. Uma
+/// assinatura por pessoa por mural (a unique), editável e apagável — o mural é
+/// um cartão coletivo assinado, não uma conversa.
+model BirthdayGreeting {
+  id             String          @id @default(cuid())
+  /// Quem faz aniversário.
+  targetId       String
+  /// Quem assinou.
+  authorId       String
+  kind           CelebrationKind
+  /// Ano civil da ocorrência comemorada (o ano do mural, não o de nascimento).
+  occurrenceYear Int
+  message        String
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  companyId      String          @default("company-emr")
+
+  target    User                       @relation("BirthdayGreetingTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  author    User                       @relation("BirthdayGreetingAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  company   Company                    @relation(fields: [companyId], references: [id])
+  reactions BirthdayGreetingReaction[]
+
+  @@unique([companyId, targetId, kind, occurrenceYear, authorId])
+  @@index([companyId, targetId, kind, occurrenceYear])
+  @@index([authorId])
+}
+
+/// Reação a uma assinatura do mural — mesmo desenho de `FeedbackReaction`.
+model BirthdayGreetingReaction {
+  id         String   @id @default(cuid())
+  greetingId String
+  userId     String
+  emoji      String
+  createdAt  DateTime @default(now())
+  companyId  String   @default("company-emr")
+
+  greeting BirthdayGreeting @relation(fields: [greetingId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company  Company          @relation(fields: [companyId], references: [id])
+
+  @@unique([greetingId, userId, emoji])
+  @@index([greetingId])
+  @@index([companyId])
+}
+
 model Vote {
   id            String   @id @default(cuid())
   voterId       String
@@ -815,27 +1189,116 @@ model VoteCategory {
 }
 
 model Badge {
-  id           String    @id @default(cuid())
+  id              String    @id @default(cuid())
   /// Único **por empresa**, não no banco inteiro: num produto white label o
   /// selo "Inovador" da empresa A não pode impedir a empresa B de ter o dela —
   /// e o `destaque-do-mes`, que o `publishHighlight` procura por slug, precisa
   /// existir uma vez em cada empresa.
-  slug         String
-  name         String
-  description  String
-  kind         BadgeKind
-  iconKey      String
-  threshold    Int       @default(0)
-  categorySlug String?
-  global       Boolean   @default(true)
-  companyId    String    @default("company-emr")
+  slug            String
+  name            String
+  description     String
+  kind            BadgeKind
+  iconKey         String
+  threshold       Int       @default(0)
+  /// ATENÇÃO: **não** é o tema do selo — é o `slug` de uma `RecognitionCategory`,
+  /// e é o que um selo de tipo CATEGORY conta ("dez feedbacks em Colaboração").
+  /// Texto sem FK de propósito (ver AGENTS.md). O tema do catálogo é
+  /// `badgeCategoryId`, outro campo e outro conceito.
+  categorySlug    String?
+  /// Tema do selo no catálogo (Documento 4, seção 11.4): a gaveta em que ele
+  /// aparece no Painel de Emblemas. Opcional — selo sem tema cai em "Sem
+  /// categoria", em vez de receber um chute na migração.
+  badgeCategoryId String?
+  /// Recompensa ao conquistar, em Pontos e em EMR Coins. Nulos por padrão, e
+  /// nulo não é zero: o formulário precisa distinguir "não configurado" de
+  /// "zero digitado". Nenhum dos dois é obrigatório.
+  rewardPoints    Int?
+  rewardCoins     Int?
+  global          Boolean   @default(true)
+  companyId       String    @default("company-emr")
 
-  company Company       @relation(fields: [companyId], references: [id])
-  awarded UserBadge[]
-  sectors BadgeSector[]
+  company       Company        @relation(fields: [companyId], references: [id])
+  badgeCategory BadgeCategory? @relation(fields: [badgeCategoryId], references: [id], onDelete: SetNull)
+  awarded       UserBadge[]
+  sectors       BadgeSector[]
+  claims        BadgeClaim[]
 
   @@unique([companyId, slug])
   @@index([companyId])
+  @@index([badgeCategoryId])
+}
+
+/// Tema do selo — a prateleira do catálogo (Documento 4, seções 11.3 e 11.4).
+///
+/// Não confundir com `RecognitionCategory`: aquela é a categoria do FEEDBACK, e
+/// é ela que `Badge.categorySlug` referencia. Esta só organiza a tela do admin
+/// e agrupa o catálogo. Fundir as duas faria um selo do tema "Cultura" passar a
+/// contar feedbacks de uma categoria "Cultura" que pode nem existir.
+///
+/// Desativa-se, não se apaga: o `slug` é o que a importação por planilha casa.
+model BadgeCategory {
+  id        String   @id @default(cuid())
+  name      String
+  /// Único **por empresa**, como `Badge.slug` e `Sector.slug` — em model
+  /// tenant-scoped, índice único de nome/slug leva `companyId` junto.
+  slug      String
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+  badges  Badge[]
+
+  @@unique([companyId, slug])
+  @@index([companyId, order])
+}
+
+enum BadgeClaimStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Reivindicação de selo feita pelo próprio colaborador (Documento 4, seção
+/// 11.2): o relato da conquista, a comprovação e o veredito da G&G.
+///
+/// Existe porque nem todo selo é contável pelo sistema. Sem isto, o único
+/// caminho era pedir no Teams e torcer para alguém conceder na mão.
+model BadgeClaim {
+  id              String                       @id @default(cuid())
+  badgeId         String
+  userId          String
+  /// Relato da conquista. Obrigatório — é o que a G&G lê para decidir.
+  story           String
+  /// Chave S3 da comprovação (imagem ou PDF); o DTO expõe URL ASSINADA, nunca
+  /// a chave. Comprovação é material de uma pessoa, e o bucket é público.
+  attachmentKey   String?
+  attachmentKind  CorporatePostAttachmentKind?
+  /// Alternativa ao anexo: link do certificado, foto ou documento.
+  link            String?
+  status          BadgeClaimStatus             @default(PENDING)
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  companyId       String                       @default("company-emr")
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+
+  badge      Badge   @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  user       User    @relation("BadgeClaims", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy User?   @relation("BadgeClaimsReviewed", fields: [reviewedById], references: [id], onDelete: SetNull)
+  company    Company @relation(fields: [companyId], references: [id])
+
+  /// Uma reivindicação ATIVA por (pessoa, selo) é garantida por um índice único
+  /// PARCIAL que vive só no SQL da migration (WHERE status <> 'REJECTED') — o
+  /// Prisma não sabe representar índice parcial, e declará-lo aqui faria todo
+  /// `migrate dev` futuro propor recriá-lo sem o WHERE. Mesmo mecanismo de
+  /// `ChallengeSubmission`. Violação chega como P2002.
+  @@index([companyId, status, createdAt])
+  @@index([badgeId])
+  @@index([userId])
 }
 
 model BadgeSector {
@@ -880,8 +1343,16 @@ enum FeedbackCategory {
 enum NotificationType {
   FEEDBACK_RECEIVED
   FEEDBACK_REACTION
+  /// Alguém respondeu a um feedback — do perfil ou do mural, é a mesma conversa.
+  FEEDBACK_COMMENT
   BADGE_EARNED
+  /// Reivindicação de selo recusada pela G&G, com o motivo (Documento 4, 11.2).
+  /// Aprovada não precisa de tipo próprio: ela vira BADGE_EARNED, que é o que a
+  /// pessoa quer ler.
+  BADGE_CLAIM_REJECTED
   HIGHLIGHT_PUBLISHED
+  /// Alguém assinou o mural de aniversário da pessoa.
+  BIRTHDAY_GREETING_RECEIVED
   DEVELOPMENT_THURSDAY_EVENT
   PERIOD_OPENED
   PERIOD_CLOSED
@@ -913,6 +1384,11 @@ enum NotificationType {
   PDI_ACTION_APPROVED
   PDI_ACTION_CHANGES_REQUESTED
   MANDATORY_COURSE_ASSIGNED
+  /// Validação do registro de treinamento pela G&G (módulo de T&D). Dois tipos
+  /// e não um com flag: a recusa leva o motivo no título e pede ação de quem
+  /// recebeu, a validação só informa.
+  TRAINING_VALIDATED
+  TRAINING_REJECTED
   CERTIFICATE_APPROVED
   CHALLENGE_SUBMISSION_APPROVED
   CHALLENGE_SUBMISSION_REJECTED
@@ -920,12 +1396,19 @@ enum NotificationType {
   STORE_ORDER_DELIVERED
   STORE_ORDER_CANCELLED
   CALENDAR_EVENT_REMINDER
+  CALENDAR_EVENT_INVITED
   ONE_ON_ONE_INVITED
   ONE_ON_ONE_ACTION_ASSIGNED
   ONE_ON_ONE_REMINDER
   ONE_ON_ONE_RESPONDED
   ONE_ON_ONE_PROPOSAL_ACCEPTED
   ONE_ON_ONE_PROPOSAL_DECLINED
+  /// A programação de férias da pessoa foi validada pela G&G. É o aviso que a
+  /// G&G pediu no lugar do recibo assinado, que segue com a Contabilidade.
+  VACATION_PLAN_VALIDATED
+  /// Cobrança do prazo da campanha, para o gestor com gente sem programar. É o
+  /// que substitui a G&G caçando gestor por e-mail.
+  VACATION_PLAN_DEADLINE
 }
 
 enum RetroRoomStatus {
@@ -1099,9 +1582,15 @@ model Vacation {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user      User    @relation("Vacations", fields: [userId], references: [id], onDelete: Cascade)
-  createdBy User    @relation("VacationsCreated", fields: [createdById], references: [id])
-  company   Company @relation(fields: [companyId], references: [id])
+  /// Preenchido quando o período nasceu da validação de um plano da campanha.
+  /// Null é férias lançadas à mão — e a campanha só substitui o que colide
+  /// dentro da janela dela, nunca período passado ou em curso.
+  planPeriodId String? @unique
+
+  user       User                @relation("Vacations", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy  User                @relation("VacationsCreated", fields: [createdById], references: [id])
+  company    Company             @relation(fields: [companyId], references: [id])
+  planPeriod VacationPlanPeriod? @relation("VacationFromPlan", fields: [planPeriodId], references: [id], onDelete: SetNull)
 
   @@index([companyId, startDate])
   @@index([userId])
@@ -1679,10 +2168,19 @@ model CorporatePost {
   /// PUBLISHED por default de propósito: as linhas que já existem foram todas
   /// escritas por quem publica direto, e a coluna nasce sem backfill.
   status          CorporatePostStatus   @default(PUBLISHED)
+  /// Instante marcado para a publicação (Documento 4, seção 12). Só existe em
+  /// post SCHEDULED; nulo em todo o resto. Quem agenda é quem publica direto —
+  /// marcar data para um post que ainda pode ser recusado é prometer o que não
+  /// se controla.
+  publishAt       DateTime?
   reviewedAt      DateTime?
   reviewedById    String?
   rejectionReason String?
   audienceScope   CorporatePostAudience @default(ALL)
+  /// Tipo de comunicação (Institucional, Benefícios, Treinamento…). Opcional:
+  /// todo comunicado já publicado nasceria inválido com ela obrigatória, e o
+  /// painel de Comunicação Interna precisa mesmo do balde "Sem categoria".
+  tagId           String?
 
   author       User                      @relation("CorporatePostsAuthored", fields: [authorId], references: [id], onDelete: Cascade)
   comments     CorporatePostComment[]
@@ -1692,8 +2190,10 @@ model CorporatePost {
   pinnedBy     User?                     @relation("CorporatePostsPinned", fields: [pinnedById], references: [id], onDelete: SetNull)
   reviewedBy   User?                     @relation("CorporatePostsReviewed", fields: [reviewedById], references: [id], onDelete: SetNull)
   reads        CorporatePostRead[]
+  tag          CorporatePostTag?         @relation(fields: [tagId], references: [id], onDelete: SetNull)
   sectors      CorporatePostSector[]
   attachments  CorporatePostAttachment[]
+  poll         CorporatePostPoll?
   campaignPost CampaignPost?
 
   @@index([createdAt])
@@ -1704,6 +2204,35 @@ model CorporatePost {
 }
 
 /// Público-alvo do post quando `audienceScope` é SECTORS. Vazio com escopo ALL.
+/// Tipo de comunicação do Feed Corporativo — o que a G&G chama de "tag"
+/// (Documento 3, seção 13). Catálogo **por empresa**, editável em Administração.
+///
+/// No molde de `CalendarEventType`, que resolve o mesmo problema no calendário:
+/// nome, slug, cor e unique por empresa. A cor não é enfeite — no filtro do topo
+/// do Feed as tags aparecem lado a lado, e sem ela a lista vira meia dúzia de
+/// pílulas cinzas indistinguíveis.
+///
+/// Tag é **desativada**, nunca apagada: apagar deixaria comunicado órfão e
+/// sumiria com a série histórica do painel de Comunicação Interna. Mesma regra
+/// de `RecognitionCategory`.
+model CorporatePostTag {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String
+  color     String   @default("#6CE190")
+  active    Boolean  @default(true)
+  order     Int      @default(0)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company         @relation(fields: [companyId], references: [id])
+  posts   CorporatePost[]
+
+  @@unique([companyId, slug])
+  @@index([companyId])
+}
+
 model CorporatePostSector {
   id        String @id @default(cuid())
   postId    String
@@ -1738,6 +2267,68 @@ model CorporatePostAttachment {
   company Company       @relation(fields: [companyId], references: [id])
 
   @@index([postId])
+  @@index([companyId])
+}
+
+/// Enquete do post do Feed (spec 2026-09-08). Model próprio, e não um `kind`
+/// novo em `CorporatePostAttachment`: aquela tabela é de arquivo enviado —
+/// deriva o kind do content-type, valida tamanho e exige URL do bucket. Enquete
+/// não tem nenhum dos três, e entraria lá como uma linha de nulos.
+///
+/// Só `companyId`, acompanhando o `CorporatePost` — a família do Feed não tem
+/// `sectorId`, ao contrário da `ReviewPoll`, que é copiada no resto.
+model CorporatePostPoll {
+  id        String   @id @default(cuid())
+  postId    String   @unique
+  question  String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  post    CorporatePost             @relation(fields: [postId], references: [id], onDelete: Cascade)
+  company Company                   @relation(fields: [companyId], references: [id])
+  options CorporatePostPollOption[]
+  votes   CorporatePostPollVote[]
+
+  @@index([companyId])
+}
+
+model CorporatePostPollOption {
+  id        String @id @default(cuid())
+  pollId    String
+  text      String
+  /// Ordem em que a opção foi escrita. É o que mantém a enquete estável entre
+  /// leituras — sem ela a lista sairia na ordem que o banco quisesse.
+  position  Int
+  companyId String @default("company-emr")
+
+  poll    CorporatePostPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  company Company                 @relation(fields: [companyId], references: [id])
+  votes   CorporatePostPollVote[]
+
+  @@unique([pollId, position])
+  @@index([pollId])
+  @@index([companyId])
+}
+
+model CorporatePostPollVote {
+  id        String   @id @default(cuid())
+  pollId    String
+  optionId  String
+  userId    String
+  createdAt DateTime @default(now())
+  companyId String   @default("company-emr")
+
+  poll    CorporatePostPoll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  option  CorporatePostPollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user    User                    @relation("CorporatePostPollVotes", fields: [userId], references: [id], onDelete: Cascade)
+  company Company                 @relation(fields: [companyId], references: [id])
+
+  /// Um voto por pessoa. É a trava de verdade: a checagem no service evita o
+  /// caminho feliz, e esta unique cobre a corrida entre dois cliques.
+  @@unique([pollId, userId])
+  @@index([pollId])
+  @@index([optionId])
+  @@index([userId])
   @@index([companyId])
 }
 
@@ -2249,13 +2840,24 @@ enum CultureVisualAssetFit {
   CONTAIN
 }
 
+/// A qual das duas identidades visuais a peça pertence (Documento 4, seção 7).
+/// A EMR tem duas marcas em uso ao mesmo tempo, e a regra de uso é diferente
+/// em cada uma — misturá-las na mesma grade fazia o colaborador levar a marca
+/// nova para fora da empresa.
+enum CultureVisualAssetBrand {
+  /// Uso interno e externo, até a divulgação oficial da nova marca.
+  CURRENT
+  /// Uso restrito ao ambiente interno.
+  NEW
+}
+
 /// Peça do kit de identidade visual (banner de LinkedIn, logotipo, fundo de
 /// reunião). Diferente de CultureManual, a imagem NÃO é um anexo do card: ela é
 /// o próprio produto — o mesmo objeto serve de preview e de download. Por isso
 /// `storageKey` é obrigatório, e o prefixo é público (`visual-assets/`), ao
 /// contrário do PDF de manual, que passa por rota autenticada.
 model CultureVisualAsset {
-  id          String                @id @default(cuid())
+  id          String                  @id @default(cuid())
   title       String
   description String
   /// Chave do objeto no S3. A URL pública é resolvida no serialize, como em
@@ -2263,12 +2865,15 @@ model CultureVisualAsset {
   storageKey  String
   /// Nome sugerido no download, ex.: `EMR-Banner-LinkedIn.png`.
   fileName    String
-  fit         CultureVisualAssetFit @default(COVER)
-  order       Int                   @default(0)
-  published   Boolean               @default(true)
-  companyId   String                @default("company-emr")
-  createdAt   DateTime              @default(now())
-  updatedAt   DateTime              @updatedAt
+  fit         CultureVisualAssetFit   @default(COVER)
+  /// CURRENT por default: toda peça já publicada nasceu antes de a nova marca
+  /// existir, então o default é o backfill — não há UPDATE de migração.
+  brand       CultureVisualAssetBrand @default(CURRENT)
+  order       Int                     @default(0)
+  published   Boolean                 @default(true)
+  companyId   String                  @default("company-emr")
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -2371,15 +2976,18 @@ model AnalyticsEvent {
 // Desenvolvimento — Aprendizado (LMS) e PDI
 // ============================================================================
 
+enum CourseStatus {
+  DRAFT
+  REVIEW
+  PENDING_APPROVAL
+  PUBLISHED
+  ARCHIVED
+}
+
 enum CourseLevel {
   BEGINNER
   INTERMEDIATE
   ADVANCED
-}
-
-enum CourseLessonType {
-  VIDEO
-  TEXT
 }
 
 enum CourseEnrollmentStatus {
@@ -2388,6 +2996,43 @@ enum CourseEnrollmentStatus {
 }
 
 enum CertificateRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// De onde a solicitação veio. `EXTERNAL` é o certificado de curso feito FORA,
+/// que até o Documento 4 entrava por um formulário do Notion. Uma origem, e não
+/// duas entidades: mesma fila, mesma aprovação, mesmo histórico.
+enum CertificateRequestOrigin {
+  INTERNAL
+  EXTERNAL
+}
+
+enum TrainingType {
+  COMPLIANCE
+  TECNICO
+  COMPORTAMENTAL
+}
+
+enum TrainingSponsor {
+  GRATUITO
+  EMR
+  PROPRIO
+  OUTRO
+}
+
+enum TrainingReason {
+  INICIATIVA_PROPRIA
+  SOLICITACAO_GESTOR
+  LNT
+  PDI
+  OBRIGATORIO
+}
+
+/// Validação da G&G sobre o registro de treinamento. Outro eixo que a
+/// participação: aqui a pergunta é "o comprovante confere?".
+enum TrainingValidationStatus {
   PENDING
   APPROVED
   REJECTED
@@ -2444,44 +3089,72 @@ enum PdiActionEventType {
 
 /// Curso do catálogo de Aprendizado. Só curso publicado aparece para o colaborador.
 model Course {
-  id                          String      @id @default(cuid())
+  id                          String       @id @default(cuid())
   title                       String
   slug                        String
   shortDescription            String?
-  description                 String?     @db.Text
+  description                 String?      @db.Text
   coverUrl                    String?
-  category                    String
-  level                       CourseLevel @default(BEGINNER)
+  /// Identidade visual do curso (Documento 4, seção 9.6, passo 2). `icon` é
+  /// emoji e `primaryColor` é hex — os dois vestem o card quando não há capa,
+  /// que é o caso da maioria dos cursos internos.
+  bannerUrl                   String?
+  introVideoUrl               String?
+  icon                        String?
+  primaryColor                String?
+  /// Categoria do catálogo (Documento 4, seção 9.6). Era `category String` —
+  /// texto livre, que fazia "Liderança" e "liderança " virarem duas.
+  categoryId                  String?
+  level                       CourseLevel  @default(BEGINNER)
   /// Sem `durationMinutes`: a duração do curso é a soma das aulas, derivada na
   /// leitura. Um total digitado à mão desincroniza na primeira aula editada.
-  /// Competências desenvolvidas (string[]).
-  competencies                Json        @default("[]")
   /// Objetivos de aprendizagem (string[]).
-  objectives                  Json        @default("[]")
+  objectives                  Json         @default("[]")
   prerequisites               String?
-  instructorName              String?
-  instructorBio               String?
-  mandatory                   Boolean     @default(false)
-  certificateEnabled          Boolean     @default(true)
-  published                   Boolean     @default(false)
+  mandatory                   Boolean      @default(false)
+  certificateEnabled          Boolean      @default(true)
+  /// Ciclo de vida do curso (Documento 4, seção 9.6). Era `published Boolean`.
+  /// Só `PUBLISHED` aparece para o aluno; os outros quatro são etapas da
+  /// autoria. O DTO segue expondo `published`, derivado daqui, porque é o que
+  /// as telas do aluno perguntam.
+  status                      CourseStatus @default(DRAFT)
+  /// Recompensa ao concluir (Documento 4, seção 9.6): 25 pontos e 10 EMR Coins
+  /// por padrão, e definida POR CURSO. Não é `CoinRule`: aquela só sabe valor
+  /// fixo por evento, e aqui o valor é do curso — mesmo caso do desafio e do
+  /// selo, que usam `awardFixedCoins`/`awardFixedXp`. Zero = sem recompensa.
+  rewardPoints                Int          @default(25)
+  rewardCoins                 Int          @default(10)
   publishedAt                 DateTime?
-  /// Nulo = curso visível para toda a empresa. Preenchido = só quem é do setor
-  /// enxerga (ver "Recorte por setor" no spec). Nasce nulo em todo curso
-  /// existente, então o comportamento atual é preservado por construção.
+  /// Setor DONO do curso: quem o administra, e o recorte que o SUBADMIN escreve.
+  /// Nulo = da empresa toda. Para "quem ENXERGA", ver `audienceSectors` abaixo —
+  /// os dois somam, e este continua sendo um só de propósito, porque autoria tem
+  /// um responsável e público tem vários.
   sectorId                    String?
+  /// Categorias de cargo que enxergam o curso (Documento 4, seção 9.2). Vazio =
+  /// sem restrição por cargo.
+  ///
+  /// ATENÇÃO OPERACIONAL: curso restrito por cargo fica invisível para quem está
+  /// com `positionCategory` vazio — que é todo mundo até a importação rodar com
+  /// a coluna nova. Mesma pegadinha do `managerId` e dos painéis da Liderança.
+  audiencePositionCategories  String[]     @default([])
+  /// Rótulo de recomendação (Todos, Novos colaboradores, Líderes…). NÃO restringe
+  /// acesso: um curso recomendado para líderes continua visível para todos.
+  recommendedFor              String[]     @default([])
+  /// Matricula sozinho quem entra no público-alvo, em lote e de forma idempotente.
+  autoEnroll                  Boolean      @default(false)
   /// Curso cuja emissão de certificado passa por fila de aprovação em vez de
   /// sair automaticamente ao concluir.
-  requiresCertificateApproval Boolean     @default(false)
+  requiresCertificateApproval Boolean      @default(false)
   /// Modelo visual usado no certificado emitido deste curso; nulo cai no
   /// isDefault da empresa e, na ausência dele, no visual atual.
   certificateTemplateId       String?
-  companyId                   String      @default("company-emr")
-  createdAt                   DateTime    @default(now())
-  updatedAt                   DateTime    @updatedAt
+  companyId                   String       @default("company-emr")
+  createdAt                   DateTime     @default(now())
+  updatedAt                   DateTime     @updatedAt
 
-  company             Company               @relation(fields: [companyId], references: [id])
-  sector              Sector?               @relation("CourseSector", fields: [sectorId], references: [id], onDelete: SetNull)
-  certificateTemplate CertificateTemplate?  @relation(fields: [certificateTemplateId], references: [id], onDelete: SetNull)
+  company             Company                @relation(fields: [companyId], references: [id])
+  sector              Sector?                @relation("CourseSector", fields: [sectorId], references: [id], onDelete: SetNull)
+  certificateTemplate CertificateTemplate?   @relation(fields: [certificateTemplateId], references: [id], onDelete: SetNull)
   modules             CourseModule[]
   lessons             CourseLesson[]
   enrollments         CourseEnrollment[]
@@ -2492,11 +3165,134 @@ model Course {
   trackLinks          LearningTrackCourse[]
   quizzes             CourseQuiz[]
   certificateRequests CertificateRequest[]
+  courseCategory      CourseCategory?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  competencyLinks     CourseCompetency[]
+  instructorLinks     CourseInstructor[]
+  audienceSectors     CourseAudienceSector[]
 
   @@unique([slug, companyId])
-  @@index([companyId, published])
-  @@index([companyId, category])
+  @@index([companyId, status])
+  @@index([companyId, categoryId])
   @@index([companyId, sectorId])
+}
+
+/// Categoria de curso. `parentId` preenchido = subcategoria; nulo = a "categoria
+/// raiz" da seção 9.6.
+///
+/// Slug único POR EMPRESA, como `Badge.slug` e `Sector.slug` — regra do repo para
+/// model tenant-scoped. E desativa-se (`active`), nunca se apaga: o slug é o que
+/// sobrevive a renomeação, e apagar levaria os cursos junto.
+/// Setores que ENXERGAM o curso, além do dono (`Course.sectorId`). Tabela de
+/// ligação porque a 9.2 pede "setores específicos", no plural — e porque assim
+/// o `where` da visibilidade continua sendo uma consulta, não um filtro em
+/// memória.
+model CourseAudienceSector {
+  courseId String
+  sectorId String
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  sector Sector @relation(fields: [sectorId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, sectorId])
+  @@index([sectorId])
+}
+
+model CourseCategory {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String
+  /// Emoji.
+  icon      String?
+  parentId  String?
+  order     Int      @default(0)
+  active    Boolean  @default(true)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent   CourseCategory?  @relation("CourseCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children CourseCategory[] @relation("CourseCategoryTree")
+  company  Company          @relation(fields: [companyId], references: [id])
+  courses  Course[]
+
+  @@unique([companyId, slug])
+  @@index([companyId, active])
+}
+
+/// Competência desenvolvida por um curso, usada para recomendar no PDI.
+///
+/// NÃO é `RecognitionCategory`: aquela é o catálogo de categorias de FEEDBACK da
+/// empresa, e `Badge.categorySlug` a referencia. São dois catálogos com o mesmo
+/// tipo de nome, e fundi-los faria um curso de "Liderança" contar como categoria
+/// de feedback "Liderança", que pode nem existir.
+model Competency {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String
+  icon        String?
+  description String?
+  active      Boolean  @default(true)
+  companyId   String   @default("company-emr")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company Company            @relation(fields: [companyId], references: [id])
+  courses CourseCompetency[]
+
+  @@unique([companyId, slug])
+  @@index([companyId, active])
+}
+
+/// Instrutor de curso. `userId` preenchido = colaborador da EMR, e aí nome, foto
+/// e área são DERIVADOS do `User` (seção 9.7) — o cadastro manual fica para quem
+/// é de fora. Único por usuário dentro da empresa: o mesmo colaborador não vira
+/// dois instrutores.
+model Instructor {
+  id        String   @id @default(cuid())
+  userId    String?
+  name      String
+  email     String?
+  photoUrl  String?
+  bio       String?
+  expertise String[]
+  active    Boolean  @default(true)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User?              @relation("InstructorUser", fields: [userId], references: [id], onDelete: SetNull)
+  company Company            @relation(fields: [companyId], references: [id])
+  courses CourseInstructor[]
+
+  @@unique([companyId, userId])
+  @@index([companyId, active])
+}
+
+/// N:N curso ⇄ competência. Tabela de ligação, e não array de FK: array não tem
+/// integridade referencial nem permite consultar "cursos desta competência".
+model CourseCompetency {
+  courseId     String
+  competencyId String
+
+  course     Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  competency Competency @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, competencyId])
+  @@index([competencyId])
+}
+
+/// N:N curso ⇄ instrutor — é o que a 9.7 pede com "mais de um instrutor por
+/// treinamento". `sortOrder` decide quem é o principal (o primeiro).
+model CourseInstructor {
+  courseId     String
+  instructorId String
+  sortOrder    Int    @default(0)
+
+  course     Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  instructor Instructor @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, instructorId])
+  @@index([instructorId])
 }
 
 model CourseModule {
@@ -2518,19 +3314,24 @@ model CourseModule {
 }
 
 model CourseLesson {
-  id              String           @id @default(cuid())
+  id              String   @id @default(cuid())
   courseId        String
   moduleId        String
   title           String
   description     String?
-  type            CourseLessonType @default(VIDEO)
-  videoUrl        String?
-  contentHtml     String?          @db.Text
-  durationMinutes Int              @default(0)
-  sortOrder       Int              @default(0)
-  companyId       String           @default("company-emr")
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  /// Conteúdo da aula: lista ordenada de blocos (Documento 4, seção 9.1).
+  /// Substituiu `type`/`videoUrl`/`contentHtml` — a aula deixou de ter um
+  /// formato só. O formato hoje é DERIVADO dos blocos (`lessonKindOf`).
+  ///
+  /// Array em coluna, e não tabela de blocos, porque o que a tabela daria a
+  /// mais é consulta por tipo de bloco — e a única que existe é a do quiz, que
+  /// segue em `CourseQuiz`, tabela própria. O bloco de quiz guarda só o id.
+  contentBlocks   Json     @default("[]")
+  durationMinutes Int      @default(0)
+  sortOrder       Int      @default(0)
+  companyId       String   @default("company-emr")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   course   Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
   module   CourseModule     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
@@ -2753,7 +3554,12 @@ model CertificateTemplate {
   name              String
   title             String
   backgroundUrl     String?
-  accentColor       String
+  /// Nulos = herdam a MARCA da empresa (cor institucional e logo do branding).
+  /// Antes o certificado tinha identidade própria, mantida à parte; manter
+  /// identidade em dois lugares é o que faz o certificado envelhecer enquanto o
+  /// resto do portal muda. Preenchidos, continuam mandando — o modelo é a
+  /// exceção, a marca é o padrão.
+  accentColor       String?
   signatureName     String
   signatureRole     String
   signatureImageUrl String?
@@ -2775,25 +3581,154 @@ model CertificateTemplate {
 /// viva por vez; recusar guarda o motivo e permite nova solicitação depois.
 model CertificateRequest {
   id              String                   @id @default(cuid())
-  enrollmentId    String                   @unique
+  origin          CertificateRequestOrigin @default(INTERNAL)
   userId          String
-  courseId        String
+  /// Nulos no externo: certificado de fora não tem matrícula nem curso no
+  /// portal. O `@unique` sobrevive porque no Postgres nulo não colide com nulo,
+  /// então continua valendo "uma matrícula, no máximo um pedido".
+  enrollmentId    String?                  @unique
+  courseId        String?
   status          CertificateRequestStatus @default(PENDING)
   reviewedById    String?
   reviewedAt      DateTime?
   rejectionReason String?
-  companyId       String                   @default("company-emr")
-  createdAt       DateTime                 @default(now())
-  updatedAt       DateTime                 @updatedAt
 
-  enrollment CourseEnrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
-  user       User             @relation("CertificateRequestUser", fields: [userId], references: [id], onDelete: Cascade)
-  course     Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  reviewedBy User?            @relation("CertificateRequestReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
-  company    Company          @relation(fields: [companyId], references: [id])
+  /// --- Só no externo (Documento 4, seção 9.8) ---
+  /// O formulário do Notion pergunta nome e setor; aqui não, porque o portal já
+  /// sabe os dois pelo usuário logado.
+  externalCourseName  String?
+  trainingType        TrainingType?
+  sponsor             TrainingSponsor?
+  /// Texto livre do "Outro" no patrocinador — opcional, como o formulário pede.
+  sponsorOther        String?
+  /// Em CENTAVOS: dinheiro em ponto flutuante acumula erro de arredondamento.
+  investedAmountCents Int?
+  /// "Por que você realizou esse curso?" — o formulário permite até dois.
+  reasons             TrainingReason[] @default([])
+  /// Data da solicitação ao gestor; só faz sentido com `SOLICITACAO_GESTOR`.
+  requestedAt         DateTime?
+  /// Chave do anexo no S3 (o certificado em si). Chave, e não URL: o documento é
+  /// pessoal, e a leitura sai assinada e temporária no serialize.
+  attachmentKey       String?
+
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  enrollment CourseEnrollment? @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  user       User              @relation("CertificateRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+  course     Course?           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  reviewedBy User?             @relation("CertificateRequestReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  company    Company           @relation(fields: [companyId], references: [id])
 
   @@index([companyId, status])
   @@index([courseId])
+  /// A fila do externo é lida por empresa + origem; sem isto ela varre a tabela.
+  @@index([companyId, origin, status])
+}
+
+/// Evento interno de treinamento: o molde de onde nascem várias participações
+/// de uma vez (`TrainingRecord`), em vez de o T&D digitar a mesma palestra
+/// oitenta vezes. Ver `docs/superpowers/specs/2026-09-12-modulo-de-treinamentos-td-design.md`.
+model TrainingEvent {
+  id          String  @id @default(cuid())
+  companyId   String  @default("company-emr")
+  name        String
+  description String?
+
+  learningType String    @default("Evento")
+  modality     String?
+  /// Data civil: o evento é de um dia, não de um instante.
+  eventDate    DateTime? @db.Date
+  hours        Decimal   @default(0) @db.Decimal(6, 2)
+  institution  String?
+
+  trainingType           TrainingType?
+  reasons                TrainingReason[] @default([])
+  priority               String           @default("Média")
+  /// Em CENTAVOS. Pode ser rateado entre os participantes no cadastro em massa.
+  defaultInvestmentCents Int              @default(0)
+  status                 String           @default("Planejado")
+
+  createdById String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  company   Company          @relation(fields: [companyId], references: [id])
+  createdBy User?            @relation("TrainingEventsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+  records   TrainingRecord[]
+
+  @@index([companyId, eventDate])
+}
+
+/// O registro de treinamento — o fato único do módulo de T&D.
+///
+/// Substitui o `CertificateRequest` de origem EXTERNAL, que era isto sem carga
+/// horária, instituição nem data de conclusão (a migration fez o backfill). Os
+/// campos de identificação são SNAPSHOT do momento da escrita: quem muda de
+/// setor não leva o treinamento antigo para o setor novo.
+model TrainingRecord {
+  id        String  @id @default(cuid())
+  companyId String  @default("company-emr")
+  userId    String
+  eventId   String?
+
+  /// --- Snapshot de quem fez ---
+  userName         String
+  sectorName       String?
+  squad            String?
+  leaderName       String?
+  position         String?
+  positionCategory String?
+  employmentType   String?
+
+  courseTitle  String
+  learningType String        @default("Curso")
+  modality     String?
+  trainingType TrainingType?
+  hours        Decimal       @default(0) @db.Decimal(6, 2)
+  institution  String?
+
+  sponsor         TrainingSponsor  @default(GRATUITO)
+  sponsorOther    String?
+  /// Em CENTAVOS: dinheiro em ponto flutuante acumula erro de arredondamento.
+  investmentCents Int              @default(0)
+  reasons         TrainingReason[] @default([])
+  priority        String           @default("Média")
+
+  /// Quando a demanda nasceu e quando a ação terminou — datas civis, porque o
+  /// SLA conta dias, não horas.
+  requestDate    DateTime  @db.Date
+  completionDate DateTime? @db.Date
+
+  participationStatus String  @default("Participou")
+  source              String  @default("Autoatendimento do colaborador")
+  notes               String?
+  /// Chave do comprovante no S3. Chave, e não URL: o documento é pessoal, e a
+  /// leitura sai assinada e temporária no serialize.
+  attachmentKey       String?
+
+  validationStatus TrainingValidationStatus @default(PENDING)
+  reviewedById     String?
+  reviewedAt       DateTime?
+  rejectionReason  String?
+
+  createdById String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  company    Company        @relation(fields: [companyId], references: [id])
+  user       User           @relation("TrainingRecords", fields: [userId], references: [id], onDelete: Cascade)
+  event      TrainingEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  reviewedBy User?          @relation("TrainingRecordsReviewed", fields: [reviewedById], references: [id], onDelete: SetNull)
+  createdBy  User?          @relation("TrainingRecordsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([companyId, completionDate])
+  @@index([companyId, validationStatus])
+  @@index([userId])
+  @@index([eventId])
 }
 
 /// Plano de desenvolvimento de uma pessoa num ciclo (ex.: 2026-Q1).
@@ -2929,6 +3864,8 @@ enum AgentKind {
   BENCHMARK
   GLASS
   ASSISTANT
+  INOVA
+  APPRENTICE
 }
 
 enum AgentMessageRole {
@@ -3294,6 +4231,19 @@ model CampaignPost {
   title           String
   body            String
   visualHint      String?
+  /// Arte do comunicado, que viaja para o post do Mural na publicação. Não é o
+  /// mesmo que `visualHint`: aquele é o briefing em texto ("Imagem do MKT."),
+  /// este é a peça pronta. Guardado como URL do S3 + dimensões, no mesmo molde
+  /// de `CorporatePost.imageUrl` — é para lá que ele vai.
+  imageUrl        String?
+  imageWidth      Int?
+  imageHeight     Int?
+  /// Quem agendou o item. Existe por causa da publicação automática: o tick não
+  /// tem usuário logado, e o post do Mural precisa de autor com permissão de
+  /// publicar direto. `Campaign.createdById` não basta — item avulso não tem
+  /// campanha. Nulo só nas linhas anteriores à coluna que também não tinham
+  /// campanha para o backfill: essas continuam saindo pelo "Publicar agora".
+  createdById     String?
   scheduledFor    DateTime
   channel         CampaignChannel
   audience        CampaignAudience
@@ -3307,12 +4257,19 @@ model CampaignPost {
 
   campaign      Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
   responsible   User?          @relation("CampaignPostsResponsible", fields: [responsibleId], references: [id], onDelete: SetNull)
-  // SetNull: apagar o post do mural não pode derrubar o histórico editorial.
+  createdBy     User?          @relation("CampaignPostsCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  /// SetNull mantido pela ponta do banco, mas ELE SOZINHO não basta: com a linha
+  /// preservada, apagar o comunicado deixava um item `PUBLISHED` sem post no
+  /// calendário editorial, apontando para nada (Documento 4, seção 13.2). Quem
+  /// apaga o item junto é `deletePost`, em `corporate-mural-service.ts` — leia
+  /// o comentário de lá antes de mexer aqui.
   publishedPost CorporatePost? @relation(fields: [publishedPostId], references: [id], onDelete: SetNull)
   company       Company        @relation(fields: [companyId], references: [id])
 
   @@index([companyId, scheduledFor])
   @@index([companyId, status])
+  /// O tick da publicação automática varre exatamente por aqui.
+  @@index([status, channel, scheduledFor])
 }
 
 /// Álbum de fotos de um evento da empresa (confraternização, hackathon, onboarding).
@@ -3449,6 +4406,12 @@ model CalendarEvent {
   id                 String             @id @default(cuid())
   title              String
   description        String             @default("")
+  /// Rótulo fino do evento ("Simulado", "Circuito", "Café Temático") — a coluna
+  /// `Tag` da planilha da G&G. Descreve com a granularidade do negócio, mas NÃO
+  /// dá cor nem entra no filtro: isso é da categoria (`typeId`). Sem ele, cada
+  /// vocabulário novo da planilha viraria uma categoria, e a barra de filtro
+  /// cresceria sem dono.
+  tag                String?
   date               DateTime           @db.Date
   /// Último dia do evento; null quando ele cabe num dia só. A duração em dias
   /// acompanha cada ocorrência da recorrência, não só a primeira.
@@ -3482,6 +4445,7 @@ model CalendarEvent {
   createdBy User                        @relation("CalendarEventsCreated", fields: [createdById], references: [id])
   company   Company                     @relation(fields: [companyId], references: [id])
   sectors   CalendarEventSector[]
+  guests    CalendarEventGuest[]
   reminders CalendarEventReminderSent[]
 
   @@index([companyId, date])
@@ -3492,6 +4456,29 @@ model CalendarEvent {
 /// Público-alvo do evento. **Nenhuma linha significa empresa inteira** — e não
 /// "ninguém". Marcar todos os setores no cadastro congelaria o público: setor
 /// criado depois ficaria de fora de um evento que era de todo mundo.
+/// Pessoa convidada nominalmente para um evento (Documento 3, seção 11).
+///
+/// O convidado enxerga o evento **independentemente de setor e de tag** — é o
+/// ponto todo do convite nominal: chamar quem o recorte por setor não alcança.
+/// As duas regras antigas continuam valendo e se somam a esta.
+///
+/// Tabela, e não um `String[]` de ids no evento: convidado é relação com gente.
+/// Um array de texto não tem FK — pessoa excluída deixaria id órfão, e não
+/// haveria como perguntar "em que eventos fulano foi convidado" sem varrer tudo.
+model CalendarEventGuest {
+  eventId   String
+  userId    String
+  companyId String @default("company-emr")
+
+  event   CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user    User          @relation("CalendarEventGuests", fields: [userId], references: [id], onDelete: Cascade)
+  company Company       @relation(fields: [companyId], references: [id])
+
+  @@id([eventId, userId])
+  @@index([userId])
+  @@index([companyId])
+}
+
 model CalendarEventSector {
   eventId  String
   sectorId String
@@ -3710,4 +4697,798 @@ model OneOnOneTopicTemplate {
   company Company @relation(fields: [companyId], references: [id])
 
   @@index([companyId, active, sortOrder])
+}
+
+/// Programação anual de férias — a campanha de um ano.
+/// Spec: docs/superpowers/specs/2026-08-25-programacao-anual-de-ferias-design.md
+model VacationCampaign {
+  id             String   @id @default(cuid())
+  year           Int
+  opensAt        DateTime @db.Date
+  /// Último dia em que os gestores podem preencher.
+  deadline       DateTime @db.Date
+  /// Bloqueio imediato, independente do prazo.
+  manuallyLocked Boolean  @default(false)
+  /// A regra vigente, CONGELADA nesta campanha. Se morasse só na empresa,
+  /// reabrir 2027 daqui a dois anos revalidaria os planos com a regra de 2029
+  /// e acusaria erro em quem seguiu a regra certa.
+  policy         Json
+  /// Texto do aviso disparado ao colaborador quando o plano é validado.
+  noticeTemplate String   @default("")
+  companyId      String   @default("company-emr")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  company Company        @relation(fields: [companyId], references: [id])
+  plans   VacationPlan[]
+
+  @@unique([companyId, year])
+  @@index([companyId])
+}
+
+/// O direito de uma pessoa a um período aquisitivo: quanto tem e até quando
+/// pode gozar. Derivado da data-base (`User.vacationAnchorDate` ou a admissão);
+/// o saldo e as exceções vêm da folha.
+model VacationEntitlement {
+  id               String   @id @default(cuid())
+  userId           String
+  acquisitionStart DateTime @db.Date
+  acquisitionEnd   DateTime @db.Date
+  /// Data em que as férias precisam TERMINAR (concessivo menos a margem).
+  dueDate          DateTime @db.Date
+  balanceDays      Int      @default(30)
+  /// Observação do DP mostrada ao gestor ("Programação conforme CIEE").
+  note             String?
+  companyId        String   @default("company-emr")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user    User             @relation("VacationEntitlements", fields: [userId], references: [id], onDelete: Cascade)
+  company Company          @relation(fields: [companyId], references: [id])
+  plans   VacationPlan[]
+  request VacationRequest?
+
+  @@unique([companyId, userId, acquisitionEnd])
+  @@index([companyId, dueDate])
+  @@index([userId])
+}
+
+/// Regime de contratação, para efeito de férias. NÃO confundir com
+/// `THIRD_PARTY`, que é acesso restrito por allowlist: o PJ é membro pleno do
+/// time, com contrato diferente.
+enum EmploymentType {
+  CLT
+  PJ
+}
+
+enum VacationPlanStatus {
+  DRAFT
+  CONFIRMED
+  /// Conferido pela G&G. É aqui que o aviso sai e que o plano vira `Vacation`:
+  /// até então é plano, e o calendário não mostra plano como se fosse fato.
+  VALIDATED
+}
+
+/// O que o colaborador PEDIU, antes de o gestor programar.
+///
+/// Pedido, não promessa: quem decide é o gestor, que precisa cobrir a área — foi
+/// como a própria G&G descreveu o processo. Existir aqui é o que tira a pessoa
+/// da posição de descobrir as próprias férias por e-mail, depois de decididas.
+model VacationRequest {
+  id            String   @id @default(cuid())
+  entitlementId String   @unique
+  /// As datas desejadas, em JSON — e aqui isso é certo, ao contrário do plano:
+  /// um pedido nunca é consultado entre pessoas, só lido junto do próprio
+  /// direito. Não há "quem pediu julho?" que justifique linha.
+  periods       Json     @default("[]")
+  note          String?
+  companyId     String   @default("company-emr")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  entitlement VacationEntitlement @relation(fields: [entitlementId], references: [id], onDelete: Cascade)
+  company     Company             @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+}
+
+model VacationPlan {
+  id              String             @id @default(cuid())
+  campaignId      String
+  entitlementId   String
+  sellDays        Boolean            @default(false)
+  note            String?
+  status          VacationPlanStatus @default(DRAFT)
+  /// O gestor recusou as datas que já vieram semeadas e vai propor outras.
+  /// É o que alimenta a lista de pedidos de alteração da G&G — sem isso ela
+  /// teria de comparar planos para descobrir quem mexeu no que estava combinado.
+  changeRequested Boolean            @default(false)
+  confirmedById   String?
+  confirmedAt     DateTime?
+  validatedById   String?
+  validatedAt     DateTime?
+  /// Reabertura pontual depois do prazo, concedida pela G&G. Reabre UM plano,
+  /// e não o sistema inteiro: a exceção de uma pessoa não abre a porta a todos.
+  unlockedUntil   DateTime?
+  companyId       String             @default("company-emr")
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  campaign    VacationCampaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  entitlement VacationEntitlement  @relation(fields: [entitlementId], references: [id], onDelete: Cascade)
+  confirmedBy User?                @relation("VacationPlansConfirmed", fields: [confirmedById], references: [id])
+  validatedBy User?                @relation("VacationPlansValidated", fields: [validatedById], references: [id])
+  company     Company              @relation(fields: [companyId], references: [id])
+  periods     VacationPlanPeriod[]
+
+  @@unique([campaignId, entitlementId])
+  @@index([companyId, status])
+}
+
+/// Um período programado. Linha, e não `jsonb`, porque a coincidência de férias
+/// do time precisa ser consultável ANTES da validação.
+model VacationPlanPeriod {
+  id        String   @id @default(cuid())
+  planId    String
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  days      Int
+  soldDays  Int      @default(0)
+  companyId String   @default("company-emr")
+  createdAt DateTime @default(now())
+
+  plan     VacationPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  company  Company      @relation(fields: [companyId], references: [id])
+  /// O `Vacation` que este período gerou ao ser validado. Null enquanto o plano
+  /// não foi validado.
+  vacation Vacation?    @relation("VacationFromPlan")
+
+  @@index([planId])
+  @@index([companyId, startDate])
+}
+
+// ============================================================================
+// Eu Aprendiz — trilha do programa Jovem Aprendiz
+// Spec: docs/superpowers/specs/2026-09-14-eu-aprendiz-design.md
+// ============================================================================
+
+/// `ACTIVITY` é ficha comum; `COMMITMENT` é o Cartão do Compromisso do Mês (um
+/// por encontro); `REVIEW` é a revisão do compromisso do encontro ANTERIOR — a
+/// única que lê a submissão de outro encontro, e por isso só existe a partir do 2º.
+enum ApprenticeActivityKind {
+  ACTIVITY
+  COMMITMENT
+  REVIEW
+}
+
+enum ApprenticeSurveyLearned {
+  SIM
+  EM_PARTE
+  NAO
+}
+
+/// Turma do ciclo ("Turma A", turno "Manhã"). Model, e não enum `A | B`: a turma
+/// é do ciclo, e o próximo ciclo tem outras — enum obrigaria migration só para
+/// abrir uma turma da tarde.
+model ApprenticeClass {
+  id        String   @id @default(cuid())
+  companyId String   @default("company-emr")
+  name      String
+  shift     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company     Company                @relation(fields: [companyId], references: [id])
+  enrollments ApprenticeEnrollment[]
+
+  @@unique([companyId, name])
+  @@index([companyId, active])
+}
+
+/// Matrícula de um aprendiz numa turma. A unique é por EMPRESA, e não por turma:
+/// a pessoa está numa turma de cada vez, e abrir o próximo ciclo é mover a
+/// matrícula. Histórico de ciclos é problema de quando houver um segundo.
+model ApprenticeEnrollment {
+  id        String   @id @default(cuid())
+  companyId String   @default("company-emr")
+  classId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  company Company         @relation(fields: [companyId], references: [id])
+  class   ApprenticeClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user    User            @relation("ApprenticeEnrollments", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@index([classId])
+}
+
+/// Um encontro da trilha. O STATUS (Concluído/Próximo/Futuro) não é coluna: sai
+/// de `meetingStatusesOf` em `@legends/shared`, pela data. Status editável ao
+/// lado de uma data é status que alguém esquece de mudar.
+model ApprenticeMeeting {
+  id             String    @id @default(cuid())
+  companyId      String    @default("company-emr")
+  order          Int
+  title          String
+  theme          String    @default("")
+  objectives     String[]  @default([])
+  deliverable    String    @default("")
+  /// Data civil: o encontro é de um dia, não de um instante.
+  scheduledOn    DateTime? @db.Date
+  accessReleased Boolean   @default(false)
+  surveyOpen     Boolean   @default(false)
+  slideUrl       String?
+  /// Apresentação enviada como arquivo (S3). Convive com `slideUrl`: quem já
+  /// tem o deck no Drive continua colando o link.
+  slideKey       String?
+  slideFileName  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  company         Company                     @relation(fields: [companyId], references: [id])
+  materials       ApprenticeMeetingMaterial[]
+  activities      ApprenticeActivity[]
+  attendances     ApprenticeAttendance[]
+  makeups         ApprenticeMakeup[]
+  surveyResponses ApprenticeSurveyResponse[]
+  surveyReceipts  ApprenticeSurveyReceipt[]
+  tasks           ApprenticeTask[]
+
+  @@unique([companyId, order])
+  @@index([companyId, scheduledOn])
+}
+
+/// Material complementar do encontro: link externo OU arquivo no S3. O
+/// protótipo usava `URL.createObjectURL`, que só existe naquela aba do
+/// navegador — aqui o arquivo é de verdade.
+model ApprenticeMeetingMaterial {
+  id        String   @id @default(cuid())
+  companyId String   @default("company-emr")
+  meetingId String
+  name      String
+  /// Link externo. Exatamente UM entre `url` e `documentKey` fica preenchido.
+  url       String?
+  /// Chave do arquivo no S3. Chave, e não URL: a leitura sai assinada e
+  /// temporária no serialize, como o comprovante de treinamento.
+  documentKey String?
+  fileName    String?
+  contentType String?
+  sizeBytes   Int?
+  createdAt DateTime @default(now())
+
+  company Company           @relation(fields: [companyId], references: [id])
+  meeting ApprenticeMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, meetingId])
+}
+
+/// Uma ficha do encontro. TUDO é ficha dinâmica aqui — inclusive o Mapa de
+/// Forças e a Linha do Tempo, que no protótipo eram componentes fixos em código.
+/// Um caminho de renderização só, e a G&G muda uma pergunta sem deploy.
+model ApprenticeActivity {
+  id        String                 @id @default(cuid())
+  companyId String                 @default("company-emr")
+  meetingId String
+  order     Int                    @default(0)
+  kind      ApprenticeActivityKind @default(ACTIVITY)
+  title     String
+  /// Blocos e campos — ver `ApprenticeActivitySchema` em `@legends/shared`.
+  schema    Json                   @default("{\"blocks\":[]}")
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  company     Company                @relation(fields: [companyId], references: [id])
+  meeting     ApprenticeMeeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  submissions ApprenticeSubmission[]
+
+  @@index([companyId, meetingId])
+}
+
+/// A ficha preenchida por um aprendiz. Conteúdo PRIVADO: só o próprio e o
+/// facilitador leem. No mural entra o status da entrega, nunca o que foi escrito.
+model ApprenticeSubmission {
+  id           String    @id @default(cuid())
+  companyId    String    @default("company-emr")
+  activityId   String
+  userId       String
+  values       Json      @default("{}")
+  /// Nulo enquanto é rascunho. Enviado é o que conta como entrega.
+  submittedAt  DateTime?
+  draftSavedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  company  Company            @relation(fields: [companyId], references: [id])
+  activity ApprenticeActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  user     User               @relation("ApprenticeSubmissions", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([activityId, userId])
+  @@index([companyId, userId])
+}
+
+/// Chamada nominal. É a ÚNICA presença: o protótipo tinha também um booleano por
+/// (encontro, turma), e dois mecanismos para o mesmo fato divergem.
+model ApprenticeAttendance {
+  id            String   @id @default(cuid())
+  companyId     String   @default("company-emr")
+  meetingId     String
+  userId        String
+  /// `null` = chamada ainda não lançada. É o que distingue "faltou" de "ninguém
+  /// chamou" — e só o primeiro tranca o encontro seguinte.
+  present       Boolean?
+  justification String?
+  needsMakeup   Boolean  @default(false)
+  recordedById  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  company    Company           @relation(fields: [companyId], references: [id])
+  meeting    ApprenticeMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user       User              @relation("ApprenticeAttendances", fields: [userId], references: [id], onDelete: Cascade)
+  recordedBy User?             @relation("ApprenticeAttendancesRecorded", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([meetingId, userId])
+  @@index([companyId, meetingId])
+}
+
+/// Reposição agendada para quem faltou. Ela NÃO destrava o encontro seguinte
+/// sozinha: é compromisso de agenda, não registro de que a pessoa compareceu —
+/// quem destrava é o facilitador corrigindo a chamada depois.
+model ApprenticeMakeup {
+  id          String   @id @default(cuid())
+  companyId   String   @default("company-emr")
+  meetingId   String
+  /// Instante: a reposição tem hora marcada.
+  scheduledAt DateTime
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  company   Company                    @relation(fields: [companyId], references: [id])
+  meeting   ApprenticeMeeting          @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  createdBy User?                      @relation("ApprenticeMakeupsCreated", fields: [createdById], references: [id], onDelete: SetNull)
+  attendees ApprenticeMakeupAttendee[]
+
+  @@index([companyId, scheduledAt])
+}
+
+model ApprenticeMakeupAttendee {
+  id        String @id @default(cuid())
+  companyId String @default("company-emr")
+  makeupId  String
+  userId    String
+
+  company Company          @relation(fields: [companyId], references: [id])
+  makeup  ApprenticeMakeup @relation(fields: [makeupId], references: [id], onDelete: Cascade)
+  user    User             @relation("ApprenticeMakeupAttendances", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([makeupId, userId])
+  @@index([companyId, userId])
+}
+
+/// Resposta da pesquisa de satisfação. **Sem `userId`, de propósito.** Quem já
+/// respondeu fica em `ApprenticeSurveyReceipt`, que é outra tabela e não tem
+/// coluna nenhuma ligando uma linha à outra. Isso protege o anonimato no BANCO;
+/// na tela, com três aprendizes, o texto livre identifica quem escreveu — a
+/// garantia é estrutural, não estatística (ver a spec).
+model ApprenticeSurveyResponse {
+  id          String                  @id @default(cuid())
+  companyId   String                  @default("company-emr")
+  meetingId   String
+  score       Int
+  takeaway    String
+  improvement String                  @default("")
+  learned     ApprenticeSurveyLearned
+  createdAt   DateTime                @default(now())
+
+  company Company           @relation(fields: [companyId], references: [id])
+  meeting ApprenticeMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, meetingId])
+}
+
+/// Recibo de "esta pessoa já respondeu", para não pedir a pesquisa duas vezes.
+/// E só para isso — ver o comentário de `ApprenticeSurveyResponse`.
+model ApprenticeSurveyReceipt {
+  id        String   @id @default(cuid())
+  companyId String   @default("company-emr")
+  meetingId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  company Company           @relation(fields: [companyId], references: [id])
+  meeting ApprenticeMeeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User              @relation("ApprenticeSurveyReceipts", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, userId])
+  @@index([companyId, meetingId])
+}
+
+/// Contrato da trilha: as cláusulas acordadas no primeiro encontro. Uma linha
+/// por empresa — é um documento só, que a G&G edita.
+model ApprenticeContract {
+  id          String   @id @default(cuid())
+  companyId   String   @unique @default("company-emr")
+  clauses     String[] @default([])
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company    Company                       @relation(fields: [companyId], references: [id])
+  updatedBy  User?                         @relation("ApprenticeContractsUpdated", fields: [updatedById], references: [id], onDelete: SetNull)
+  signatures ApprenticeContractSignature[]
+}
+
+model ApprenticeContractSignature {
+  id         String   @id @default(cuid())
+  companyId  String   @default("company-emr")
+  contractId String
+  userId     String
+  signedAt   DateTime @default(now())
+
+  company  Company            @relation(fields: [companyId], references: [id])
+  contract ApprenticeContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  user     User               @relation("ApprenticeContractSignatures", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([contractId, userId])
+  @@index([companyId, userId])
+}
+
+// ---- Eu Aprendiz, Fase 2: jornada, movimentações e quadro de gestão ----
+
+/// Coluna do quadro interno do RH. `boardColumn`, e não `column`: palavra
+/// reservada em SQL só funciona entre aspas, e não vale o risco.
+enum ApprenticeTaskColumn {
+  AFAZER
+  ANDAMENTO
+  VALIDACAO
+  CONCLUIDO
+}
+
+/// O que a jornada do aprendiz tem e o cadastro do colaborador NÃO tem.
+///
+/// Setor, squad, líder, admissão e férias moram em `User` e no planejamento de
+/// férias da Liderança — reimplementá-los aqui seria um segundo cadastro da
+/// mesma pessoa, divergindo do primeiro no dia seguinte. Sobra só isto.
+model ApprenticeJourney {
+  id             String    @id @default(cuid())
+  companyId      String    @default("company-emr")
+  /// `@unique` no userId só, e não composto com `companyId`: a jornada é 1-1 com
+  /// a pessoa, e o usuário já pertence a uma empresa só.
+  userId         String    @unique
+  /// Fim PREVISTO do contrato de aprendizagem — data civil. Não é `User.leftAt`,
+  /// que é quando a pessoa efetivamente saiu.
+  contractEndsOn DateTime? @db.Date
+  /// Atividades sob responsabilidade, uma por linha.
+  activities     String    @default("")
+  notes          String?
+  updatedById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  company   Company @relation(fields: [companyId], references: [id])
+  user      User    @relation("ApprenticeJourney", fields: [userId], references: [id], onDelete: Cascade)
+  updatedBy User?   @relation("ApprenticeJourneysUpdated", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+}
+
+/// Histórico de troca de setor do aprendiz. É o que a elegibilidade lê para
+/// saber há quanto tempo a pessoa está no setor ATUAL — sem isto, a conta
+/// cairia sempre na data de admissão e todo mundo pareceria elegível.
+model ApprenticeSectorMove {
+  id           String   @id @default(cuid())
+  companyId    String   @default("company-emr")
+  userId       String
+  fromSector   String   @default("")
+  toSector     String
+  /// Data civil da mudança.
+  movedOn      DateTime @db.Date
+  reason       String   @default("")
+  responsibles String   @default("")
+  createdById  String?
+  createdAt    DateTime @default(now())
+
+  company   Company @relation(fields: [companyId], references: [id])
+  user      User    @relation("ApprenticeSectorMoves", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("ApprenticeSectorMovesCreated", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([companyId, userId])
+  @@index([companyId, movedOn])
+}
+
+/// Quadro operacional do RH: o que o facilitador precisa fazer para o encontro
+/// acontecer. NÃO é visível para o aprendiz — não confunda com
+/// `ApprenticeActivity`, que é a ficha que ele preenche.
+model ApprenticeTask {
+  id          String               @id @default(cuid())
+  companyId   String               @default("company-emr")
+  title       String
+  category    String               @default("Outros")
+  /// Encontro relacionado; nulo = tarefa geral do programa.
+  meetingId   String?
+  dueOn       DateTime?            @db.Date
+  boardColumn ApprenticeTaskColumn @default(AFAZER)
+  sortOrder   Int                  @default(0)
+  createdById String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  company   Company              @relation(fields: [companyId], references: [id])
+  meeting   ApprenticeMeeting?   @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  createdBy User?                @relation("ApprenticeTasksCreated", fields: [createdById], references: [id], onDelete: SetNull)
+  items     ApprenticeTaskItem[]
+
+  @@index([companyId, boardColumn])
+}
+
+model ApprenticeTaskItem {
+  id        String   @id @default(cuid())
+  companyId String   @default("company-emr")
+  taskId    String
+  text      String
+  done      Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  company Company        @relation(fields: [companyId], references: [id])
+  task    ApprenticeTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, taskId])
+}
+
+// ---------------------------------------------------------------------------
+// Metas e OKRs — ciclos, objetivos, key results e check-ins.
+// Spec: docs/superpowers/specs/2026-09-17-modulo-metas-okr-design.md
+//
+// O check-in é o FATO: o valor atual de um KR é derivado da série, nunca uma
+// coluna do KR. Guardá-lo no KR é o que faz a ImpulseUp (a origem importada)
+// não ter histórico nenhum.
+// ---------------------------------------------------------------------------
+
+enum OkrCycleStatus {
+  OPEN
+  CLOSED
+  DRAFT
+}
+
+enum OkrScope {
+  ORGANIZATION
+  TEAM
+  INDIVIDUAL
+}
+
+enum OkrStatus {
+  ACTIVE
+  ARCHIVED
+  CANCELLED
+}
+
+enum OkrVisibility {
+  EVERYONE
+  ASSIGNEES
+  PRIVATE
+}
+
+enum OkrAggregation {
+  KR_ONLY
+  WEIGHTED_KRS
+  CHILDREN
+  MANUAL
+}
+
+enum OkrConfidenceLevel {
+  ON_TRACK
+  ATTENTION_REQUIRED
+  AT_RISK
+  COMPLETED
+}
+
+enum OkrMetricType {
+  PERCENTAGE
+  NUMBER
+  CURRENCY
+}
+
+/// Substitui o `inverted` da ImpulseUp, que existe no dado e é ignorado no
+/// cálculo de lá: métrica "menor é melhor" que estoura a meta aparecia azul.
+enum OkrDirection {
+  HIGHER_IS_BETTER
+  LOWER_IS_BETTER
+}
+
+enum OkrSubjectType {
+  OBJECTIVE
+  KEY_RESULT
+}
+
+enum OkrRole {
+  OWNER
+  CREATOR
+  ASSIGNED_TO
+}
+
+enum OkrCheckInSource {
+  MANUAL
+  AUTOMATION
+  IMPULSEUP_IMPORT
+}
+
+enum OkrDependencyStrategy {
+  AVERAGE
+  SUM
+  WEIGHTED_AVERAGE
+}
+
+enum OkrDependencyCalcType {
+  PROGRESS
+  VALUE
+}
+
+model OkrCycle {
+  id                    String         @id @default(cuid())
+  companyId             String         @default("company-emr")
+  name                  String
+  description           String?        @db.Text
+  status                OkrCycleStatus @default(DRAFT)
+  startDate             DateTime       @db.Date
+  finishDate            DateTime       @db.Date
+  /// Check-in sem comentário é recusado (422).
+  forceCommentOnCheckIn Boolean        @default(false)
+  /// Janela em que quem não é admin pode registrar check-in. Lado nulo = aberto.
+  updateWindowStart     DateTime?      @db.Date
+  updateWindowFinish    DateTime?      @db.Date
+  /// Semáforo: `{ min, max, color }[]`, em pontos percentuais de atingimento.
+  progressRanges        Json           @default("[]")
+  /// Casas decimais por tipo: `{ percentage, numeric, currency }`.
+  decimals              Json           @default("{}")
+  externalSource        String?
+  externalId            String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  company    Company        @relation(fields: [companyId], references: [id])
+  objectives OkrObjective[]
+
+  // NULL é distinto no Postgres: equivale ao índice único parcial "onde há
+  // origem externa", e o Prisma consegue usá-lo.
+  @@unique([companyId, externalSource, externalId])
+  @@index([companyId, status])
+}
+
+model OkrObjective {
+  id              String              @id @default(cuid())
+  companyId       String              @default("company-emr")
+  cycleId         String
+  parentId        String?
+  /// Código legível (na ImpulseUp, `spreadsheetId`).
+  code            String?
+  name            String
+  description     String?             @db.Text
+  scope           OkrScope
+  status          OkrStatus           @default(ACTIVE)
+  visibility      OkrVisibility       @default(EVERYONE)
+  finishDate      DateTime?           @db.Date
+  /// Peso dentro do pai; nulo divide igualmente o que sobra.
+  weight          Float?
+  aggregation     OkrAggregation      @default(KR_ONLY)
+  /// Atingimento informado (0–1), só lido quando `aggregation = MANUAL`.
+  manualProgress  Float?
+  confidenceLevel OkrConfidenceLevel?
+  /// Alinhamento materializado: ids da raiz até este objetivo, inclusive.
+  path            String[]
+  deletedAt       DateTime?
+  externalSource  String?
+  externalId      String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company    Company        @relation(fields: [companyId], references: [id])
+  cycle      OkrCycle       @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  parent     OkrObjective?  @relation("OkrObjectiveTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children   OkrObjective[] @relation("OkrObjectiveTree")
+  keyResults OkrKeyResult[]
+
+  @@unique([companyId, externalSource, externalId])
+  @@index([cycleId, scope])
+  @@index([parentId])
+}
+
+model OkrKeyResult {
+  id             String        @id @default(cuid())
+  companyId      String        @default("company-emr")
+  objectiveId    String
+  code           String?
+  name           String
+  description    String?       @db.Text
+  metricType     OkrMetricType
+  unit           String?
+  baseline       Float         @default(0)
+  target         Float
+  direction      OkrDirection  @default(HIGHER_IS_BETTER)
+  weight         Float?
+  status         OkrStatus     @default(ACTIVE)
+  finishDate     DateTime?     @db.Date
+  externalSource String?
+  externalId     String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  company      Company           @relation(fields: [companyId], references: [id])
+  objective    OkrObjective      @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  checkIns     OkrCheckIn[]
+  dependencies OkrKrDependency[] @relation("OkrKrDependencyOwner")
+  dependents   OkrKrDependency[] @relation("OkrKrDependencyTarget")
+
+  @@unique([companyId, externalSource, externalId])
+  @@index([objectiveId])
+}
+
+/// Papel de uma pessoa num objetivo ou num KR. Polimórfico de propósito: os
+/// mesmos três papéis valem para os dois, e a unique fica simples.
+model OkrAssignment {
+  id          String         @id @default(cuid())
+  companyId   String         @default("company-emr")
+  subjectType OkrSubjectType
+  subjectId   String
+  personId    String
+  role        OkrRole
+  createdAt   DateTime       @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+  person  User    @relation("OkrAssignments", fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([subjectType, subjectId, personId, role])
+  @@index([personId, role])
+  @@index([subjectType, subjectId])
+}
+
+model OkrCheckIn {
+  id             String           @id @default(cuid())
+  companyId      String           @default("company-emr")
+  keyResultId    String
+  /// Nulo = check-in só de comentário (o que a ImpulseUp exporta).
+  value          Float?
+  /// Meta que é razão: guardar as duas partes é o que permite o acumulado do
+  /// ciclo (a média das porcentagens não é a porcentagem do total).
+  numerator      Float?
+  denominator    Float?
+  comment        String?          @db.Text
+  authorId       String?
+  /// Competência (a sprint/mês a que se refere), separada de `createdAt`.
+  effectiveAt    DateTime         @db.Date
+  source         OkrCheckInSource @default(MANUAL)
+  sourceRef      String?
+  externalSource String?
+  externalId     String?
+  createdAt      DateTime         @default(now())
+  createdById    String?
+  updatedAt      DateTime         @updatedAt
+  deletedAt      DateTime?
+
+  company   Company      @relation(fields: [companyId], references: [id])
+  keyResult OkrKeyResult @relation(fields: [keyResultId], references: [id], onDelete: Cascade)
+  author    User?        @relation("OkrCheckInAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  createdBy User?        @relation("OkrCheckInCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([companyId, externalSource, externalId])
+  @@index([keyResultId, effectiveAt(sort: Desc)])
+}
+
+/// KR calculado a partir de outros KRs. Um KR com linhas aqui é somente leitura.
+model OkrKrDependency {
+  id            String                @id @default(cuid())
+  companyId     String                @default("company-emr")
+  keyResultId   String
+  dependsOnKrId String
+  weight        Float?
+  strategy      OkrDependencyStrategy @default(AVERAGE)
+  calcType      OkrDependencyCalcType @default(PROGRESS)
+
+  company   Company      @relation(fields: [companyId], references: [id])
+  keyResult OkrKeyResult @relation("OkrKrDependencyOwner", fields: [keyResultId], references: [id], onDelete: Cascade)
+  dependsOn OkrKeyResult @relation("OkrKrDependencyTarget", fields: [dependsOnKrId], references: [id], onDelete: Cascade)
+
+  @@unique([keyResultId, dependsOnKrId])
 }

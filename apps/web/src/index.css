@@ -169,6 +169,90 @@ body {
   filter: drop-shadow(0 0 6px rgba(82, 251, 162, 0.65));
 }
 
+/* INOVA — paleta e efeitos do app original (Approved/Lime/Orange do
+   brandbook do INOVA EMR), escopados em `.inova-theme` porque são identidade
+   do módulo, não da marca do tenant (essa vem do `BrandProvider`). */
+.inova-theme {
+  --inova-approved: 139 66% 65%; /* #6CE190 */
+  --inova-lime: 77 100% 49%; /* #B4F900 */
+  --inova-orange: 24 100% 54%; /* #FF7013 */
+}
+
+.inova-blob {
+  position: absolute;
+  border-radius: 9999px;
+  background: linear-gradient(115deg, hsl(var(--inova-approved) / 0.25), hsl(var(--inova-lime) / 0.15));
+  filter: blur(60px);
+  pointer-events: none;
+}
+
+.inova-glow-line {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, hsl(var(--inova-approved) / 0.5), transparent);
+}
+
+.inova-gradient-green {
+  background: linear-gradient(115deg, hsl(var(--inova-approved)) 0%, hsl(var(--inova-lime)) 100%);
+}
+
+.inova-text-gradient {
+  background-image: linear-gradient(115deg, hsl(var(--inova-approved)), hsl(var(--inova-lime)));
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.inova-glow-primary {
+  box-shadow: 0 0 24px hsl(var(--inova-approved) / 0.35), 0 0 48px hsl(var(--inova-lime) / 0.12);
+}
+
+.inova-glass-card {
+  background: hsl(var(--inova-approved) / 0.05);
+  border: 1px solid hsl(var(--inova-approved) / 0.15);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 14px 36px -14px rgba(0, 0, 0, 0.45);
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+.inova-glass-card:hover {
+  border-color: hsl(var(--inova-approved) / 0.5);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 18px 40px -16px rgba(0, 0, 0, 0.55);
+  transform: translateY(-2px);
+}
+
+.inova-logo-glow {
+  filter: drop-shadow(0 12px 40px hsl(var(--inova-approved) / 0.35)) drop-shadow(0 4px 16px hsl(var(--inova-approved) / 0.18));
+}
+
+/* No escuro a logo (PNG com verde escuro fixo nos pixels) se perde no fundo —
+   o app é `dark:` por classe (ver `applyBranding`), não por preferência do SO,
+   então o recorte é por `.dark`, não por `prefers-color-scheme`. Sem SVG pra
+   recolorir de verdade, o filtro empurra o mesmo verde da imagem pro
+   verde-limão do brandbook do INOVA (`--inova-lime`), a mesma vivacidade da
+   logo "Eu Médico Residente" no escuro. */
+.dark .inova-logo-glow {
+  filter: sepia(1) saturate(6) hue-rotate(45deg) brightness(1.1) drop-shadow(0 12px 40px hsl(var(--inova-lime) / 0.35))
+    drop-shadow(0 4px 16px hsl(var(--inova-lime) / 0.18));
+}
+
+.inova-fade-in {
+  animation: inova-fade-in 0.6s ease-out both;
+  animation-delay: var(--inova-fade-delay, 0s);
+}
+@keyframes inova-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inova-fade-in {
+    animation: none;
+  }
+}
+
 /* Thin, technical scrollbars to match the dashboard aesthetic */
 ::-webkit-scrollbar {
   width: 8px;

@@ -1,25 +1,30 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { MoodHistoryPageDTO } from '@legends/shared'
+import {
+  MOOD_OVERVIEW_MAX_DAYS,
+  MOOD_OVERVIEW_MIN_DAYS,
+  type MoodHistoryPageDTO,
+} from '@legends/shared'
 import {
   getTeamMoodGroups,
   getMemberMoodHistory,
   MoodAccessError,
 } from '../services/squad-mood-service'
-import {
-  getMoodOverview,
-  MoodOverviewError,
-  MOOD_OVERVIEW_MAX_DAYS,
-  MOOD_OVERVIEW_MIN_DAYS,
-} from '../services/mood-analytics-service'
+import { getMoodOverview, MoodOverviewError } from '../services/mood-analytics-service'
 
 const historyQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
 })
 
+const ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use o formato AAAA-MM-DD.')
+
 const overviewQuerySchema = z.object({
   days: z.coerce.number().int().min(MOOD_OVERVIEW_MIN_DAYS).max(MOOD_OVERVIEW_MAX_DAYS).optional(),
+  // Período personalizado da aba Clima (Documento 3, seção 4.6). Quando os dois
+  // vêm, ganham de `days`; o service é quem resolve a janela.
+  from: ymd.optional(),
+  to: ymd.optional(),
   sectorId: z.string().min(1).optional(),
 })
 
@@ -67,6 +72,8 @@ export async function squadMoodRoutes(app: FastifyInstance) {
           viewerRole: request.user.role,
           viewerSectorId: request.user.sectorId,
           days: parsed.data.days,
+          from: parsed.data.from,
+          to: parsed.data.to,
           sectorId: parsed.data.sectorId ?? null,
         })
         return reply.send({ overview })

@@ -6,6 +6,7 @@ import {
   type CourseCardDTO,
   type CourseCatalogFilters,
   type CourseDetailDTO,
+  type CourseInstructorRef,
   type CourseRatingDTO,
   type EnrollmentDTO,
   type LearningHomeResponse,
@@ -17,8 +18,14 @@ import { scopedPrisma } from '../lib/tenant-scope'
 import { monthRefOf, todayInSaoPaulo, monthInstantBoundsInSaoPaulo } from '../lib/sao-paulo-date'
 import { createCertificateRecord, hasUnpassedFinalQuiz, renderAndStoreCertificate } from '../lib/certificate-issuer'
 import { syncCourseBadgesForUser } from './badge-service'
-import { notifyBadgesEarned } from './notification-service'
-import { ensureCertificateRequestForEnrollment, resolveCertificateTemplateForCourse } from './certificate-request-service'
+import { awardFixedCoins } from './coin-service'
+import { awardFixedXp } from './xp-service'
+import { settleBadgesEarned } from './badge-reward-service'
+import {
+  ensureCertificateRequestForEnrollment,
+  resolveCertificateTemplateForCourse,
+  toCertificateTemplateVisual,
+} from './certificate-request-service'
 import {
   courseProgressPct,
   toCertificateDTO,
@@ -56,9 +63,60 @@ interface CatalogContext {
   completedLessons: Map<string, number>
   /** Duração do curso = soma das aulas. Derivada, nunca guardada no `Course`. */
   durationMinutes: Map<string, number>
+  /**
+   * Catálogo resolvido em lote (Documento 4, 9.6 e 9.7). Em lote, e não por
+   * card, porque um catálogo de cinquenta cursos faria cinquenta consultas de
+   * categoria e cinquenta de instrutor — o N+1 clássico.
+   */
+  categoryNames: Map<string, string>
+  competencies: Map<string, string[]>
+  instructors: Map<string, CourseInstructorRef[]>
 }
 
 const EMPTY_RATING = { average: 0, total: 0 }
+
+const ordenarPtBr = (valores: Iterable<string>): string[] =>
+  [...valores].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+
+
+/**
+ * `select` do instrutor como as telas o exibem. Quando ele é colaborador
+ * (`userId` preenchido), nome e foto vêm do `User` — a 9.7 pede que a base de
+ * pessoas seja a fonte, e não uma cópia que envelhece.
+ */
+export const INSTRUCTOR_REF_SELECT = {
+  id: true,
+  name: true,
+  photoUrl: true,
+  bio: true,
+  user: { select: { name: true, photoUrl: true } },
+} as const
+
+export function toInstructorRef(instructor: {
+  id: string
+  name: string
+  photoUrl: string | null
+  bio: string | null
+  user: { name: string; photoUrl: string | null } | null
+}): CourseInstructorRef {
+  return {
+    id: instructor.id,
+    name: instructor.user?.name ?? instructor.name,
+    photoUrl: instructor.user?.photoUrl ?? instructor.photoUrl,
+    bio: instructor.bio,
+  }
+}
+
+/** Agrupa linhas de uma tabela de ligação num Map por curso. */
+function agrupar<T, V>(rows: T[], chave: (row: T) => string, valor: (row: T) => V): Map<string, V[]> {
+  const mapa = new Map<string, V[]>()
+  for (const row of rows) {
+    const atual = mapa.get(chave(row)) ?? []
+    atual.push(valor(row))
+    mapa.set(chave(row), atual)
+  }
+  return mapa
+}
 
 /**
  * Recorte por setor na leitura, em um lugar só: a pessoa enxerga curso com
@@ -72,14 +130,43 @@ const EMPTY_RATING = { average: 0, total: 0 }
  * do `where` para a busca livre, e bastaria um filtro futuro trazer `OR` (ou `AND`)
  * para o recorte sumir em silêncio, sem erro e sem teste vermelho.
  */
+/**
+ * Quem enxerga o quê, num lugar só (Documento 4, seção 9.2).
+ *
+ * Duas restrições independentes, e as duas precisam passar:
+ *
+ * 1. **Setor** — o dono (`sectorId`) OU um dos setores de público. Nulo no dono
+ *    e lista vazia no público = empresa toda.
+ * 2. **Categoria do cargo** — lista vazia = sem restrição.
+ *
+ * **ATENÇÃO OPERACIONAL:** curso restrito por cargo fica invisível para quem
+ * está com `positionCategory` vazio — que é todo mundo até a importação de
+ * colaboradores rodar com a coluna nova. É a mesma pegadinha do `managerId` e
+ * dos painéis da Liderança, e é comportamento correto: quem não tem o atributo
+ * não casa com a restrição.
+ */
 export function visibleCourseWhere(
-  viewerSectorId: string | null,
+  viewer: { sectorId: string | null; positionCategory: string | null },
   ...extraFilters: Prisma.CourseWhereInput[]
 ): Prisma.CourseWhereInput {
   return {
     AND: [
-      { published: true },
-      { OR: [{ sectorId: null }, { sectorId: viewerSectorId }] },
+      { status: 'PUBLISHED' },
+      {
+        OR: [
+          { sectorId: null, audienceSectors: { none: {} } },
+          { sectorId: viewer.sectorId },
+          ...(viewer.sectorId ? [{ audienceSectors: { some: { sectorId: viewer.sectorId } } }] : []),
+        ],
+      },
+      {
+        OR: [
+          { audiencePositionCategories: { isEmpty: true } },
+          ...(viewer.positionCategory
+            ? [{ audiencePositionCategories: { has: viewer.positionCategory } }]
+            : []),
+        ],
+      },
       ...extraFilters,
     ],
   }
@@ -89,12 +176,14 @@ export function visibleCourseWhere(
  * Setor de quem lê. Resolvido aqui dentro (e não recebido no `Viewer`) para que
  * nenhum chamador novo consiga esquecer o recorte: é uma busca por chave primária.
  */
-export async function viewerSectorId(viewer: Viewer): Promise<string | null> {
+export async function viewerScope(
+  viewer: Viewer,
+): Promise<{ sectorId: string | null; positionCategory: string | null }> {
   const user = await scopedPrisma(viewer.companyId).user.findUnique({
     where: { id: viewer.userId },
-    select: { sectorId: true },
+    select: { sectorId: true, positionCategory: true },
   })
-  return user?.sectorId ?? null
+  return { sectorId: user?.sectorId ?? null, positionCategory: user?.positionCategory ?? null }
 }
 
 async function loadCatalogContext(viewer: Viewer, courseIds: string[]): Promise<CatalogContext> {
@@ -108,10 +197,23 @@ async function loadCatalogContext(viewer: Viewer, courseIds: string[]): Promise<
       totalLessons: new Map(),
       completedLessons: new Map(),
       durationMinutes: new Map(),
+      categoryNames: new Map(),
+      competencies: new Map(),
+      instructors: new Map(),
     }
   }
 
-  const [ratingRows, studentRows, favoriteRows, enrollmentRows, lessonRows, progressRows] = await Promise.all([
+  const [
+    ratingRows,
+    studentRows,
+    favoriteRows,
+    enrollmentRows,
+    lessonRows,
+    progressRows,
+    categoryRows,
+    competencyRows,
+    instructorRows,
+  ] = await Promise.all([
     db.courseRating.groupBy({
       by: ['courseId'],
       where: { courseId: { in: courseIds } },
@@ -136,6 +238,23 @@ async function loadCatalogContext(viewer: Viewer, courseIds: string[]): Promise<
       where: { userId: viewer.userId, courseId: { in: courseIds } },
       _count: { _all: true },
     }),
+    db.course.findMany({
+      where: { id: { in: courseIds } },
+      select: { id: true, courseCategory: { select: { name: true } } },
+    }),
+    db.courseCompetency.findMany({
+      where: { courseId: { in: courseIds } },
+      select: { courseId: true, competency: { select: { name: true } } },
+      orderBy: { competency: { name: 'asc' } },
+    }),
+    db.courseInstructor.findMany({
+      where: { courseId: { in: courseIds } },
+      select: {
+        courseId: true,
+        instructor: { select: INSTRUCTOR_REF_SELECT },
+      },
+      orderBy: { sortOrder: 'asc' },
+    }),
   ])
 
   return {
@@ -151,6 +270,11 @@ async function loadCatalogContext(viewer: Viewer, courseIds: string[]): Promise<
     totalLessons: new Map(lessonRows.map((row) => [row.courseId, row._count._all])),
     completedLessons: new Map(progressRows.map((row) => [row.courseId, row._count._all])),
     durationMinutes: new Map(lessonRows.map((row) => [row.courseId, row._sum.durationMinutes ?? 0])),
+    categoryNames: new Map(
+      categoryRows.flatMap((row) => (row.courseCategory ? [[row.id, row.courseCategory.name] as const] : [])),
+    ),
+    competencies: agrupar(competencyRows, (row) => row.courseId, (row) => row.competency.name),
+    instructors: agrupar(instructorRows, (row) => row.courseId, (row) => toInstructorRef(row.instructor)),
   }
 }
 
@@ -164,6 +288,9 @@ function cardExtras(courseId: string, context: CatalogContext): CourseCardExtras
     totalRatings: rating.total,
     totalStudents: context.students.get(courseId) ?? 0,
     durationMinutes: context.durationMinutes.get(courseId) ?? 0,
+    categoryName: context.categoryNames.get(courseId) ?? null,
+    competencies: context.competencies.get(courseId) ?? [],
+    instructors: context.instructors.get(courseId) ?? [],
   }
 }
 
@@ -178,8 +305,8 @@ export async function listCourses(
   const db = scopedPrisma(viewer.companyId)
   const search = filters.search?.trim()
 
-  const where: Prisma.CourseWhereInput = visibleCourseWhere(await viewerSectorId(viewer), {
-    ...(filters.category ? { category: filters.category } : {}),
+  const where: Prisma.CourseWhereInput = visibleCourseWhere(await viewerScope(viewer), {
+    ...(filters.category ? { courseCategory: { name: filters.category } } : {}),
     ...(filters.level ? { level: filters.level } : {}),
     ...(filters.onlyMandatory ? { mandatory: true } : {}),
     ...(search
@@ -187,50 +314,45 @@ export async function listCourses(
           OR: [
             { title: { contains: search, mode: 'insensitive' as const } },
             { shortDescription: { contains: search, mode: 'insensitive' as const } },
-            { category: { contains: search, mode: 'insensitive' as const } },
+            { courseCategory: { name: { contains: search, mode: 'insensitive' as const } } },
+            // Competência virou relação (Documento 4, seção 9.6): a busca por
+            // ela passou a caber no `where`. Antes era coluna Json, e precisava
+            // de uma segunda passada em memória.
+            {
+              competencyLinks: {
+                some: { competency: { name: { contains: search, mode: 'insensitive' as const } } },
+              },
+            },
           ],
         }
+      : {}),
+    ...(filters.competency
+      ? { competencyLinks: { some: { competency: { name: filters.competency } } } }
       : {}),
   })
 
   const all = await db.course.findMany({ where, orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }] })
   const context = await loadCatalogContext(viewer, all.map((course) => course.id))
 
-  // Competência mora numa coluna Json (string[]); o filtro é aplicado em memória
-  // porque o catálogo interno é pequeno e a busca por elemento de array em Json
-  // não indexa de qualquer forma.
-  const competencyFilter = filters.competency?.trim().toLowerCase()
   let courses = all
-  if (competencyFilter) {
-    courses = courses.filter((course) =>
-      toStringArray(course.competencies).some((item) => item.toLowerCase() === competencyFilter),
-    )
-  }
-  if (search) {
-    const term = search.toLowerCase()
-    // A busca livre também cobre competência, que o `where` do Prisma não alcança.
-    const byCompetency = all.filter((course) =>
-      toStringArray(course.competencies).some((item) => item.toLowerCase().includes(term)),
-    )
-    const seen = new Set(courses.map((course) => course.id))
-    courses = [...courses, ...byCompetency.filter((course) => !seen.has(course.id))]
-  }
   if (filters.onlyFavorites) {
     courses = courses.filter((course) => context.favorites.has(course.id))
   }
 
   return {
     courses: toCards(courses, context),
-    categories: [...new Set(all.map((course) => course.category))].sort((a, b) => a.localeCompare(b, 'pt-BR')),
-    competencies: [...new Set(all.flatMap((course) => toStringArray(course.competencies)))].sort((a, b) =>
-      a.localeCompare(b, 'pt-BR'),
-    ),
+    // Das categorias e competências dos cursos VISÍVEIS, e não do catálogo
+    // inteiro da empresa. É o que impede a opção de filtro de revelar a
+    // existência de um curso de outro setor — e, de quebra, o que evita oferecer
+    // um filtro que não devolveria nada.
+    categories: ordenarPtBr(new Set([...context.categoryNames.values()])),
+    competencies: ordenarPtBr(new Set([...context.competencies.values()].flat())),
   }
 }
 
 async function findPublishedCourse(viewer: Viewer, courseId: string): Promise<Course> {
   const course = await scopedPrisma(viewer.companyId).course.findFirst({
-    where: visibleCourseWhere(await viewerSectorId(viewer), { id: courseId }),
+    where: visibleCourseWhere(await viewerScope(viewer), { id: courseId }),
   })
   // Curso em rascunho — ou de outro setor — é tratado como inexistente: não vaza
   // a existência por URL direta.
@@ -248,7 +370,7 @@ export async function getCourseDetail(viewer: Viewer, courseId: string): Promise
   })
   if (!course) throw new LearningError('Curso não encontrado.', 404)
 
-  const [context, progressRows, myRating, certificate, quizzes] = await Promise.all([
+  const [context, progressRows, myRating, certificate, certificateRequest, quizzes] = await Promise.all([
     loadCatalogContext(viewer, [courseId]),
     db.lessonProgress.findMany({ where: { userId: viewer.userId, courseId }, select: { lessonId: true } }),
     db.courseRating.findUnique({ where: { userId_courseId: { userId: viewer.userId, courseId } } }),
@@ -256,6 +378,7 @@ export async function getCourseDetail(viewer: Viewer, courseId: string): Promise
       where: { userId_courseId: { userId: viewer.userId, courseId } },
       include: { user: { select: { name: true } } },
     }),
+    db.certificateRequest.findFirst({ where: { userId: viewer.userId, courseId } }),
     db.courseQuiz.findMany({ where: { courseId }, select: { id: true, lessonId: true } }),
   ])
 
@@ -272,8 +395,51 @@ export async function getCourseDetail(viewer: Viewer, courseId: string): Promise
     totalLessons: context.totalLessons.get(courseId) ?? 0,
     myRating,
     certificate,
+    certificateRequest,
     quizByLessonId,
     finalQuizId,
+  })
+}
+
+/**
+ * Pedido explícito de certificado, feito pela pessoa ao concluir o curso
+ * (Documento 4, seção 9.3).
+ *
+ * A emissão automática continua onde estava (`issueCertificate`, chamada por
+ * `setLessonCompletion`): quem concluir um curso que não exige aprovação
+ * recebe o certificado sem pedir nada. O que faltava era o caminho manual —
+ * a fila existia, mas só o servidor sabia enfileirar, e quem esperava não
+ * tinha o que clicar nem o que ler.
+ *
+ * Idempotente pelo mesmo motivo que `ensureCertificateRequestForEnrollment`:
+ * o par (inscrição, solicitação) é único, e pedir de novo é no-op — ou
+ * reabertura, quando a anterior foi recusada.
+ */
+export async function requestCertificate(viewer: Viewer, courseId: string): Promise<void> {
+  const db = scopedPrisma(viewer.companyId)
+  const course = await findPublishedCourse(viewer, courseId)
+
+  if (!course.certificateEnabled) {
+    throw new LearningError('Este curso não emite certificado.', 400)
+  }
+
+  const enrollment = await db.courseEnrollment.findUnique({
+    where: { userId_courseId: { userId: viewer.userId, courseId } },
+  })
+  if (!enrollment || enrollment.status !== 'COMPLETED') {
+    throw new LearningError('Conclua o curso antes de solicitar o certificado.', 400)
+  }
+
+  // Certificado já emitido não vira pedido: não há o que aprovar.
+  const existing = await db.certificate.findUnique({
+    where: { userId_courseId: { userId: viewer.userId, courseId } },
+  })
+  if (existing) return
+
+  await ensureCertificateRequestForEnrollment(db, {
+    enrollmentId: enrollment.id,
+    userId: viewer.userId,
+    courseId,
   })
 }
 
@@ -317,7 +483,7 @@ export async function setLessonCompletion(
 }> {
   const db = scopedPrisma(viewer.companyId)
   const lesson = await db.courseLesson.findFirst({
-    where: { id: lessonId, course: visibleCourseWhere(await viewerSectorId(viewer)) },
+    where: { id: lessonId, course: visibleCourseWhere(await viewerScope(viewer)) },
     include: { course: true },
   })
   // Aula de curso em rascunho — ou de outro setor — é inexistente para quem lê.
@@ -362,6 +528,10 @@ export async function setLessonCompletion(
   })
 
   const certificate = finished ? await issueCertificate(viewer, lesson.course) : null
+  // Recompensa do curso (Documento 4, seção 9.6) antes dos selos: os dois são
+  // best-effort pelo mesmo motivo — falhar aqui não pode desfazer o progresso
+  // que a pessoa acabou de registrar.
+  if (finished) await awardCourseReward(viewer, lesson.course)
   // Selos de Aprendizado: best-effort, igual à avaliação pós-voto — falhar aqui
   // não pode desfazer o progresso que a pessoa acabou de registrar.
   await syncLearningBadges(viewer)
@@ -376,6 +546,50 @@ export async function setLessonCompletion(
 }
 
 /**
+ * Credita a recompensa do curso concluído (Documento 4, seção 9.6).
+ *
+ * **Idempotente sem esforço próprio:** o `dedupeKey` é `COURSE_COMPLETED:<id do
+ * curso>` e `CoinTransaction`/`XpTransaction` têm `@@unique([userId,
+ * dedupeKey])`. Reconcluir o curso — desmarcar uma aula e marcar de novo — não
+ * paga duas vezes, e não é preciso perguntar antes se já pagou.
+ *
+ * **Não é `CoinRule`.** Aquela só sabe valor fixo por evento, e aqui o valor é
+ * do curso. Mesmo caso do desafio e do selo, que também usam
+ * `awardFixedCoins`/`awardFixedXp` — por isso `COURSE_COMPLETED` fica de fora
+ * de `COIN_RULE_EVENTS`: uma regra criada para ele não teria efeito nenhum.
+ *
+ * Zero em qualquer um dos dois não gera lançamento: `awardFixed*` devolve
+ * `SKIPPED`, e um extrato com "0 EMR Coins" seria ruído.
+ */
+async function awardCourseReward(
+  viewer: Viewer,
+  course: { id: string; rewardPoints: number; rewardCoins: number },
+): Promise<void> {
+  try {
+    await Promise.all([
+      awardFixedCoins({
+        userId: viewer.userId,
+        companyId: viewer.companyId,
+        amount: course.rewardCoins,
+        event: 'COURSE_COMPLETED',
+        reference: course.id,
+      }),
+      awardFixedXp({
+        userId: viewer.userId,
+        companyId: viewer.companyId,
+        amount: course.rewardPoints,
+        event: 'COURSE_COMPLETED',
+        reference: course.id,
+      }),
+    ])
+  } catch (err) {
+    // Best-effort, como os selos: o progresso já foi gravado, e desfazê-lo por
+    // causa de um crédito seria pior do que ficar sem o crédito.
+    console.error('[learning-service] Falha ao creditar a recompensa do curso.', err)
+  }
+}
+
+/**
  * Concede/revoga os selos de curso e avisa a pessoa. Best-effort dos dois lados:
  * nem a avaliação do selo nem a notificação derrubam a marcação da aula.
  */
@@ -383,7 +597,7 @@ async function syncLearningBadges(viewer: Viewer): Promise<void> {
   try {
     const { awarded } = await syncCourseBadgesForUser(viewer.userId)
     if (awarded.length === 0) return
-    await notifyBadgesEarned(viewer.userId, awarded.map((entry) => entry.badgeId), viewer.companyId)
+    await settleBadgesEarned(viewer.userId, awarded.map((entry) => entry.badgeId), viewer.companyId)
   } catch {
     // silencioso de propósito
   }
@@ -438,7 +652,10 @@ export async function issueCertificate(viewer: Viewer, course: Course): Promise<
         viewer.companyId,
         certificate,
         course,
-        await resolveCertificateTemplateForCourse(viewer.companyId, course),
+        await toCertificateTemplateVisual(
+          viewer.companyId,
+          await resolveCertificateTemplateForCourse(viewer.companyId, course),
+        ),
       )
     : certificate
   return toCertificateDTO(withImage)
@@ -491,7 +708,7 @@ export async function setCourseFavorite(viewer: Viewer, courseId: string, favori
 async function listMyEnrollments(viewer: Viewer): Promise<{ enrollments: EnrollmentDTO[]; context: CatalogContext }> {
   const db = scopedPrisma(viewer.companyId)
   const rows = await db.courseEnrollment.findMany({
-    where: { userId: viewer.userId, course: visibleCourseWhere(await viewerSectorId(viewer)) },
+    where: { userId: viewer.userId, course: visibleCourseWhere(await viewerScope(viewer)) },
     include: { course: true },
     orderBy: [{ lastAccessedAt: 'desc' }, { startedAt: 'desc' }],
   })
@@ -506,7 +723,7 @@ async function listMyEnrollments(viewer: Viewer): Promise<{ enrollments: Enrollm
 export async function learningSummary(viewer: Viewer): Promise<LearningSummaryDTO> {
   const db = scopedPrisma(viewer.companyId)
   const { start, endExclusive } = monthInstantBoundsInSaoPaulo(monthRefOf(todayInSaoPaulo().ymd))
-  const sectorId = await viewerSectorId(viewer)
+  const sectorId = await viewerScope(viewer)
 
   const [monthProgress, certificates, enrollments, mandatoryCourses] = await Promise.all([
     db.lessonProgress.findMany({
@@ -571,13 +788,15 @@ export async function learningHome(viewer: Viewer): Promise<LearningHomeResponse
 export async function listTracks(viewer: Viewer): Promise<LearningTrackDTO[]> {
   const db = scopedPrisma(viewer.companyId)
   const tracks = await db.learningTrack.findMany({
+    // `LearningTrack.published` continua booleano: o ciclo de cinco estados é do
+    // CURSO (seção 9.6), e o documento não pede o mesmo para a trilha.
     where: { published: true },
     orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
     include: {
       // O recorte entra no vínculo: curso fora do alcance nem chega à trilha,
       // nem entra na contagem de progresso dela.
       courses: {
-        where: { course: visibleCourseWhere(await viewerSectorId(viewer)) },
+        where: { course: visibleCourseWhere(await viewerScope(viewer)) },
         orderBy: { sortOrder: 'asc' },
         include: { course: true },
       },
@@ -591,7 +810,7 @@ export async function listTracks(viewer: Viewer): Promise<LearningTrackDTO[]> {
     toLearningTrackDTO(
       track,
       track.courses
-        .filter((link) => link.course.published)
+        .filter((link) => link.course.status === 'PUBLISHED')
         .map((link) => toCourseCardDTO(link.course, cardExtras(link.courseId, context))),
     ),
   )

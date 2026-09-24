@@ -1159,7 +1159,10 @@ async function materializePublication(
         externalKey: object.properties.externalKey,
         name: object.properties.name,
         status: previous?.status ?? object.properties.status,
-        capacity: previous?.capacity ?? object.properties.capacity ?? null,
+        // `previous ? … : …`, e não `??`: capacidade nula é "sem limite", uma
+        // escolha do admin. Com `??` ela caía no valor do documento e a sala
+        // voltava a ter limite a cada republicação.
+        capacity: previous ? previous.capacity : (object.properties.capacity ?? null),
         voiceEnabled: previous?.voiceEnabled ?? object.properties.voiceEnabled,
         accessPolicy: previous?.accessPolicy ?? object.properties.accessPolicy,
       })

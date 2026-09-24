@@ -31,12 +31,19 @@ export async function userRoutes(app: FastifyInstance) {
 
   // Colegas da empresa inteira (todos os setores), para escolher o destinatário no
   // Mural de Feedbacks. Terceirizado fica restrito ao próprio setor, como em /users/showcase.
+  //
+  // Com ?scope=all a lista deixa de ser a de *destinatários de feedback* e passa a ser a
+  // de *pessoas da empresa*: entram você mesmo e os admins. As duas exclusões são regra de
+  // feedback (ninguém dá feedback a si mesmo; admin não participa), e vazavam para campos
+  // que escolhem uma pessoa qualquer — quem cadastra projeto no Inova costuma ser o próprio
+  // responsável e não se achava na busca. O que NÃO muda: inativo continua fora e
+  // terceirizado continua preso ao próprio setor.
   app.get('/users/company', { onRequest: [app.authenticate] }, async (request, reply) => {
+    const everyone = (request.query as { scope?: string }).scope === 'all'
     const users = await scopedPrisma(request.user.companyId).user.findMany({
       where: {
         active: true,
-        role: { notIn: ['ADMIN', 'SUBADMIN'] },
-        id: { not: request.user.sub },
+        ...(everyone ? {} : { role: { notIn: ['ADMIN', 'SUBADMIN'] }, id: { not: request.user.sub } }),
         ...(request.user.role === 'THIRD_PARTY' ? { sectorId: request.user.sectorId } : {}),
       },
       orderBy: { name: 'asc' },

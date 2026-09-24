@@ -5,6 +5,7 @@ import {
   BrandOverridesParseError,
   EMPTY_LOGOS,
   parseBrandOverrides,
+  PRODUCT_FONTS,
   type BrandOverrides,
   type BrandLogoSet,
   type BrandPalette,
@@ -70,6 +71,9 @@ export function BrandingSection({ companyId }: { companyId: string }) {
   /** Qual esquema a prévia está mostrando — não é o que se salva. */
   const [previewScheme, setPreviewScheme] = useState<BrandScheme>('dark')
   const [brandColor, setBrandColor] = useState('#52fba2')
+  // Tipografia da empresa. Vazio = a fonte do produto (Geist/Inter).
+  const [fontHeadline, setFontHeadline] = useState('')
+  const [fontBody, setFontBody] = useState('')
   const [neutralColor, setNeutralColor] = useState('')
   const [hosts, setHosts] = useState('')
   const [overrides, setOverrides] = useState<BrandOverrides>({})
@@ -90,6 +94,8 @@ export function BrandingSection({ companyId }: { companyId: string }) {
     setAllowUserScheme(d.allowUserScheme)
     setPreviewScheme(d.defaultScheme)
     setBrandColor(d.brandColor)
+    setFontHeadline(d.fonts.headline === PRODUCT_FONTS.headline ? '' : d.fonts.headline)
+    setFontBody(d.fonts.body === PRODUCT_FONTS.body ? '' : d.fonts.body)
     setNeutralColor(d.neutralColor ?? '')
     setHosts(d.hosts.join('\n'))
     setOverrides(d.overrides)
@@ -119,6 +125,16 @@ export function BrandingSection({ companyId }: { companyId: string }) {
         allowUserScheme,
         brandColor,
         neutralColor: neutralColor || null,
+        // Campo vazio some do payload: "sem fonte cadastrada" é a ausência, e é
+        // ela que faz a empresa herdar a tipografia do produto.
+        ...(fontHeadline.trim() || fontBody.trim()
+          ? {
+              fonts: {
+                headline: fontHeadline.trim() || PRODUCT_FONTS.headline,
+                body: fontBody.trim() || PRODUCT_FONTS.body,
+              },
+            }
+          : {}),
         overrides,
       }),
     onSuccess: () => {
@@ -219,6 +235,35 @@ export function BrandingSection({ companyId }: { companyId: string }) {
                 className={inputCls}
               />
             </label>
+          </div>
+
+          {/* Tipografia: token de marca como as cores. O carregamento é sob
+              demanda — só a empresa que cadastrar uma família baixa o arquivo. */}
+          <div className="grid gap-md sm:grid-cols-2">
+            <label className="flex flex-col gap-1 font-label text-label-sm text-on-surface-variant">
+              Fonte de títulos
+              <input
+                value={fontHeadline}
+                onChange={(e) => setFontHeadline(e.target.value)}
+                maxLength={40}
+                placeholder={PRODUCT_FONTS.headline}
+                className={inputCls}
+              />
+            </label>
+            <label className="flex flex-col gap-1 font-label text-label-sm text-on-surface-variant">
+              Fonte de texto
+              <input
+                value={fontBody}
+                onChange={(e) => setFontBody(e.target.value)}
+                maxLength={40}
+                placeholder={PRODUCT_FONTS.body}
+                className={inputCls}
+              />
+            </label>
+            <span className="text-[11px] text-on-surface-variant sm:col-span-2">
+              Nome da família no Google Fonts, como <code className="mx-1">Outfit</code>. Em branco, a
+              empresa usa a tipografia do produto.
+            </span>
           </div>
 
           <label className="flex flex-col gap-1 font-label text-label-sm text-on-surface-variant">
@@ -549,7 +594,7 @@ function ColorField({
         <input
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={allowEmpty ? 'padrão' : '#35bd78'}
+          placeholder={allowEmpty ? 'padrão' : '#6ce190'}
           className={inputCls}
         />
       </div>

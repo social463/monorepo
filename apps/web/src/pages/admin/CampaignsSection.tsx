@@ -1,16 +1,34 @@
 import { useState } from 'react'
+import { canPublishCorporatePostDirectly } from '@legends/shared'
+import { useAuth } from '../../auth/AuthContext'
+import { useCreateCorporatePost } from '../../lib/use-corporate-mural'
+import { CorporatePostComposer } from '../mural-corporativo/CorporatePostComposer'
 import { CampaignCalendar } from './CampaignCalendar'
 import { CampaignGenerator } from './CampaignGenerator'
+import { CampaignPromptPanel } from './CampaignPromptPanel'
 
-type Tab = 'calendar' | 'generate'
+type Tab = 'calendar' | 'generate' | 'publish'
 
 /**
  * Calendário editorial de comunicação interna. A aba Calendário é a padrão de
  * propósito: sem chave de IA a aba Gerar não funciona, e a tela precisa
  * continuar útil mesmo assim.
+ *
+ * A aba **Publicar** (Documento 4, seção 13.1) renderiza o MESMO
+ * `CorporatePostComposer` do Feed — o componente, não uma cópia. Ele carrega
+ * menção, anexo, GIF, público-alvo, tipo de comunicação, geração por IA e o
+ * agendamento; reimplementar qualquer fatia disso criaria uma segunda versão
+ * para divergir da primeira no primeiro ajuste. É o que faz a G&G controlar
+ * todos os comunicados da empresa sem sair da tela de Campanhas.
  */
 export function CampaignsSection() {
+  const { user } = useAuth()
   const [tab, setTab] = useState<Tab>('calendar')
+  const create = useCreateCorporatePost()
+  // A decisão continua sendo do contrato compartilhado, e não uma regra nova
+  // desta tela: quem chega aqui é do bloco de G&G e publica direto, mas é o
+  // `canPublishCorporatePostDirectly` que diz isso.
+  const podePublicarDireto = canPublishCorporatePostDirectly(user?.role, user?.adminAccess)
   // Guarda o resultado da última confirmação: a data do primeiro item leva o
   // calendário até o mês certo (uma campanha de setembro confirmada em agosto
   // não pode cair numa grade de agosto vazia), e a contagem vira a evidência
@@ -53,6 +71,18 @@ export function CampaignsSection() {
         >
           Gerar
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'publish'}
+          onClick={() => {
+            setConfirmacao(null)
+            setTab('publish')
+          }}
+          className={`rounded-full px-lg py-sm font-label text-label-md transition-colors ${tab === 'publish' ? 'bg-primary text-on-primary' : 'bg-surface-container text-on-surface-variant'}`}
+        >
+          Publicar
+        </button>
       </div>
 
       {tab === 'calendar' ? (
@@ -68,8 +98,19 @@ export function CampaignsSection() {
           )}
           <CampaignCalendar initialDate={confirmacao?.date} />
         </div>
+      ) : tab === 'generate' ? (
+        <div className="flex flex-col gap-lg">
+          <CampaignGenerator onConfirmed={handleConfirmed} />
+          <CampaignPromptPanel />
+        </div>
       ) : (
-        <CampaignGenerator onConfirmed={handleConfirmed} />
+        <div className="rounded-2xl border border-outline-variant/40 bg-surface-container-low px-lg py-md">
+          <CorporatePostComposer
+            onSubmit={(body) => create.mutate(body)}
+            pending={create.isPending}
+            canPublishDirectly={podePublicarDireto}
+          />
+        </div>
       )}
     </div>
   )

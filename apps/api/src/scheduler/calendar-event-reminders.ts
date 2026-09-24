@@ -110,10 +110,30 @@ async function notificar(event: EventoComPublico, occurrenceIso: string, daysBef
     .filter((s) => hasCalendarFeature(s.enabledFeatures))
     .filter((s) => !event.isInternalComm || hasFeature(s.enabledFeatures, 'gente-gestao'))
     .map((s) => s.id)
-  if (alvo.length === 0) return
+
+  /*
+   * Convidados nominalmente (Documento 3, seção 11) entram na lista **além** do
+   * recorte por setor. Sem isto, quem foi convidado de fora do setor alvo
+   * receberia o convite e nunca o lembrete — e o lembrete é justamente o aviso
+   * que chega perto da data.
+   *
+   * Eles passam por cima do filtro de feature de setor pelo mesmo motivo que
+   * passam por cima do público-alvo na tela: convite nominal é o caminho de
+   * alcançar quem o recorte não alcança. O que NÃO muda é a Ação de Comunicação
+   * Interna — se o evento é registro da G&G, ele não deveria ter convidado de
+   * fora, e a tela já esconde o evento deles.
+   */
+  const convidados = event.isInternalComm ? [] : event.guests.map((g) => g.userId)
+  if (alvo.length === 0 && convidados.length === 0) return
 
   const users = await prisma.user.findMany({
-    where: { active: true, companyId: event.companyId, sectorId: { in: alvo } },
+    where: {
+      active: true,
+      companyId: event.companyId,
+      // Um OR, e não dois `findMany`: quem está no setor E é convidado precisa
+      // aparecer uma vez só, senão receberia o lembrete duplicado.
+      OR: [...(alvo.length ? [{ sectorId: { in: alvo } }] : []), ...(convidados.length ? [{ id: { in: convidados } }] : [])],
+    },
     select: { id: true },
   })
 

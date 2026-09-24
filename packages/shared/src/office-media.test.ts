@@ -8,7 +8,7 @@ import {
   zoneAt,
   officeRoomAt,
   officeRoomForZone,
-  isWithinProximity,
+  isWithinProximityTiles,
   isWalkable,
 } from './index';
 
@@ -68,14 +68,14 @@ describe('zoneAt / officeRoomAt', () => {
   });
 });
 
-describe('isWithinProximity', () => {
+describe('isWithinProximityTiles', () => {
   it('limiar exato de Chebyshev', () => {
-    expect(isWithinProximity(5, 5, 5 + PROXIMITY_RADIUS, 5)).toBe(true);
-    expect(isWithinProximity(5, 5, 5 + PROXIMITY_RADIUS + 1, 5)).toBe(false);
-    expect(isWithinProximity(5, 5, 5 + PROXIMITY_RADIUS, 5 + PROXIMITY_RADIUS)).toBe(true);
+    expect(isWithinProximityTiles(5, 5, 5 + PROXIMITY_RADIUS, 5)).toBe(true);
+    expect(isWithinProximityTiles(5, 5, 5 + PROXIMITY_RADIUS + 1, 5)).toBe(false);
+    expect(isWithinProximityTiles(5, 5, 5 + PROXIMITY_RADIUS, 5 + PROXIMITY_RADIUS)).toBe(true);
   });
 
   it('é simétrica', () => {
-    expect(isWithinProximity(2, 3, 5, 6)).toBe(isWithinProximity(5, 6, 2, 3));
+    expect(isWithinProximityTiles(2, 3, 5, 6)).toBe(isWithinProximityTiles(5, 6, 2, 3));
   });
 });

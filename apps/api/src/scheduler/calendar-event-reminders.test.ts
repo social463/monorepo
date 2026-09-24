@@ -211,3 +211,77 @@ describe('lembrete de evento de calendário', () => {
     expect(recebidas[0].title).toContain('Prova Inspirali')
   })
 })
+
+describe('lembrete e convidados (Documento 3, seção 11)', () => {
+  it('o convidado de fora do setor alvo recebe o lembrete', async () => {
+    const { event, sector } = await seedCenario({
+      date: '2026-09-10',
+      reminderDaysBefore: [3],
+      restrito: true,
+    })
+    // Fora do setor alvo: sem o convite, o lembrete nunca o alcançaria.
+    const outro = await prisma.sector.create({
+      data: { name: 'Outro Lembrete', slug: 'outro-lembrete', enabledFeatures: ['calendario'] },
+    })
+    const convidado = await prisma.user.create({
+      data: {
+        name: 'Convidado',
+        email: 'convidado-lembrete@x.com',
+        passwordHash: 'x',
+        sectorId: outro.id,
+        companyId: DEFAULT_COMPANY_ID,
+      },
+    })
+    await prisma.calendarEventGuest.create({
+      data: { eventId: event.id, userId: convidado.id, companyId: DEFAULT_COMPANY_ID },
+    })
+    expect(sector.id).not.toBe(outro.id)
+
+    await runCalendarEventReminderTick(noveDaManha('2026-09-07'))
+
+    const notificacoes = await prisma.notification.findMany({ where: { userId: convidado.id } })
+    expect(notificacoes).toHaveLength(1)
+    expect(notificacoes[0]!.type).toBe('CALENDAR_EVENT_REMINDER')
+  })
+
+  it('quem está no setor E é convidado recebe uma vez só', async () => {
+    const { event, user } = await seedCenario({
+      date: '2026-09-10',
+      reminderDaysBefore: [3],
+      restrito: true,
+    })
+    await prisma.calendarEventGuest.create({
+      data: { eventId: event.id, userId: user.id, companyId: DEFAULT_COMPANY_ID },
+    })
+
+    await runCalendarEventReminderTick(noveDaManha('2026-09-07'))
+
+    // Um OR na consulta, e não dois `findMany` somados — senão viria duplicado.
+    expect(await prisma.notification.count({ where: { userId: user.id } })).toBe(1)
+  })
+
+  it('convidado NÃO recebe lembrete de Ação de Comunicação Interna', async () => {
+    const { event } = await seedCenario({ date: '2026-09-10', reminderDaysBefore: [3] })
+    await prisma.calendarEvent.update({ where: { id: event.id }, data: { isInternalComm: true } })
+    const outro = await prisma.sector.create({
+      data: { name: 'Fora GG', slug: 'fora-gg-lembrete', enabledFeatures: ['calendario'] },
+    })
+    const convidado = await prisma.user.create({
+      data: {
+        name: 'Convidado',
+        email: 'convidado-interno@x.com',
+        passwordHash: 'x',
+        sectorId: outro.id,
+        companyId: DEFAULT_COMPANY_ID,
+      },
+    })
+    await prisma.calendarEventGuest.create({
+      data: { eventId: event.id, userId: convidado.id, companyId: DEFAULT_COMPANY_ID },
+    })
+
+    await runCalendarEventReminderTick(noveDaManha('2026-09-07'))
+
+    // O registro interno da G&G não vaza pelo lembrete, como não vaza pela tela.
+    expect(await prisma.notification.count({ where: { userId: convidado.id } })).toBe(0)
+  })
+})

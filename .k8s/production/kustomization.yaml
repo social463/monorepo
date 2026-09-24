@@ -6,4 +6,4 @@ resources:
 images:
 - name: legends
   newName: 196044402972.dkr.ecr.us-east-1.amazonaws.com/legends
-  newTag: 67d5b4656efae60e82246bc0876f6324c44dd717
+  newTag: 231d76fe7e92206c2009380d83a33526ef4e232c

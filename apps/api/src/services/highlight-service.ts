@@ -5,13 +5,13 @@ import { buildCongratsText } from '../lib/gemini-client'
 import { cardBrandFrom, renderCard } from '../lib/card-renderer'
 import { saveCardPng, highlightStorageEnabled } from '../lib/highlight-storage'
 import { photoDataUriFor } from '../lib/dev-photo'
-import { fetchImageDataUri } from '../lib/remote-image'
 import { monthLabel, monthName } from '../lib/month-label'
 import { getBrandingSettings } from './branding-service'
 import { recordAuditLog } from './audit-log-service'
 import { materializeVoteFeedbacks } from './vote-feedback-service'
 import { evaluateBadgesForUser } from './badge-service'
-import { notifyBadgesEarned, notifyRecognitionsPublished } from './notification-service'
+import { notifyRecognitionsPublished } from './notification-service'
+import { settleBadgesEarned } from './badge-reward-service'
 
 export interface ElectionResult {
   winnerId: string
@@ -168,13 +168,26 @@ export async function generateHighlightImage(periodId: string, actorId: string, 
 
   // Card na marca da empresa. `configured: false` cai no default do renderer,
   // que é a arte histórica — quem nunca cadastrou marca não vê o card mudar.
+  //
+  // As CORES vêm da marca; a LOGO, não — o card cai na arte embutida de
+  // propósito. Ele é a única peça do produto que circula FORA da empresa (é
+  // feito para ser salvo e compartilhado), e a logo cadastrada é a que a empresa
+  // usa por dentro. Na EMR as duas são diferentes hoje: a marca nova ainda é de
+  // circulação interna, e um card publicado com ela vazaria o rebranding antes
+  // da hora.
+  //
+  // Para voltar a usar a logo da marca no card, é só passar `logoDataUri` (e o
+  // import de `fetchImageDataUri`, de `../lib/remote-image`):
+  //   logoDataUri: await fetchImageDataUri(brandingSettings.logos.dark.wide ?? brandingSettings.logos.light.wide)
+  // O card tem fundo escuro tingido de marca, então a arte é a do tema escuro.
+  //
+  // O título é "DESTAQUES <EMPRESA>", e por isso o nome vem de `Company`, não de
+  // `appName`: o app da EMR chama-se "Portal EMR", e o card dizia "DESTAQUES
+  // PORTAL EMR".
   const brandingSettings = await getBrandingSettings(companyId)
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true } })
   const cardBrand = brandingSettings.configured
-    ? cardBrandFrom(
-        brandingSettings,
-        // O card tem fundo escuro tingido de marca, então usa a arte do tema escuro.
-        await fetchImageDataUri(brandingSettings.logos.dark.wide ?? brandingSettings.logos.light.wide),
-      )
+    ? cardBrandFrom(brandingSettings, { companyName: company?.name })
     : undefined
 
   const png = await renderCard({
@@ -224,7 +237,7 @@ async function releaseRecognitions(period: VotingPeriod): Promise<void> {
   for (const { votedId } of rows) {
     try {
       const awarded = await evaluateBadgesForUser(votedId)
-      await notifyBadgesEarned(votedId, awarded.map((b) => b.badgeId), period.companyId)
+      await settleBadgesEarned(votedId, awarded.map((b) => b.badgeId), period.companyId)
       recognized.push(votedId)
     } catch (err) {
       console.error(`Falha ao liberar os selos de ${votedId} no período ${period.id}`, err)

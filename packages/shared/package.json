@@ -11,9 +11,7 @@
     "./color": "./src/color.ts"
   },
   "scripts": {
-    "test": "vitest run",
-    "test:changed": "vitest run --changed",
-    "test:watch": "vitest"
+    "test": "vitest run"
   },
   "dependencies": {
     "zod": "^3.23.8"

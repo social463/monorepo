@@ -1,7 +1,21 @@
 import type {
   AdminCourseListResponse,
+  CompetencyDTO,
+  CourseDashboardResponse,
+  CompetencyListResponse,
+  CourseCategoryDTO,
+  CourseCategoryListResponse,
+  CreateCompetencyRequest,
+  CreateCourseCategoryRequest,
+  CreateInstructorRequest,
+  InstructorDTO,
+  InstructorListResponse,
+  UpdateCompetencyRequest,
+  UpdateCourseCategoryRequest,
+  UpdateInstructorRequest,
   AdminCourseResponse,
   ApproveCertificateRequestResponse,
+  CertificateRequestDTO,
   CertificateRequestListResponse,
   CertificateRequestStatus,
   CertificateTemplateListResponse,
@@ -82,6 +96,11 @@ export function rateCourse(id: string, body: RateCourseRequest) {
     method: 'PUT',
     body: JSON.stringify(body),
   })
+}
+
+/** Pedido de certificado do próprio aluno (Documento 4, seção 9.3). */
+export function requestCourseCertificate(id: string) {
+  return apiFetch<CourseDetailResponse>(`/learning/courses/${id}/certificate-request`, { method: 'POST' })
 }
 
 export function setCourseFavorite(id: string, favorite: boolean) {
@@ -181,6 +200,47 @@ export function updateCourseLesson(lessonId: string, body: UpdateCourseLessonReq
 export function deleteCourseLesson(lessonId: string) {
   return apiFetch<AdminCourseResponse>(`/admin/course-lessons/${lessonId}`, { method: 'DELETE' })
 }
+
+export function getCourseDashboard() {
+  return apiFetch<CourseDashboardResponse>('/admin/courses/dashboard')
+}
+
+// --- Catálogo da Central de Cursos (Documento 4, seções 9.6 e 9.7) ----------
+//
+// Três recursos com a mesma forma. O gerador evita reescrever quatro funções
+// idênticas três vezes — o que muda é o caminho e o nome da chave da lista.
+
+function catalogClient<L, C, U, D>(caminho: string) {
+  return {
+    list: () => apiFetch<L>(`/admin/${caminho}`),
+    create: (body: C) =>
+      apiFetch<{ item: D }>(`/admin/${caminho}`, { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: U) =>
+      apiFetch<{ item: D }>(`/admin/${caminho}/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    remove: (id: string) => apiFetch<void>(`/admin/${caminho}/${id}`, { method: 'DELETE' }),
+  }
+}
+
+export const courseCategoriesApi = catalogClient<
+  CourseCategoryListResponse,
+  CreateCourseCategoryRequest,
+  UpdateCourseCategoryRequest,
+  CourseCategoryDTO
+>('course-categories')
+
+export const competenciesApi = catalogClient<
+  CompetencyListResponse,
+  CreateCompetencyRequest,
+  UpdateCompetencyRequest,
+  CompetencyDTO
+>('competencies')
+
+export const instructorsApi = catalogClient<
+  InstructorListResponse,
+  CreateInstructorRequest,
+  UpdateInstructorRequest,
+  InstructorDTO
+>('instructors')
 
 // --- Autoria de quiz (admin) -------------------------------------------------
 

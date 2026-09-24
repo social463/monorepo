@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_COMPANY_ID, DEFAULT_SECTOR_ID } from '@legends/shared'
+import { DEFAULT_COMPANY_ID, DEFAULT_SECTOR_ID, type BrandLogoSet } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import type { CourseActor } from './course-admin-service'
 import {
@@ -12,11 +12,13 @@ import {
   listCertificateTemplates,
   rejectCertificateRequest,
   resolveCertificateTemplateForCourse,
+  toCertificateTemplateVisual,
   updateCertificateTemplate,
   type CertificateActor,
 } from './certificate-request-service'
 import { notifyCertificateApproved } from './notification-service'
 import { scopedPrisma } from '../lib/tenant-scope'
+import { BRANDING_SETTING_KEY, clearBrandingCache } from './branding-service'
 
 /**
  * `notifyCertificateApproved` fica atrás de um spy que delega pra implementação
@@ -203,7 +205,6 @@ describe('cadeia de fallback: curso → isDefault da empresa → nenhum', () => 
       data: {
         slug: `curso-cert-${Math.random().toString(36).slice(2)}`,
         title: 'Curso',
-        category: 'X',
         companyId: DEFAULT_COMPANY_ID,
         certificateTemplateId,
       },
@@ -276,7 +277,6 @@ describe('fila de aprovação de certificado (Task 9)', () => {
       data: {
         slug: `curso-fila-${Math.random().toString(36).slice(2)}`,
         title: opts.courseTitle ?? 'Curso com aprovação obrigatória',
-        category: 'Liderança',
         companyId: DEFAULT_COMPANY_ID,
         requiresCertificateApproval: true,
         sectorId: opts.sectorId ?? null,
@@ -345,13 +345,13 @@ describe('fila de aprovação de certificado (Task 9)', () => {
 
       expect(updated.status).toBe('APPROVED')
       expect(updated.reviewedBy?.id).toBe(admin.id)
-      expect(certificate.code).toMatch(/^EMR-[A-Z0-9]{8}$/)
+      expect(certificate?.code).toMatch(/^EMR-[A-Z0-9]{8}$/)
       // Carga horária derivada da aula: 60 min = 1h.
-      expect(certificate.hours).toBe(1)
+      expect(certificate?.hours).toBe(1)
 
       const stored = await prisma.certificate.findMany({ where: { userId: student.id, courseId: course.id } })
       expect(stored).toHaveLength(1)
-      expect(stored[0].code).toBe(certificate.code)
+      expect(stored[0].code).toBe(certificate?.code)
 
       const notifications = await prisma.notification.findMany({
         where: { userId: student.id, type: 'CERTIFICATE_APPROVED' },
@@ -452,7 +452,7 @@ describe('fila de aprovação de certificado (Task 9)', () => {
       const { request: updated, certificate } = await approveCertificateRequest(admin, request.id)
 
       expect(updated.status).toBe('APPROVED')
-      expect(certificate.code).toMatch(/^EMR-/)
+      expect(certificate?.code).toMatch(/^EMR-/)
       const stored = await prisma.certificate.count({ where: { userId: student.id, courseId: course.id } })
       expect(stored).toBe(1)
     })
@@ -597,5 +597,129 @@ describe('fila de aprovação de certificado (Task 9)', () => {
 
       await expect(rejectCertificateRequest(subadmin, request.id, 'Motivo')).rejects.toMatchObject({ status: 404 })
     })
+  })
+})
+
+/**
+ * A identidade do certificado era mantida à parte da marca do portal, e manter
+ * a mesma coisa em dois lugares é o que faz uma envelhecer enquanto a outra
+ * muda. Agora a marca é o PADRÃO e o modelo é a EXCEÇÃO.
+ */
+describe('o certificado herda a marca da empresa', () => {
+  const MARCA = {
+    appName: 'EMR Legends',
+    tagline: null,
+    hosts: [],
+    logos: {
+      light: { wide: 'https://cdn.exemplo.com/emr/claro.png', mark: null },
+      dark: { wide: 'https://cdn.exemplo.com/emr/escuro.png', mark: null },
+    } as BrandLogoSet,
+    defaultScheme: 'dark' as const,
+    allowUserScheme: true,
+    brandColor: '#35bd78',
+    neutralColor: null,
+    overrides: {},
+  }
+
+  async function gravarMarca(marca: Partial<typeof MARCA> = {}) {
+    clearBrandingCache()
+    await prisma.appSetting.upsert({
+      where: { key_companyId: { key: BRANDING_SETTING_KEY, companyId: DEFAULT_COMPANY_ID } },
+      create: {
+        key: BRANDING_SETTING_KEY,
+        companyId: DEFAULT_COMPANY_ID,
+        value: JSON.stringify({ ...MARCA, ...marca }),
+      },
+      update: { value: JSON.stringify({ ...MARCA, ...marca }) },
+    })
+    clearBrandingCache()
+  }
+
+  it('cor e logo em branco caem na marca da empresa', async () => {
+    await gravarMarca()
+    const modelo = await createCertificateTemplate(actor, templateInput({ accentColor: null, logoUrl: null }))
+    const linha = await scopedPrisma(DEFAULT_COMPANY_ID).certificateTemplate.findUnique({ where: { id: modelo.id } })
+
+    const visual = await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, linha)
+
+    // A cor NÃO é a institucional crua: o papel é claro, e o verde da EMR sobre
+    // branco não se lê. É o tom legível do mesmo matiz.
+    expect(visual?.accentColor).toMatch(/^#[0-9a-f]{6}$/i)
+    expect(visual?.accentColor).not.toBe('#35bd78')
+    // A logo é a do esquema CLARO, porque é sobre papel branco que ela aparece —
+    // mesmo que o esquema padrão da empresa seja o escuro.
+    expect(visual?.logoUrl).toBe('https://cdn.exemplo.com/emr/claro.png')
+  })
+
+  it('o que o modelo preenche continua mandando na marca', async () => {
+    await gravarMarca()
+    const modelo = await createCertificateTemplate(
+      actor,
+      templateInput({ accentColor: '#1a2b3c', logoUrl: 'https://cdn.exemplo.com/modelo.png' }),
+    )
+    const linha = await scopedPrisma(DEFAULT_COMPANY_ID).certificateTemplate.findUnique({ where: { id: modelo.id } })
+
+    const visual = await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, linha)
+
+    expect(visual?.accentColor).toBe('#1a2b3c')
+    expect(visual?.logoUrl).toBe('https://cdn.exemplo.com/modelo.png')
+  })
+
+  /**
+   * Caminho relativo é do navegador: do lado do servidor, `fetch('/logo.svg')`
+   * não tem host para onde ir. Melhor sair com a logo embutida do que com um
+   * buraco no meio da folha.
+   */
+  it('logo relativa da marca não vai para o certificado', async () => {
+    await gravarMarca({ logos: { light: { wide: '/illustration/logo.png', mark: null }, dark: { wide: null, mark: null } } })
+    const modelo = await createCertificateTemplate(actor, templateInput({ accentColor: null, logoUrl: null }))
+    const linha = await scopedPrisma(DEFAULT_COMPANY_ID).certificateTemplate.findUnique({ where: { id: modelo.id } })
+
+    expect((await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, linha))?.logoUrl).toBeNull()
+  })
+
+  /**
+   * SVG **entra**, ao contrário do rodapé do Teams — e é a diferença que
+   * importa na prática, porque as logos cadastradas são SVG. Lá quem rasteriza
+   * é a Microsoft; aqui é o resvg, que desenha SVG dentro de `<image>` (provado
+   * em `certificate-renderer.test.ts`). Descartá-la deixaria a empresa com a
+   * logo cadastrada e o certificado sem ela.
+   */
+  it('logo SVG da marca vai para o certificado', async () => {
+    await gravarMarca({
+      logos: {
+        light: { wide: 'https://cdn.exemplo.com/emr/claro.svg', mark: null },
+        dark: { wide: null, mark: null },
+      },
+    })
+    const modelo = await createCertificateTemplate(actor, templateInput({ accentColor: null, logoUrl: null }))
+    const linha = await scopedPrisma(DEFAULT_COMPANY_ID).certificateTemplate.findUnique({ where: { id: modelo.id } })
+
+    expect((await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, linha))?.logoUrl).toBe(
+      'https://cdn.exemplo.com/emr/claro.svg',
+    )
+  })
+
+  /**
+   * A assinatura é de uma PESSOA, não da empresa: não tem de onde herdar, e
+   * continua vindo só do modelo.
+   */
+  it('a assinatura fica fora da herança', async () => {
+    await gravarMarca()
+    const modelo = await createCertificateTemplate(
+      actor,
+      templateInput({ accentColor: null, logoUrl: null, signatureImageUrl: 'https://cdn.exemplo.com/ana.png' }),
+    )
+    const linha = await scopedPrisma(DEFAULT_COMPANY_ID).certificateTemplate.findUnique({ where: { id: modelo.id } })
+
+    const visual = await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, linha)
+    expect(visual?.signatureName).toBe('Ana Diretora')
+    expect(visual?.signatureImageUrl).toBe('https://cdn.exemplo.com/ana.png')
+  })
+
+  // Sem modelo não há o que herdar: é o caminho que garante que um certificado
+  // emitido antes dos modelos, re-renderizado, não muda de cara.
+  it('sem modelo nenhum, não busca marca e devolve nulo', async () => {
+    expect(await toCertificateTemplateVisual(DEFAULT_COMPANY_ID, null)).toBeNull()
   })
 })

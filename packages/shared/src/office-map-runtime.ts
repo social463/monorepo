@@ -12,7 +12,7 @@ import type {
 } from './index'
 import { officeBallCell } from './office-ball-assets'
 import { MOVE_DIRECTION_DELTAS, type MoveDirection } from './office'
-import { isWithinProximity } from './office-media'
+import { PROXIMITY_RADIUS } from './office-media'
 import {
   findOfficePath,
   officeWalkGrid,
@@ -49,10 +49,21 @@ export function mapKarts(document: MapDocumentV1): OfficeKart[] {
     if (object.type !== 'tile-object' || !kartTilesetIds.has(object.properties.tilesetId)) return []
     const centerX = object.geometry.x + object.geometry.width / 2
     const centerY = object.geometry.y + object.geometry.height / 2
+    // Em PIXEL, e no CENTRO do tile que o objeto ocupa — não no tile.
+    //
+    // O kart anda junto do piloto, e o piloto passou a se mover em pixel
+    // (`2026-08-25-movimento-livre-no-escritorio-design.md`). Um kart medido em
+    // tile saltaria de célula em célula sob alguém que desliza, e a adjacência
+    // de "montar" compararia tile com pixel — nunca casando.
+    //
+    // O centro do tile (e não o do objeto) preserva o que o editor quis dizer:
+    // o asset é publicado alinhado à grade, e é ali que o kart estaciona.
+    const tileX = Math.max(0, Math.min(document.map.width - 1, Math.floor(centerX / document.map.tileWidth)))
+    const tileY = Math.max(0, Math.min(document.map.height - 1, Math.floor(centerY / document.map.tileHeight)))
     return [{
       id: object.id,
-      x: Math.max(0, Math.min(document.map.width - 1, Math.floor(centerX / document.map.tileWidth))),
-      y: Math.max(0, Math.min(document.map.height - 1, Math.floor(centerY / document.map.tileHeight))),
+      x: tileX * document.map.tileWidth + document.map.tileWidth / 2,
+      y: tileY * document.map.tileHeight + document.map.tileHeight / 2,
       dir: directionByRotation[object.properties.rotation ?? 0] ?? 'up',
     }]
   })
@@ -114,14 +125,21 @@ export function mapBalls(document: MapDocumentV1): OfficeBall[] {
     const minY = Math.min(...members.map((member) => member.object.geometry.y))
     const maxX = Math.max(...members.map((member) => member.object.geometry.x + member.object.geometry.width))
     const maxY = Math.max(...members.map((member) => member.object.geometry.y + member.object.geometry.height))
-    const ball: OfficeBall = {
-      id: members[0].object.id,
-      x: Math.max(0, Math.min(document.map.width - 1, Math.floor((minX + tileWidth / 2) / tileWidth))),
-      y: Math.max(0, Math.min(document.map.height - 1, Math.floor((minY + tileHeight / 2) / tileHeight))),
-      memberIds: members.map((member) => member.object.id),
-    }
     const w = Math.max(1, Math.round((maxX - minX) / tileWidth))
     const h = Math.max(1, Math.round((maxY - minY) / tileHeight))
+    // Em PIXEL, no CENTRO do grupo — a bola rola em pixel desde o movimento
+    // livre. E o RAIO sai do tamanho publicado: há bola de praia de vários
+    // tiles no acervo, e um raio fixo a faria bater na parede longe dela (ou
+    // atravessar meia mesa), dependendo do lado do erro.
+    const ball: OfficeBall = {
+      id: members[0].object.id,
+      x: (minX + maxX) / 2,
+      y: (minY + maxY) / 2,
+      vx: 0,
+      vy: 0,
+      r: (Math.min(w, h) * tileWidth) / 2,
+      memberIds: members.map((member) => member.object.id),
+    }
     if (w !== 1) ball.w = w
     if (h !== 1) ball.h = h
     return ball
@@ -209,7 +227,16 @@ export function mapSpawnTiles(document: MapDocumentV1): TilePosition[] {
     .filter((position) => isMapTileWalkable(document, position.x, position.y))
 }
 
-export function mapZoneAt(document: MapDocumentV1, x: number, y: number): OfficeRuntimeZone | null {
+/**
+ * A zona de um TILE — não de um ponto em pixel.
+ *
+ * O `Tile` no nome não é enfeite: desde o movimento livre, `OfficeOccupant.x/y`
+ * são PIXEL, e os dois são `number` — o compilador não distingue. Passar pixel
+ * aqui não dá erro: dá zona errada (ou nenhuma), e o sintoma é a sala de reunião
+ * simplesmente não existir para quem está dentro dela. Aconteceu três vezes
+ * antes de o nome dizer a unidade. Converta com `tileOfPixel`.
+ */
+export function mapZoneAtTile(document: MapDocumentV1, x: number, y: number): OfficeRuntimeZone | null {
   const center = mapTileCenter(document, x, y)
   return (
     document.objects.find(
@@ -307,19 +334,53 @@ export function officeZoneDisplayName(
  * lado, nem o aplauso da comemoração, que é global.
  */
 export function isInSilenceZone(document: MapDocumentV1, position: TilePosition): boolean {
-  return mapZoneAt(document, position.x, position.y)?.type === 'private-zone'
+  return mapZoneAtTile(document, position.x, position.y)?.type === 'private-zone'
 }
 
+/** Volume de um efeito posicional na borda do raio — ver `officeSoundLevel`. */
+export const OFFICE_SOUND_MIN_LEVEL = 0.25
+
 /**
- * Quem ouve a palma de um high-five: o som é do lugar onde ele acontece, não do
- * escritório inteiro. Dentro de zona (sala/privada) o isolamento é acústico —
- * só quem está na MESMA zona ouve, independente da distância. No espaço aberto
- * vale o mesmo raio do chat de proximidade e do áudio espacial. Basta um dos
- * dois do par ser audível: o par pode ficar meio dentro, meio fora (um na
- * porta).
+ * Volume com que um efeito do escritório chega até quem ouve, de 0 (não chega)
+ * a 1 (em cima). Regra única de TODO efeito posicional — palma do high-five,
+ * batida da bola, tiro de paintball — porque som que vaza é sempre o mesmo bug
+ * escrito de novo em outro lugar.
+ *
+ * Duas perguntas, nesta ordem:
+ *
+ * 1. **A zona bate?** Zona (sala de chamada ou zona privada) é isolamento
+ *    acústico nos DOIS sentidos: o que acontece dentro não sai, e o que
+ *    acontece fora não entra. Quem está numa sala de chamada a dois tiles da
+ *    brincadeira não ouve nada — é reunião, não é espaço público. Dentro da
+ *    mesma zona ouve-se independente da distância (sala é pequena, e o
+ *    isolamento já é a fronteira).
+ * 2. **Está perto?** No espaço aberto vale a distância de Chebyshev — a mesma
+ *    métrica do chat de proximidade e do áudio espacial —, e o volume CAI com
+ *    ela: `OFFICE_SOUND_MIN_LEVEL` na borda do raio, 1 em cima. Sem a queda o
+ *    corte no raio soaria como um interruptor.
  *
  * Não trata a sala de silêncio: lá quem cala tudo é o portão de som do
  * escritório (`lib/office-silence`), para a regra viver num lugar só.
+ */
+export function officeSoundLevel(
+  document: MapDocumentV1,
+  listener: TilePosition,
+  source: TilePosition,
+  radiusTiles: number,
+): number {
+  const listenerZone = mapZoneAtTile(document, listener.x, listener.y)
+  const sourceZone = mapZoneAtTile(document, source.x, source.y)
+  if (sourceZone || listenerZone) return sourceZone && listenerZone?.id === sourceZone.id ? 1 : 0
+  const distance = Math.max(Math.abs(listener.x - source.x), Math.abs(listener.y - source.y))
+  if (distance > radiusTiles) return 0
+  if (radiusTiles <= 0) return 1
+  return 1 - (1 - OFFICE_SOUND_MIN_LEVEL) * (distance / radiusTiles)
+}
+
+/**
+ * Quem ouve a palma de um high-five: `officeSoundLevel` no raio do chat de
+ * proximidade. Basta um dos dois do par ser audível — o par pode ficar meio
+ * dentro, meio fora (um na porta).
  */
 export function isHighFiveAudible(
   document: MapDocumentV1,
@@ -327,12 +388,7 @@ export function isHighFiveAudible(
   a: TilePosition,
   b: TilePosition,
 ): boolean {
-  const listenerZone = mapZoneAt(document, listener.x, listener.y)
-  return [a, b].some((member) => {
-    const memberZone = mapZoneAt(document, member.x, member.y)
-    if (memberZone) return listenerZone?.id === memberZone.id
-    return listenerZone === null && isWithinProximity(listener.x, listener.y, member.x, member.y)
-  })
+  return [a, b].some((member) => officeSoundLevel(document, listener, member, PROXIMITY_RADIUS) > 0)
 }
 
 /**
@@ -373,9 +429,9 @@ export function meetingRoomEntryTile(document: MapDocumentV1, externalKey: strin
   const candidates: TilePosition[] = []
   for (let y = firstTileY; y <= lastTileY; y += 1) {
     for (let x = firstTileX; x <= lastTileX; x += 1) {
-      // mapZoneAt garante que o tile é da SALA (importa em polígono, onde a
+      // mapZoneAtTile garante que o tile é da SALA (importa em polígono, onde a
       // caixa envolvente pega área de fora).
-      if (mapZoneAt(document, x, y)?.properties.externalKey !== externalKey) continue
+      if (mapZoneAtTile(document, x, y)?.properties.externalKey !== externalKey) continue
       if (!isMapTileWalkable(document, x, y)) continue
       candidates.push({ x, y })
     }
@@ -391,13 +447,13 @@ export function officeOpenRoom(mapId: string): string {
   return `office-map-${mapId}-open`
 }
 
-export function officeRoomForMapPosition(
+export function officeRoomForTile(
   mapId: string,
   document: MapDocumentV1,
   x: number,
   y: number,
 ): string {
-  const zone = mapZoneAt(document, x, y)
+  const zone = mapZoneAtTile(document, x, y)
   const key =
     zone?.type === 'meeting-room'
       ? zone.properties.externalKey

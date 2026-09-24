@@ -131,7 +131,16 @@ export function MediaBarMoreMenu({
     <div
       role="menu"
       aria-label="Mais opções"
-      className="absolute bottom-[calc(100%+0.5rem)] left-1/2 z-20 w-52 -translate-x-1/2 rounded-xl border border-primary-container/20 bg-surface/95 p-2 shadow-2xl backdrop-blur-xl"
+      /*
+       * Largura fixa, dimensionada pelo rótulo mais longo com atalho ao lado
+       * ("Fechar pessoas da sala", "Chat por perto" + Enter).
+       *
+       * Fixa, e não `w-max`, por causa de UM item: o áudio da sala mostra
+       * "{nome} está tocando", e nome de pessoa não tem teto — deixar o menu
+       * crescer com o conteúdo o faria mudar de tamanho conforme quem apertou
+       * play. Esse item continua truncando de propósito; os demais cabem.
+       */
+      className="absolute bottom-[calc(100%+0.5rem)] left-1/2 z-20 w-72 -translate-x-1/2 rounded-xl border border-primary-container/20 bg-surface/95 p-2 shadow-2xl backdrop-blur-xl"
     >
       <div className="mb-1 border-b border-outline-variant/30 px-3 py-1.5">
         <span className="font-label text-[10px] uppercase tracking-widest text-primary">Mais opções</span>

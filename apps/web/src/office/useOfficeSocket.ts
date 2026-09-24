@@ -21,7 +21,7 @@ export interface OfficeSocketState {
  * num snapshot — não duplicamos esse reducer aqui, só relemos
  * `bridge.snapshot()` a cada mensagem. O estado do jogo em si é do servidor:
  * aqui não há predição nem correção — a predição VISUAL do próprio passo vive
- * na OfficeScene (`MovementPredictor`), fora deste hook.
+ * na OfficeScene (`ArenaPredictor`), fora deste hook.
  */
 export function useOfficeSocket(
   bridge: OfficeBridge,
@@ -48,18 +48,9 @@ export function useOfficeSocket(
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let ws: WebSocket | null = null
 
-    const unsubscribeMove = bridge.onMoveIntent(({ dir, sprint, seq }) => {
+    const unsubscribeMove = bridge.onInput((input) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        // Omite os campos ausentes — mantém o payload comum idêntico ao de
-        // antes das features de corrida (`sprint`) e de re-ancoragem (`seq`).
-        ws.send(
-          JSON.stringify({
-            type: 'move',
-            dir,
-            ...(sprint ? { sprint } : {}),
-            ...(seq === undefined ? {} : { seq }),
-          }),
-        )
+        ws.send(JSON.stringify({ type: 'input', input }))
       }
     })
 

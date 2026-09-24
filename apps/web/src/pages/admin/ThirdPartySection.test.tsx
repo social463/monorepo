@@ -94,6 +94,7 @@ describe('ThirdPartySection', () => {
       managerId: null,
       area: null,
       position: null,
+      positionCategory: null,
       squad: null,
       photoUrl: null,
       avatarStyle: null,

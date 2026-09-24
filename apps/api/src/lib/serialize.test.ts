@@ -276,13 +276,14 @@ describe('toVoteDTO', () => {
 
 describe('toBadgeDTO', () => {
   it('expõe sectorIds vazio quando a relação não foi incluída', () => {
-    const badge = { id: 'b1', slug: 'b', name: 'B', description: 'd', kind: 'IMPACT' as const, iconKey: 'star', threshold: 1, categorySlug: null, global: true, companyId: 'company-emr' }
+    const badge = { id: 'b1', slug: 'b', name: 'B', description: 'd', kind: 'IMPACT' as const, iconKey: 'star', threshold: 1, categorySlug: null, badgeCategoryId: null, rewardPoints: null, rewardCoins: null, global: true, companyId: 'company-emr' }
     expect(toBadgeDTO(badge).sectorIds).toEqual([])
   })
 
   it('expõe sectorIds a partir da relação sectors incluída', () => {
     const badge = {
-      id: 'b1', slug: 'b', name: 'B', description: 'd', kind: 'IMPACT' as const, iconKey: 'star', threshold: 1, categorySlug: null, global: false, companyId: 'company-emr',
+      id: 'b1', slug: 'b', name: 'B', description: 'd', kind: 'IMPACT' as const, iconKey: 'star', threshold: 1, categorySlug: null,
+      badgeCategoryId: null, rewardPoints: null, rewardCoins: null, global: false, companyId: 'company-emr',
       sectors: [{ sectorId: 's1' }],
     }
     expect(toBadgeDTO(badge).sectorIds).toEqual(['s1'])

@@ -81,8 +81,13 @@ export function MoodOfDay() {
             <h3 className="font-headline text-body-lg font-semibold text-on-surface">
               Humor de hoje registrado
             </h3>
+            {/* A frase antiga prometia confidencialidade ("seu retorno entra no
+                clima do time de forma confidencial"). Ela saiu junto com a
+                identificação dos comentários (Documento 3, seção 4.6): coletar
+                o relato sob uma promessa que o painel não cumpre mais seria pior
+                do que não coletar. */}
             <p className="mt-1 text-body-sm text-on-surface-variant">
-              Obrigado — seu retorno entra no clima do time de forma confidencial.
+              Obrigado — seu retorno entra no clima do time.
             </p>
           </header>
 
@@ -227,6 +232,12 @@ export function MoodOfDay() {
               <label htmlFor="mood-note" className="mb-xs block font-label text-label-md text-on-surface">
                 Comentário <span className="font-normal text-on-surface-variant">(opcional)</span>
               </label>
+              {/* Dito ANTES de escrever, e não depois de enviar: quem decide o
+                  que contar precisa saber quem vai ler. */}
+              <p className="mb-xs text-label-sm text-on-surface-variant">
+                O time de Gente e Gestão lê os comentários com o seu nome. As médias do time seguem
+                agregadas.
+              </p>
               <textarea
                 id="mood-note"
                 value={note}

@@ -33,6 +33,7 @@ export function CharacterOverlay({
   name,
   isGuest = false,
   status = 'online',
+  isRoomManager = false,
   cameraTrack,
   screenTrack,
   mirrored = false,
@@ -42,6 +43,8 @@ export function CharacterOverlay({
   name: string
   isGuest?: boolean
   status?: OfficeUserStatus
+  /** Manda na sala em que está — desenha o selo ao lado do nome. */
+  isRoomManager?: boolean
   cameraTrack: RemoteVideoTrack | LocalVideoTrack | null
   screenTrack: RemoteVideoTrack | LocalVideoTrack | null
   /** Espelha o vídeo (só faz sentido pra própria câmera, nunca pra tela). */
@@ -121,6 +124,14 @@ export function CharacterOverlay({
       <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-1 text-on-primary shadow-lg">
         <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${presenceStatusDotCls[status]}`} />
         <span className="max-w-[7rem] truncate font-label text-label-sm font-semibold">{name}</span>
+        {isRoomManager && (
+          <span
+            aria-label="Responsável pela sala"
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-on-primary font-label text-[10px] font-semibold leading-none text-primary"
+          >
+            M
+          </span>
+        )}
         {isGuest && <span className="font-label text-[10px] font-semibold opacity-85">(Convidado)</span>}
       </span>
       <div className="-mt-px h-2 w-2 rotate-45 bg-primary" />

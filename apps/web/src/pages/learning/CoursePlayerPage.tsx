@@ -2,20 +2,29 @@ import { useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  COURSE_LESSON_TYPE_LABELS,
+  LESSON_KIND_LABELS,
+  lessonKindOf,
+  hasLessonContent,
   COURSE_LEVEL_LABELS,
   MAX_COURSE_RATING,
   MAX_COURSE_RATING_COMMENT_LENGTH,
   MIN_COURSE_RATING,
-  toVideoEmbedUrl,
   type CourseDetailDTO,
   type CourseLessonDTO,
 } from '@legends/shared'
 import { Icon } from '../../components/Icon'
+import { LessonBlocks } from './LessonBlocks'
 import { Skeleton } from '../../components/Skeleton'
 import { BackButton } from '../../components/BackButton'
 import { ApiError } from '../../lib/api'
-import { enrollInCourse, getCourse, rateCourse, setCourseFavorite, setLessonCompletion } from '../../lib/learning-api'
+import {
+  enrollInCourse,
+  getCourse,
+  rateCourse,
+  requestCourseCertificate,
+  setCourseFavorite,
+  setLessonCompletion,
+} from '../../lib/learning-api'
 import { ProgressBar, durationLabel } from './CourseCard'
 
 function flattenLessons(course: CourseDetailDTO): CourseLessonDTO[] {
@@ -45,11 +54,15 @@ function RatingCard({ course }: { course: CourseDetailDTO }) {
   const [rating, setRating] = useState(course.myRating?.rating ?? 0)
   const [comment, setComment] = useState(course.myRating?.comment ?? '')
   const [error, setError] = useState<string | null>(null)
+  // Enviar salvava em silêncio: o único retorno era o rótulo do botão trocar
+  // para "Atualizar avaliação", que confirma coisa nenhuma (Documento 4, 9.4).
+  const [enviada, setEnviada] = useState(false)
 
   const mutation = useMutation({
     mutationFn: () => rateCourse(course.id, { rating, comment: comment.trim() || null }),
     onSuccess: () => {
       setError(null)
+      setEnviada(true)
       qc.invalidateQueries({ queryKey: ['learning'] })
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : 'Não foi possível salvar sua avaliação.'),
@@ -70,13 +83,18 @@ function RatingCard({ course }: { course: CourseDetailDTO }) {
         className="w-full rounded-lg border border-outline-variant/40 bg-surface p-md text-body-md text-on-surface outline-none focus:border-primary"
       />
       {error && <p className="text-body-sm text-error">{error}</p>}
+      {enviada && !error && (
+        <p role="status" className="text-body-sm font-bold text-primary">
+          Obrigada pelo seu Feedback!
+        </p>
+      )}
       <button
         type="button"
         disabled={rating < MIN_COURSE_RATING || mutation.isPending}
         onClick={() => mutation.mutate()}
         className="w-fit rounded-full bg-primary px-lg py-sm font-label text-label-md text-on-primary disabled:bg-surface-container disabled:text-on-surface-variant"
       >
-        {course.myRating ? 'Atualizar avaliação' : 'Enviar avaliação'}
+        Enviar avaliação
       </button>
     </section>
   )
@@ -95,6 +113,72 @@ function FinalQuizCard({ course }: { course: CourseDetailDTO }) {
       <Link to={`/aprendizado/quiz/${course.finalQuizId}`} className="w-fit font-label text-label-md text-primary hover:underline">
         Fazer quiz final
       </Link>
+    </section>
+  )
+}
+
+/**
+ * Pedido de certificado (Documento 4, seção 9.3).
+ *
+ * Antes disto o certificado era inteiramente automático: quem concluía um
+ * curso que exige aprovação entrava na fila sem saber, e quem concluía um
+ * curso barrado por outra razão não via nada. O botão só libera com o curso
+ * concluído — é o que a G&G pediu, e é a mesma guarda que o service aplica.
+ */
+function CertificateRequestCard({ course }: { course: CourseDetailDTO }) {
+  const qc = useQueryClient()
+  const [error, setError] = useState<string | null>(null)
+  const mutation = useMutation({
+    mutationFn: () => requestCourseCertificate(course.id),
+    onSuccess: () => {
+      setError(null)
+      qc.invalidateQueries({ queryKey: ['learning'] })
+    },
+    onError: (err) =>
+      setError(err instanceof ApiError ? err.message : 'Não foi possível solicitar o certificado.'),
+  })
+
+  // Certificado na mão não vira pedido: quem já tem lê o `CertificateCard`.
+  // A saída vem depois dos hooks — antes deles, mudaria a ordem entre renders.
+  if (!course.certificateEnabled || course.certificate) return null
+
+  const concluido = course.enrollment?.status === 'COMPLETED'
+  const pedido = course.certificateRequest
+
+  return (
+    <section className="flex flex-col gap-sm rounded-xl border border-outline-variant/30 bg-surface-container p-lg">
+      <h2 className="flex items-center gap-sm font-headline text-title-md text-on-surface">
+        <Icon name="workspace_premium" className="text-[22px] text-primary" /> Certificado
+      </h2>
+
+      {pedido?.status === 'PENDING' ? (
+        <p className="text-body-sm text-on-surface-variant">
+          Solicitação enviada. O time de Gente e Gestão vai analisar e você recebe o certificado por
+          aqui.
+        </p>
+      ) : (
+        <>
+          {pedido?.status === 'REJECTED' && (
+            <p className="text-body-sm text-error">
+              Solicitação recusada{pedido.rejectionReason ? `: ${pedido.rejectionReason}` : '.'}
+            </p>
+          )}
+          <p className="text-body-sm text-on-surface-variant">
+            {concluido
+              ? 'Você concluiu o curso e já pode pedir o certificado.'
+              : 'Conclua todas as aulas do curso para solicitar o certificado.'}
+          </p>
+          {error && <p className="text-body-sm text-error">{error}</p>}
+          <button
+            type="button"
+            disabled={!concluido || mutation.isPending}
+            onClick={() => mutation.mutate()}
+            className="w-fit rounded-full bg-primary px-lg py-sm font-label text-label-md text-on-primary disabled:bg-surface-container disabled:text-on-surface-variant"
+          >
+            {pedido?.status === 'REJECTED' ? 'Solicitar novamente' : 'Solicitar certificado'}
+          </button>
+        </>
+      )}
     </section>
   )
 }
@@ -178,8 +262,10 @@ export function CoursePlayerPage() {
   if (isError || !course) {
     return (
       <section className="mx-auto flex max-w-3xl flex-col gap-md p-lg md:p-xl">
-        <BackButton />
         <div className="rounded-xl border border-outline-variant/30 bg-surface-container p-xl text-center">
+          <div className="flex justify-center">
+            <BackButton />
+          </div>
           <h1 className="font-headline text-headline-md text-on-surface">Curso não encontrado</h1>
           <p className="mt-sm text-body-md text-on-surface-variant">
             O curso pode ter sido despublicado ou o link está errado.
@@ -194,11 +280,12 @@ export function CoursePlayerPage() {
 
   return (
     <section className="mx-auto flex max-w-page flex-col gap-lg p-lg md:p-xl">
-      <BackButton />
-
       <header className="flex flex-col gap-md rounded-xl border border-outline-variant/30 bg-surface-container p-lg md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <p className="font-label text-label-sm uppercase tracking-wide text-primary">{course.category}</p>
+          <div className="flex items-center gap-sm">
+            <BackButton />
+            <p className="font-label text-label-sm uppercase tracking-wide text-primary">{course.category}</p>
+          </div>
           <h1 className="mt-xs font-headline text-headline-lg text-on-surface">{course.title}</h1>
           {course.shortDescription && (
             <p className="mt-xs text-body-md text-on-surface-variant">{course.shortDescription}</p>
@@ -254,7 +341,7 @@ export function CoursePlayerPage() {
               <div className="flex flex-wrap items-start justify-between gap-md">
                 <div className="min-w-0">
                   <p className="font-label text-label-sm uppercase tracking-wide text-primary">
-                    {COURSE_LESSON_TYPE_LABELS[currentLesson.type]} · {durationLabel(currentLesson.durationMinutes)}
+                    {LESSON_KIND_LABELS[lessonKindOf(currentLesson.blocks)]} · {durationLabel(currentLesson.durationMinutes)}
                   </p>
                   <h2 className="mt-xs font-headline text-headline-sm text-on-surface">{currentLesson.title}</h2>
                 </div>
@@ -279,28 +366,9 @@ export function CoursePlayerPage() {
                 </p>
               )}
 
-              {currentLesson.videoUrl && (
-                <div className="aspect-video overflow-hidden rounded-lg bg-black">
-                  <iframe
-                    // O link cadastrado pode vir na forma que se copia do navegador
-                    // (youtube.com/watch?v=…), que o YouTube recusa embutir.
-                    src={toVideoEmbedUrl(currentLesson.videoUrl)}
-                    title={currentLesson.title}
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture"
-                    allowFullScreen
-                    className="h-full w-full"
-                  />
-                </div>
-              )}
-
-              {currentLesson.contentHtml && (
-                <div
-                  className="prose-legends text-body-md text-on-surface-variant"
-                  // Conteúdo de aula é escrito pela Central de Cursos (autoria interna).
-                  dangerouslySetInnerHTML={{ __html: currentLesson.contentHtml }}
-                />
-              )}
-              {!currentLesson.videoUrl && !currentLesson.contentHtml && (
+              {hasLessonContent(currentLesson.blocks) ? (
+                <LessonBlocks blocks={currentLesson.blocks} />
+              ) : (
                 <p className="text-body-md text-on-surface-variant">Esta aula ainda não tem conteúdo publicado.</p>
               )}
 
@@ -337,6 +405,7 @@ export function CoursePlayerPage() {
 
           <FinalQuizCard course={course} />
           <CertificateCard course={course} />
+          <CertificateRequestCard course={course} />
           {enrolled && <RatingCard course={course} />}
         </div>
 

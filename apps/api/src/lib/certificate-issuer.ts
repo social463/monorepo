@@ -109,6 +109,14 @@ export async function renderAndStoreCertificate(
 ): Promise<CertificateWithUser> {
   if (!certificateStorageEnabled()) return certificate
   try {
+    // Competência virou relação (Documento 4, seção 9.6): antes vinha na coluna
+    // Json do próprio curso. Consulta rasa e só aqui — o certificado é emitido
+    // uma vez por pessoa, não é caminho de listagem.
+    const competencias = await scopedPrisma(companyId).courseCompetency.findMany({
+      where: { courseId: course.id },
+      select: { competency: { select: { name: true } } },
+      orderBy: { competency: { name: 'asc' } },
+    })
     const png = await renderCertificate(
       {
         userName: certificate.user.name,
@@ -121,7 +129,7 @@ export async function renderAndStoreCertificate(
           year: 'numeric',
           timeZone: 'America/Sao_Paulo',
         }).format(certificate.issuedAt),
-        competencies: toStringArray(course.competencies),
+        competencies: competencias.map((c) => c.competency.name),
       },
       template,
     )

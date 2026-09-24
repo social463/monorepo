@@ -2,6 +2,8 @@ import type { AgentConversation, AgentKind, AgentMessage } from '@prisma/client'
 import {
   AGENT_CONVERSATION_MAX_MESSAGES,
   AGENT_CONVERSATION_TITLE_MAX_LENGTH,
+  INOVA_PROJECT_PHASES,
+  meetingStatusesOf,
   type AgentKey,
 } from '@legends/shared'
 import { prisma } from '../lib/prisma'
@@ -10,12 +12,17 @@ import { AgentError } from '../lib/agent-error'
 import { buildBenchmarkSystemPrompt } from '../lib/benchmark-prompt'
 import { buildGlassSystemPrompt, fenceData } from '../lib/glass-prompt'
 import { buildAssistantSystemPrompt } from '../lib/assistant-prompt'
+import { buildInovaAdminSystemPrompt } from '../lib/inova-admin-prompt'
 import { requestAgentCompletion, type AgentCompletionFn } from '../lib/agent-client'
 import { resolveAiCredentials } from './ai-settings-service'
 import { getGlassOverview } from './glass-overview-service'
 import { resolveGlassCommand } from './glass-command-service'
 import { loadAssistantChatContext } from './assistant-service'
 import { getAssistantPersonaName } from './assistant-persona-service'
+import { ensureInovaModuleEnabled } from './inova-service'
+import { buildApprenticeSystemPrompt } from '../lib/apprentice-prompt'
+import { apprenticeToday, listApprenticePeople } from './apprentice-service'
+import { getApprenticeOverview } from './apprentice-admin-service'
 
 export interface AgentActor {
   id: string
@@ -30,6 +37,8 @@ const AGENT_KEY_TO_KIND: Record<AgentKey, AgentKind> = {
   benchmark: 'BENCHMARK',
   glass: 'GLASS',
   assistant: 'ASSISTANT',
+  inova: 'INOVA',
+  apprentice: 'APPRENTICE',
 }
 
 /**
@@ -93,6 +102,19 @@ function knowledgeSearchText(history: AgentMessage[], message: string): string {
 }
 
 /**
+ * Recorte opcional dos dados que o agente enxerga NESTE turno.
+ *
+ * `inovaProjectIds`: o painel do INOVA filtra por setor e período, e a IA
+ * precisa responder sobre o mesmo recorte que a tela mostra — senão "qual
+ * setor mais avançou?" com o filtro em Marketing respondia sobre a empresa
+ * toda. Vale por turno, não por conversa: trocar o filtro no meio da conversa
+ * muda o que a próxima resposta enxerga.
+ */
+export interface AgentTurnScope {
+  inovaProjectIds?: string[]
+}
+
+/**
  * Contexto que cada agente injeta no turno.
  *
  * `dataBlock` existe para o GlassAgent responder comando de relatório com
@@ -105,6 +127,7 @@ async function buildAgentTurn(
   agent: AgentKey,
   message: string,
   history: AgentMessage[],
+  scope: AgentTurnScope = {},
 ): Promise<{ systemPrompt: string; dataBlock?: string }> {
   const company = await prisma.company.findUnique({ where: { id: actor.companyId } })
   const companyName = company?.name ?? 'a empresa'
@@ -134,6 +157,79 @@ async function buildAgentTurn(
     }
   }
 
+  if (agent === 'apprentice') {
+    const db = scopedPrisma(actor.companyId)
+    const [meetings, classes, people, overview] = await Promise.all([
+      db.apprenticeMeeting.findMany({
+        orderBy: { order: 'asc' },
+        include: { activities: { select: { id: true } } },
+      }),
+      db.apprenticeClass.findMany({ orderBy: { name: 'asc' } }),
+      listApprenticePeople(actor.companyId),
+      getApprenticeOverview(actor.companyId, {}),
+    ])
+    const statuses = meetingStatusesOf(
+      meetings.map((meeting) => ({
+        id: meeting.id,
+        order: meeting.order,
+        scheduledOn: meeting.scheduledOn ? meeting.scheduledOn.toISOString().slice(0, 10) : null,
+      })),
+      apprenticeToday(),
+    )
+    return {
+      systemPrompt: buildApprenticeSystemPrompt({
+        companyName,
+        apprenticeCount: people.length,
+        classNames: classes.map((turma) => [turma.name, turma.shift].filter(Boolean).join(' · ')),
+        meetings: meetings.map((meeting) => ({
+          order: meeting.order,
+          title: meeting.title,
+          theme: meeting.theme,
+          deliverable: meeting.deliverable,
+          scheduledOn: meeting.scheduledOn ? meeting.scheduledOn.toISOString().slice(0, 10) : null,
+          status: statuses[meeting.id] ?? 'FUTURO',
+          accessReleased: meeting.accessReleased,
+          activityCount: meeting.activities.length,
+        })),
+        overview,
+      }),
+    }
+  }
+
+  if (agent === 'inova') {
+    await ensureInovaModuleEnabled(actor.companyId)
+    const projects = await scopedPrisma(actor.companyId).inovaProject.findMany({
+      // O recorte vem do painel (ids que a tela mostra). O `scopedPrisma` já
+      // prende à empresa: id de outro tenant não casa com nada.
+      where: { archived: false, ...(scope.inovaProjectIds && { id: { in: scope.inovaProjectIds } }) },
+      select: {
+        title: true,
+        sector: true,
+        category: true,
+        phase: true,
+        createdAt: true,
+        costReduction: true,
+        hoursSaved: true,
+        responsible1: { select: { name: true } },
+        responsible2: { select: { name: true } },
+      },
+    })
+    const phaseLabel = (phase: string) => INOVA_PROJECT_PHASES.find((p) => p.value === phase)?.label ?? phase
+    return {
+      systemPrompt: buildInovaAdminSystemPrompt({
+        companyName,
+        scoped: scope.inovaProjectIds !== undefined,
+        projects: projects.map((p) => ({
+          ...p,
+          phase: phaseLabel(p.phase),
+          createdAt: p.createdAt.toISOString(),
+          responsible1: p.responsible1?.name ?? null,
+          responsible2: p.responsible2?.name ?? null,
+        })),
+      }),
+    }
+  }
+
   // Uma leitura só por turno: o overview vai para o system prompt e é o mesmo
   // que `/relatorio` e `/tendencia` usam. Buscar de novo lá dentro custava duas
   // varreduras completas da tabela por pergunta.
@@ -151,6 +247,8 @@ export interface AskAgentInput {
   agent: AgentKey
   conversationId?: string
   message: string
+  /** Recorte do contexto do turno — hoje só o INOVA usa (ver `AgentTurnScope`). */
+  scope?: AgentTurnScope
   /** Injetável para teste: o service nunca fala com a rede direto. */
   complete?: AgentCompletionFn
 }
@@ -178,7 +276,7 @@ export async function askAgent(input: AskAgentInput): Promise<ConversationWithMe
 
   const [credentials, turnContext] = await Promise.all([
     resolveAiCredentials(actor.companyId),
-    buildAgentTurn(actor, agent, message, history),
+    buildAgentTurn(actor, agent, message, history, input.scope),
   ])
 
   // Marcado antes da chamada: é o instante em que a pergunta foi feita, e

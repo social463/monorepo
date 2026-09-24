@@ -65,7 +65,10 @@ export interface TeamsBrand {
  * desktop mais antigos não desenham.
  *
  * Logo que não passa aqui vale o mesmo que logo ausente — o rodapé cai na arte
- * do produto, que é PNG.
+ * do produto, que é PNG. Marca cadastrada em SVG, porém, não chega neste ponto
+ * como SVG: `teamsBrandFor` manda a URL do mesmo desenho já rasterizado
+ * (`GET /branding/logo.png`), senão a empresa ficaria com a logo cadastrada e o
+ * card assinado com a arte do Legends.
  */
 const FORMATOS_DE_LOGO = /\.(png|jpe?g|gif)$/i
 

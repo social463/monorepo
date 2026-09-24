@@ -1,7 +1,15 @@
 import { useMemo, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AdminUserDTO, UserRole, Area, SectorDTO, PublicUser } from '@legends/shared'
-import { canReceiveAdminAccess, isSectorAdminOnly, USER_ROLES, USER_ROLE_LABELS, AREAS, AREA_LABELS } from '@legends/shared'
+import {
+  canReceiveAdminAccess,
+  isSectorAdminOnly,
+  viewerAudienceTags,
+  USER_ROLES,
+  USER_ROLE_LABELS,
+  AREAS,
+  AREA_LABELS,
+} from '@legends/shared'
 import { ApiError, apiFetch } from '../../lib/api'
 import { downloadCsv, toCsv } from '../../lib/csv'
 import { Icon } from '../../components/Icon'
@@ -9,7 +17,7 @@ import { Select } from '../../components/Select'
 import { PhotoUploadField } from '../../components/PhotoUploadField'
 import { VacationDialog } from '../../components/VacationDialog'
 import { UserImportDialog } from './UserImportDialog'
-import { Panel, inputCls, groupBySector, SectorAccordion } from './shared'
+import { Panel, inputCls } from './shared'
 import { useAuth } from '../../auth/AuthContext'
 
 const CSV_HEADERS = [
@@ -52,18 +60,53 @@ function normalize(text: string): string {
     .replace(/[\u0300-\u036f]/g, '')
 }
 
+export interface CollaboratorFilters {
+  search: string
+  sectorId: string
+  squad: string
+  role: string
+  /** Cargo exato, do seletor de coluna. */
+  position: string
+  /** Id do líder direto. */
+  managerId: string
+  /** Tag de público-alvo (derivada). */
+  tag: string
+  /** `'ativo' | 'inativo' | 'desligado'`; vazio = todos. */
+  status: string
+}
+
+/**
+ * Busca livre + filtros por coluna (seção 4.4).
+ *
+ * A busca cobre os campos que a pessoa usaria para procurar alguém — nome,
+ * e-mail, cargo, squad e agora **líder** —, sem diferenciar acento nem caixa.
+ * O líder entra pelo nome, e não pelo id: quem procura digita "Ana", não um cuid.
+ *
+ * CPF não está aqui, e não é esquecimento: `User` não guarda esse campo. Ver a
+ * pendência na spec do Documento 3, Lote B.
+ */
 export function filterCollaborators(
   members: AdminUserDTO[],
-  filters: { search: string; sectorId: string; squad: string; role: string },
+  filters: CollaboratorFilters,
+  leaderNameById: Map<string, string> = new Map(),
+  tagsById: Map<string, string[]> = new Map(),
 ): AdminUserDTO[] {
   const term = normalize(filters.search.trim())
   return members.filter((member) => {
     if (filters.sectorId && member.sectorId !== filters.sectorId) return false
     if (filters.role && member.role !== filters.role) return false
     if (filters.squad && (member.squad ?? '') !== filters.squad) return false
+    if (filters.position && (member.position ?? '') !== filters.position) return false
+    if (filters.managerId && (member.managerId ?? '') !== filters.managerId) return false
+    if (filters.tag && !(tagsById.get(member.id) ?? []).includes(filters.tag)) return false
+    if (filters.status) {
+      const status = member.leftAt ? 'desligado' : member.active ? 'ativo' : 'inativo'
+      if (status !== filters.status) return false
+    }
     if (!term) return true
-    return [member.name, member.email ?? '', member.position ?? '', member.squad ?? ''].some((field) =>
-      normalize(field).includes(term),
+    const leader = member.managerId ? (leaderNameById.get(member.managerId) ?? '') : ''
+    return [member.name, member.email ?? '', member.position ?? '', member.squad ?? '', leader].some(
+      (field) => normalize(field).includes(term),
     )
   })
 }
@@ -72,6 +115,9 @@ export function filterCollaborators(
 function CollaboratorRow({
   member,
   sectors,
+  sectorName,
+  leaderName,
+  tags,
   leaderOptions,
   isSubadmin,
   canGrantAdminAccess,
@@ -82,6 +128,12 @@ function CollaboratorRow({
 }: {
   member: AdminUserDTO
   sectors: SectorDTO[]
+  /** Nome do setor da pessoa — a linha só tem o `sectorId`. */
+  sectorName: string
+  /** Nome do líder direto, resolvido pelo `managerId`. */
+  leaderName: string
+  /** Público-alvo derivado (`viewerAudienceTags`), não campo guardado. */
+  tags: string[]
   leaderOptions: { value: string; label: string }[]
   isSubadmin: boolean
   /** Só o ADMIN por papel concede acesso administrativo — a API recusa o resto com 403. */
@@ -153,7 +205,9 @@ function CollaboratorRow({
 
   if (editing) {
     return (
-      <li className="flex flex-col gap-sm rounded-lg border border-primary/40 bg-surface-container-low p-md">
+      <tr>
+        <td colSpan={7} className="py-sm">
+          <div className="flex flex-col gap-sm rounded-lg border border-primary/40 bg-surface-container-low p-md">
         <PhotoUploadField value={photoUrl} onChange={setPhotoUrl} label="Foto do colaborador" />
         <div className="grid gap-sm sm:grid-cols-2">
           <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} aria-label="Nome do colaborador" placeholder="Nome" />
@@ -268,60 +322,89 @@ function CollaboratorRow({
             Cancelar
           </button>
         </div>
-      </li>
+          </div>
+        </td>
+      </tr>
     )
   }
 
+  // Uma linha da TABELA (seção 4.4): a listagem deixou de ser agrupada por setor
+  // em acordeão — para achar uma pessoa era preciso adivinhar em qual bloco ela
+  // estava. As colunas são as da planilha que a G&G já usa.
   return (
-    <li className="flex items-center justify-between gap-md rounded-lg border border-outline-variant/20 bg-surface-container-low p-md">
-      <span className={member.active ? 'text-on-surface' : 'text-on-surface-variant line-through'}>
-        {member.name}
-        {member.leftAt && <span className="text-on-surface-variant"> · ex-lenda</span>}
+    <tr className="border-b border-outline-variant/20 last:border-0 hover:bg-surface-container-low">
+      <td className="py-sm pr-md">
+        <span className={member.active ? 'text-on-surface' : 'text-on-surface-variant line-through'}>
+          {member.name}
+        </span>
         {member.adminAccess && (
           <span className="ml-2 rounded-full bg-tertiary-container px-2 py-0.5 font-label text-label-sm text-on-tertiary-container">
             Acesso admin
           </span>
         )}
-        <span className="ml-2 font-label text-label-sm text-on-surface-variant">
-          {USER_ROLE_LABELS[member.role]}
-          {member.area ? ` · ${AREA_LABELS[member.area]}` : ''}
-          {member.position ? ` · ${member.position}` : ''}
-          {member.squad ? ` · ${member.squad}` : ''}
+        <span className="block truncate text-label-sm text-on-surface-variant">{member.email}</span>
+      </td>
+      <td className="py-sm pr-md text-body-sm text-on-surface-variant">{sectorName || '—'}</td>
+      <td className="py-sm pr-md text-body-sm text-on-surface-variant">{member.position || '—'}</td>
+      <td className="py-sm pr-md text-body-sm text-on-surface-variant">{leaderName || '—'}</td>
+      <td className="py-sm pr-md">
+        <span className="flex flex-wrap gap-xs">
+          {tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full bg-surface-container-highest px-sm py-[1px] font-label text-label-sm text-on-surface-variant"
+            >
+              {tag}
+            </span>
+          ))}
         </span>
-      </span>
-      <div className="flex shrink-0 gap-sm">
-        <button
-          onClick={() => setEditing(true)}
-          className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
-        >
-          Editar
-        </button>
-        <button
-          type="button"
-          onClick={() => onOpenVacations(member)}
-          className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
-        >
-          Férias
-        </button>
-        <button
-          onClick={() => onToggle(member.id, !member.active)}
-          className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
-        >
-          {member.active ? 'Desativar' : 'Ativar'}
-        </button>
-        <button
-          type="button"
-          onClick={() =>
+      </td>
+      <td className="py-sm pr-md">
+        <span
+          className={`rounded-full px-sm py-[2px] font-label text-label-sm ${
             member.leftAt
-              ? onSetLeft(member.id, null)
-              : onSetLeft(member.id, new Date().toISOString())
-          }
-          className="rounded-lg px-md py-sm font-label text-label-sm text-on-surface-variant hover:text-on-surface"
+              ? 'bg-outline-variant/30 text-on-surface-variant'
+              : member.active
+                ? 'bg-primary/15 text-primary'
+                : 'bg-error-container/40 text-on-error-container'
+          }`}
         >
-          {member.leftAt ? 'Readmitir' : 'Desligar'}
-        </button>
-      </div>
-    </li>
+          {member.leftAt ? 'Desligado' : member.active ? 'Ativo' : 'Inativo'}
+        </span>
+      </td>
+      <td className="py-sm">
+        <div className="flex justify-end gap-xs">
+          <button
+            onClick={() => setEditing(true)}
+            className="rounded-md border border-outline-variant/60 px-2 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+          >
+            Editar
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenVacations(member)}
+            className="rounded-md border border-outline-variant/60 px-2 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+          >
+            Férias
+          </button>
+          <button
+            onClick={() => onToggle(member.id, !member.active)}
+            className="rounded-md border border-outline-variant/60 px-2 py-1 font-label text-label-sm text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+          >
+            {member.active ? 'Desativar' : 'Ativar'}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              member.leftAt ? onSetLeft(member.id, null) : onSetLeft(member.id, new Date().toISOString())
+            }
+            className="rounded-md px-2 py-1 font-label text-label-sm text-on-surface-variant hover:text-on-surface"
+          >
+            {member.leftAt ? 'Readmitir' : 'Desligar'}
+          </button>
+        </div>
+      </td>
+    </tr>
   )
 }
 
@@ -342,6 +425,10 @@ export function CollaboratorsSection() {
   const [filterSector, setFilterSector] = useState('')
   const [filterSquad, setFilterSquad] = useState('')
   const [filterRole, setFilterRole] = useState('')
+  const [filterPosition, setFilterPosition] = useState('')
+  const [filterManager, setFilterManager] = useState('')
+  const [filterTag, setFilterTag] = useState('')
+  const [filterStatus, setFilterStatus] = useState('')
 
   const usersQuery = useQuery({
     queryKey: ['admin', 'users'],
@@ -373,11 +460,86 @@ export function CollaboratorsSection() {
     [allMembers],
   )
 
-  const filters = { search, sectorId: filterSector, squad: filterSquad, role: filterRole }
-  const filtering = Boolean(search.trim() || filterSector || filterSquad || filterRole)
+  const sectorNameById = useMemo(
+    () => new Map(sectors.map((sector) => [sector.id, sector.name])),
+    [sectors],
+  )
+  const leaderNameById = useMemo(
+    () => new Map(allMembers.map((member) => [member.id, member.name])),
+    [allMembers],
+  )
+
+  /**
+   * Tags de público-alvo por pessoa — **derivadas**, não guardadas.
+   *
+   * É o mesmo vocabulário que o calendário usa para casar evento com gente
+   * (`viewerAudienceTags`): "Todos", o setor, "G&G", "Líder" e "CEO". Uma coluna
+   * no banco viraria segunda fonte de verdade e sairia do ar assim que alguém
+   * mudasse de setor.
+   */
+  const tagsById = useMemo(() => {
+    const featuresBySector = new Map(sectors.map((sector) => [sector.id, sector.enabledFeatures ?? []]))
+    return new Map(
+      allMembers.map((member) => [
+        member.id,
+        viewerAudienceTags({
+          role: member.role,
+          sectorName: sectorNameById.get(member.sectorId) ?? null,
+          sectorFeatures: featuresBySector.get(member.sectorId) ?? [],
+          position: member.position,
+        }),
+      ]),
+    )
+  }, [allMembers, sectors, sectorNameById])
+
+  const positionOptions = useMemo(() => {
+    const names = new Set<string>()
+    for (const member of allMembers) if (member.position?.trim()) names.add(member.position)
+    return [...names].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [allMembers])
+
+  const tagOptions = useMemo(() => {
+    const names = new Set<string>()
+    for (const tags of tagsById.values()) for (const tag of tags) names.add(tag)
+    return [...names].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [tagsById])
+
+  const filters: CollaboratorFilters = {
+    search,
+    sectorId: filterSector,
+    squad: filterSquad,
+    role: filterRole,
+    position: filterPosition,
+    managerId: filterManager,
+    tag: filterTag,
+    status: filterStatus,
+  }
+  const filtering = Boolean(
+    search.trim() ||
+      filterSector ||
+      filterSquad ||
+      filterRole ||
+      filterPosition ||
+      filterManager ||
+      filterTag ||
+      filterStatus,
+  )
   const members = useMemo(
-    () => filterCollaborators(allMembers, filters),
-    [allMembers, search, filterSector, filterSquad, filterRole],
+    () => filterCollaborators(allMembers, filters, leaderNameById, tagsById),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      allMembers,
+      search,
+      filterSector,
+      filterSquad,
+      filterRole,
+      filterPosition,
+      filterManager,
+      filterTag,
+      filterStatus,
+      leaderNameById,
+      tagsById,
+    ],
   )
 
   function handleExportCsv() {
@@ -574,6 +736,35 @@ export function CollaboratorsSection() {
             onChange={setFilterRole}
             options={[{ value: '', label: 'Todos os papéis' }, ...USER_ROLES.map((r) => ({ value: r, label: USER_ROLE_LABELS[r] }))]}
           />
+          <Select
+            ariaLabel="Filtrar por cargo"
+            value={filterPosition}
+            onChange={setFilterPosition}
+            options={[{ value: '', label: 'Todos os cargos' }, ...positionOptions.map((c) => ({ value: c, label: c }))]}
+          />
+          <Select
+            ariaLabel="Filtrar por líder"
+            value={filterManager}
+            onChange={setFilterManager}
+            options={[{ value: '', label: 'Todos os líderes' }, ...leaderOptions]}
+          />
+          <Select
+            ariaLabel="Filtrar por tag"
+            value={filterTag}
+            onChange={setFilterTag}
+            options={[{ value: '', label: 'Todas as tags' }, ...tagOptions.map((t) => ({ value: t, label: t }))]}
+          />
+          <Select
+            ariaLabel="Filtrar por status"
+            value={filterStatus}
+            onChange={setFilterStatus}
+            options={[
+              { value: '', label: 'Todos os status' },
+              { value: 'ativo', label: 'Ativo' },
+              { value: 'inativo', label: 'Inativo' },
+              { value: 'desligado', label: 'Desligado' },
+            ]}
+          />
         </div>
         <p className="font-label text-label-sm text-on-surface-variant">
           {members.length} de {allMembers.length} {allMembers.length === 1 ? 'pessoa' : 'pessoas'}
@@ -585,6 +776,10 @@ export function CollaboratorsSection() {
                 setFilterSector('')
                 setFilterSquad('')
                 setFilterRole('')
+                setFilterPosition('')
+                setFilterManager('')
+                setFilterTag('')
+                setFilterStatus('')
               }}
               className="ml-sm text-primary hover:underline"
             >
@@ -594,22 +789,37 @@ export function CollaboratorsSection() {
         </p>
       </div>
 
-      <div className="flex flex-col gap-sm">
-        {filtering && members.length === 0 && (
+      {/* Uma linha por pessoa, e não acordeão por setor (seção 4.4): para
+          consultar alguém era preciso saber de antemão em qual setor procurar.
+          `overflow-x-auto` porque sete colunas não cabem em tela estreita — o
+          que rola é a tabela, nunca a página. */}
+      <div className="overflow-x-auto">
+        {members.length === 0 ? (
           <p className="rounded-lg border border-dashed border-outline-variant/50 p-lg text-body-sm text-on-surface-variant">
-            Nenhuma pessoa encontrada com esses filtros.
+            {filtering ? 'Nenhuma pessoa encontrada com esses filtros.' : 'Nenhuma pessoa cadastrada ainda.'}
           </p>
-        )}
-        {groupBySector(members, sectors).map((group) => (
-          // Filtrando, os grupos abrem sozinhos — resultado escondido dentro de
-          // acordeão fechado parece "não achou nada".
-          <SectorAccordion key={group.key} name={group.name} count={group.items.length} forceOpen={filtering}>
-            <ul className="flex flex-col gap-2">
-              {group.items.map((member) => (
+        ) : (
+          <table className="w-full min-w-[64rem] border-collapse text-left">
+            <thead>
+              <tr className="border-b border-outline-variant/40 font-label text-label-sm uppercase tracking-wide text-on-surface-variant">
+                <th className="py-sm pr-md font-normal">Nome</th>
+                <th className="py-sm pr-md font-normal">Setor</th>
+                <th className="py-sm pr-md font-normal">Cargo</th>
+                <th className="py-sm pr-md font-normal">Líder</th>
+                <th className="py-sm pr-md font-normal">Tags</th>
+                <th className="py-sm pr-md font-normal">Status</th>
+                <th className="py-sm text-right font-normal">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {members.map((member) => (
                 <CollaboratorRow
                   key={member.id}
                   member={member}
                   sectors={sectors}
+                  sectorName={sectorNameById.get(member.sectorId) ?? ''}
+                  leaderName={member.managerId ? (leaderNameById.get(member.managerId) ?? '') : ''}
+                  tags={tagsById.get(member.id) ?? []}
                   leaderOptions={leaderOptions}
                   isSubadmin={isSubadmin}
                   canGrantAdminAccess={canGrantAdminAccess}
@@ -621,9 +831,9 @@ export function CollaboratorsSection() {
                   onOpenVacations={setVacationTarget}
                 />
               ))}
-            </ul>
-          </SectorAccordion>
-        ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {vacationTarget && (

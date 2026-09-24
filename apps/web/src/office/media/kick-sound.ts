@@ -25,19 +25,27 @@ function audioContext(): AudioContext | null {
  * `power` dá o corpo da batida (toque é abafado, chute estala) e `grazed`
  * tira um tanto do volume: pé que pega de raspão soa mais fraco, do mesmo
  * jeito que a bola anda menos.
+ *
+ * `volume` é a distância: quem decide é `officeSoundLevel` na cena, e aqui ele
+ * só multiplica o pico. Zero não toca nada — a bola do outro canto do
+ * escritório, ou o chute que aconteceu do lado de fora de uma sala de chamada,
+ * não chega ao ouvido de quem está dentro.
  */
 export function playKickSound({
   power = 'kick',
   grazed = false,
-}: { power?: 'touch' | 'kick' | 'lob' | 'dribble'; grazed?: boolean } = {}): void {
+  volume = 1,
+}: { power?: 'touch' | 'kick' | 'lob' | 'dribble'; grazed?: boolean; volume?: number } = {}): void {
   if (isOfficeSilenced()) return
+  const level = Math.max(0, Math.min(1, volume))
+  if (level <= 0) return
   const ctx = audioContext()
   if (!ctx) return
   try {
     if (ctx.state === 'suspended') void ctx.resume()
     const now = ctx.currentTime
     const gain = ctx.createGain()
-    const peak = (power === 'touch' ? 0.12 : 0.35) * (grazed ? 0.6 : 1)
+    const peak = (power === 'touch' ? 0.12 : 0.35) * (grazed ? 0.6 : 1) * level
     // O chute alto é mais "poc" que "pum": a bola sobe em vez de rasgar o chão.
     const decay = power === 'touch' ? 0.07 : power === 'lob' ? 0.1 : 0.13
     gain.gain.setValueAtTime(peak, now)

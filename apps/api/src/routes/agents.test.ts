@@ -249,6 +249,44 @@ describe('rotas do agente', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  it('recusa "inova" nesta rota genérica com 4xx e nunca chega no provedor de IA', async () => {
+    // "inova" é um AgentKey válido (conversa, DTO e as rotas dedicadas
+    // `/inova/admin/chat/*` dependem disso), mas esta rota genérica é gated por
+    // `gente-gestao` (permissão errada para o INOVA) e o handler local só
+    // reconhece `AgentError`, não `InovaError` — deixar passar aqui faria a
+    // checagem de módulo do INOVA estourar como 500 em vez de 403, além de
+    // liberar o chat do INOVA (e a cota de IA da empresa) para qualquer
+    // SUBADMIN de Gente e Gestão, sem nenhum direito de administração do INOVA.
+    const admin = await criarUsuario('ADMIN', 'admin-agente-inova@empresa.com')
+    await comChave(admin.companyId, admin.id)
+    const auth = { authorization: `Bearer ${signAccessToken(app, admin)}` }
+
+    const ask = await app.inject({
+      method: 'POST',
+      url: '/admin/agents/inova/ask',
+      headers: auth,
+      payload: { message: 'Oi' },
+    })
+    const conversations = await app.inject({
+      method: 'GET',
+      url: '/admin/agents/inova/conversations',
+      headers: auth,
+    })
+    const conversation = await app.inject({
+      method: 'GET',
+      url: '/admin/agents/inova/conversations/qualquer-id',
+      headers: auth,
+    })
+
+    expect(ask.statusCode).toBeGreaterThanOrEqual(400)
+    expect(ask.statusCode).toBeLessThan(500)
+    expect(conversations.statusCode).toBeGreaterThanOrEqual(400)
+    expect(conversations.statusCode).toBeLessThan(500)
+    expect(conversation.statusCode).toBeGreaterThanOrEqual(400)
+    expect(conversation.statusCode).toBeLessThan(500)
+    expect(completion).not.toHaveBeenCalled()
+  })
+
   it('só o SUBADMIN do setor com a feature entra; os outros papéis, 403', async () => {
     const admin = await criarUsuario('ADMIN', 'admin-guarda-agente@empresa.com')
     await comChave(admin.companyId, admin.id)

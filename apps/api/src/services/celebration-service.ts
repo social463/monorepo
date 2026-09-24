@@ -1,4 +1,4 @@
-import { UPCOMING_CELEBRATION_WINDOW_DAYS } from '@legends/shared'
+import { UPCOMING_CELEBRATION_WINDOW_DAYS, type CelebrationKind } from '@legends/shared'
 import type {
   BirthdayDTO,
   CelebrationsResponse,
@@ -10,44 +10,9 @@ import { prisma } from '../lib/prisma'
 import { scopedPrisma } from '../lib/tenant-scope'
 import { toPublicUser } from '../lib/serialize'
 import { sectorNamesFor } from '../lib/sector-features'
-import { dayFromYmd, ymdInSaoPaulo } from '../lib/sao-paulo-date'
-
-/** Um ano é bissexto se divisível por 4, exceto centenas não divisíveis por 400. */
-function isLeapYear(year: number): boolean {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
-}
-
-/**
- * O dia em que a data `month/day` é comemorada no ano civil `year`. Normalmente
- * é o próprio dia; a exceção é 29/02, que em ano não bissexto é comemorado em
- * 28/02 (senão a data desapareceria da tela em 3 de cada 4 anos).
- */
-function observedDay(month: number, day: number, year: number): number {
-  if (month === 2 && day === 29 && !isLeapYear(year)) return 28
-  return day
-}
-
-/**
- * Dia e mês civis de uma data do banco. Lemos os componentes **UTC** de
- * propósito: tanto `birthDate` (`@db.Date`) quanto `joinedAt` (setado pelo admin
- * a partir de um input `type="date"`, virando meia-noite UTC) são datas civis
- * sem hora. Converter para America/Sao_Paulo aqui jogaria toda data vinda do
- * formulário um dia para trás.
- */
-function civilDayMonth(date: Date): { day: number; month: number } {
-  return { day: date.getUTCDate(), month: date.getUTCMonth() + 1 }
-}
-
-/** A data (YYYY-MM-DD) em que `month/day` é observado no ano civil `year`. */
-function occurrenceYmd(month: number, day: number, year: number): string {
-  const observed = observedDay(month, day, year)
-  return `${year}-${String(month).padStart(2, '0')}-${String(observed).padStart(2, '0')}`
-}
-
-/** Dias entre duas datas civis (YYYY-MM-DD), positivo quando `to` é depois de `from`. */
-function daysBetween(from: string, to: string): number {
-  return Math.round((dayFromYmd(to).getTime() - dayFromYmd(from).getTime()) / 86_400_000)
-}
+import { ymdInSaoPaulo } from '../lib/sao-paulo-date'
+import { civilDayMonth, daysBetween, observedDay, occurrenceYmd } from '../lib/celebration-date'
+import { countGreetingsForToday } from './birthday-greeting-service'
 
 /**
  * Próxima ocorrência de um aniversário de nascimento a partir de `referenceDay`
@@ -203,6 +168,7 @@ export async function getCelebrations(
         month: m,
         daysUntil: occ.daysUntil,
         observedDate: occ.observedYmd,
+        greetingCount: 0,
       })
     }
     const { day: jd, month: jm } = civilDayMonth(user.joinedAt)
@@ -214,18 +180,44 @@ export async function getCelebrations(
       years: occ.years,
       daysUntil: occ.daysUntil,
       observedDate: occ.observedYmd,
+      greetingCount: 0,
     })
   }
 
+  const birthdaysUpcoming = nearestThreeDates(upcomingBirthdays)
+  const workUpcoming = nearestThreeDates(upcomingWorkAnniversaries)
+  await fillGreetingCounts(viewer.companyId, birthdaysUpcoming, 'BIRTH')
+  await fillGreetingCounts(viewer.companyId, workUpcoming, 'WORK')
+
   return {
     referenceDay,
-    birthdays: {
-      month: target.birthdays.map((e) => e.dto),
-      upcoming: nearestThreeDates(upcomingBirthdays),
-    },
-    workAnniversaries: {
-      month: target.workAnniversaries.map((e) => e.dto),
-      upcoming: nearestThreeDates(upcomingWorkAnniversaries),
-    },
+    birthdays: { month: target.birthdays.map((e) => e.dto), upcoming: birthdaysUpcoming },
+    workAnniversaries: { month: target.workAnniversaries.map((e) => e.dto), upcoming: workUpcoming },
+  }
+}
+
+/**
+ * Preenche `greetingCount` das ocorrências de HOJE — o "3 já assinaram" do card
+ * da Home. Só hoje porque é o único dia em que o número diz alguma coisa: no
+ * mural de daqui a 12 dias, zero é o normal, e mostrá-lo pareceria abandono.
+ */
+async function fillGreetingCounts(
+  companyId: string,
+  occurrences: (UpcomingBirthdayDTO | UpcomingWorkAnniversaryDTO)[],
+  kind: CelebrationKind,
+): Promise<void> {
+  const today = occurrences.filter((occurrence) => occurrence.daysUntil === 0)
+  if (today.length === 0) return
+  const counts = await countGreetingsForToday(
+    companyId,
+    today.map((occurrence) => ({
+      userId: occurrence.user.id,
+      kind,
+      year: Number(occurrence.observedDate.slice(0, 4)),
+    })),
+  )
+  for (const occurrence of today) {
+    const year = Number(occurrence.observedDate.slice(0, 4))
+    occurrence.greetingCount = counts.get(`${occurrence.user.id}:${kind}:${year}`) ?? 0
   }
 }

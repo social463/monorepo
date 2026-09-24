@@ -43,6 +43,14 @@ export function SquadsSection() {
       apiFetch<{ squad: SquadWithMembersDTO }>(`/admin/squads/${vars.id}`, { method: 'PATCH', body: JSON.stringify({ active: vars.active }) }),
     onSuccess: invalidate,
   })
+  // Excluir é irreversível e o padrão do /admin para isso é o `window.confirm`
+  // (ver ChallengesSection, OneOnOneTopicsSection). O texto conta os integrantes
+  // porque eles saem da squad junto — o `SquadMember` cascateia no banco.
+  const deleteSquad = useMutation({
+    mutationFn: (id: string) => apiFetch<void>(`/admin/squads/${id}`, { method: 'DELETE' }),
+    onSuccess: () => { setError(null); invalidate() },
+    onError: (err) => setError(err instanceof ApiError ? err.message : 'Erro ao excluir squad.'),
+  })
   const addMember = useMutation({
     mutationFn: (vars: { squadId: string; userId: string }) =>
       apiFetch<{ squad: SquadWithMembersDTO }>(`/admin/squads/${vars.squadId}/members`, { method: 'POST', body: JSON.stringify({ userId: vars.userId }) }),
@@ -129,12 +137,30 @@ export function SquadsSection() {
                   <li key={squad.id} className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-md">
                     <div className="flex items-center justify-between">
                       <span className={squad.active ? 'text-on-surface' : 'text-on-surface-variant line-through'}>{squad.name}</span>
-                      <button
-                        onClick={() => toggleSquad.mutate({ id: squad.id, active: !squad.active })}
-                        className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
-                      >
-                        {squad.active ? 'Desativar' : 'Ativar'}
-                      </button>
+                      <div className="flex items-center gap-sm">
+                        <button
+                          onClick={() => toggleSquad.mutate({ id: squad.id, active: !squad.active })}
+                          className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
+                        >
+                          {squad.active ? 'Desativar' : 'Ativar'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            const members =
+                              squad.members.length === 1
+                                ? ' 1 integrante sai dela.'
+                                : squad.members.length > 1
+                                  ? ` Os ${squad.members.length} integrantes saem dela.`
+                                  : ''
+                            if (window.confirm(`Excluir a squad "${squad.name}"?${members} Esta ação não pode ser desfeita.`)) {
+                              deleteSquad.mutate(squad.id)
+                            }
+                          }}
+                          className="rounded-md border border-outline-variant/60 px-3 py-1 font-label text-label-sm text-on-surface-variant hover:border-error hover:text-error"
+                        >
+                          Excluir
+                        </button>
+                      </div>
                     </div>
                     <div className="mt-sm flex items-center gap-sm">
                       <span className="font-label text-label-sm text-on-surface-variant">Líder:</span>

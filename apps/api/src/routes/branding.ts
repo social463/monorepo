@@ -6,15 +6,19 @@ import {
   isValidHex,
   type BrandingDTO,
 } from '@legends/shared'
+import { absoluteUrl } from '../lib/app-url'
+import { rasterizeSvgLogo } from '../lib/logo-raster'
 import { prisma } from '../lib/prisma'
 import { buildBrandingLogoKey, presignImageUpload, publicUrlFor, s3Config } from '../lib/s3-client'
 import {
   BrandingError,
   brandingSchema,
   overridesSchema,
+  getBranding,
   getBrandingSettings,
   getPublicBranding,
   previewBranding,
+  teamsLogoSource,
   updateBranding,
 } from '../services/branding-service'
 
@@ -73,6 +77,40 @@ export async function brandingRoutes(app: FastifyInstance) {
     const branding = await getPublicBranding({ host: request.headers.host, slug })
     // Cache curto no browser: a marca muda raramente e isto é servido a cada visita.
     return reply.header('cache-control', 'public, max-age=300').send(branding)
+  })
+
+  /**
+   * Logo da empresa em PNG, para quem não rasteriza SVG.
+   *
+   * Existe pelo card do Teams: quem busca esta imagem é o servidor da Microsoft,
+   * que não desenha SVG e não tem token nenhum — daí ser **público**, como o
+   * `GET /branding`. Não expõe nada novo: é a mesma logo que a tela de login já
+   * mostra a qualquer visitante.
+   *
+   * A empresa vem no `company` porque a URL é montada pela API a partir do
+   * `APP_BASE_URL`, e não pelo navegador do tenant — sem ele, o `Host` seria o
+   * do host do app e toda empresa receberia a mesma logo. `slug`/`Host`
+   * continuam valendo como caminho normal para quem chama do browser.
+   *
+   * Sem SVG para converter (empresa sem logo, ou logo que o Teams já busca
+   * direto), redireciona para a arte do produto: melhor a marca errada do que o
+   * ícone de imagem quebrada, que ainda por cima rouba a linha do rodapé.
+   */
+  app.get('/branding/logo.png', async (request, reply) => {
+    const { company, slug } = request.query as { company?: string; slug?: string }
+    const branding = company
+      ? await getBranding(company)
+      : await getPublicBranding({ host: request.headers.host, slug })
+
+    const png = await rasterizeSvgLogo(teamsLogoSource(branding))
+    if (!png) return reply.redirect(absoluteUrl('/illustration/logo-mark.png'), 302)
+
+    // Cache longo: a URL carrega um `v` derivado da logo de origem, então logo
+    // nova é URL nova e nunca colide com a resposta guardada da anterior.
+    return reply
+      .header('content-type', 'image/png')
+      .header('cache-control', 'public, max-age=604800')
+      .send(png)
   })
 
   app.get('/branding/manifest.webmanifest', async (request, reply) => {

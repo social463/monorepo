@@ -31,6 +31,12 @@ export interface CertificateTemplateVisual {
   signatureRole: string
   signatureImageUrl?: string | null
   logoUrl?: string | null
+  /**
+   * Arte de fundo, cobrindo a folha inteira. O campo existia no modelo e no
+   * formulário desde sempre, mas o SVG nunca o desenhava — quem colava uma URL
+   * salvava e não via efeito nenhum.
+   */
+  backgroundUrl?: string | null
 }
 
 // Paisagem A4-ish: bom para baixar e postar no LinkedIn.
@@ -120,8 +126,20 @@ export function buildCertificateSvg(data: CertificateData, template?: Certificat
     ? `${signatureBlock(WIDTH / 2, HEIGHT - 165, template)}\n  ${logoMarkup(WIDTH - 260, HEIGHT - 150, 220, template.logoUrl)}`
     : logoMarkup(WIDTH - 260, HEIGHT - 150, 220, undefined)
 
+  // O papel continua embaixo da arte: se a imagem tiver transparência (ou não
+  // carregar), o certificado sai no fundo claro de sempre em vez de preto.
+  // `slice` porque a folha tem proporção fixa — a arte cobre e sobra, em vez de
+  // deformar.
+  //
+  // A linha carrega a própria quebra: sem arte de fundo o SVG tem de sair
+  // BYTE A BYTE igual ao de antes — é o que o teste dourado trava, para que um
+  // certificado antigo re-renderizado não mude de cara.
+  const background = template?.backgroundUrl
+    ? `\n  <image x="0" y="0" width="${WIDTH}" height="${HEIGHT}" href="${escapeXml(template.backgroundUrl)}" preserveAspectRatio="xMidYMid slice"/>`
+    : ''
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
-  <rect width="${WIDTH}" height="${HEIGHT}" fill="${PAPER}"/>
+  <rect width="${WIDTH}" height="${HEIGHT}" fill="${PAPER}"/>${background}
   <rect x="34" y="34" width="${WIDTH - 68}" height="${HEIGHT - 68}" rx="18" fill="none" stroke="${accent}" stroke-width="3"/>
   <rect x="52" y="52" width="${WIDTH - 104}" height="${HEIGHT - 104}" rx="12" fill="none" stroke="${LIME}" stroke-width="1.5"/>
 
@@ -182,10 +200,14 @@ async function toDataUri(url: string | null | undefined): Promise<string | null>
   }
 }
 
-/** Resolve logo e imagem de assinatura do modelo em paralelo — ver `toDataUri`. */
+/** Resolve fundo, logo e assinatura do modelo em paralelo — ver `toDataUri`. */
 async function resolveTemplateImages(template: CertificateTemplateVisual): Promise<CertificateTemplateVisual> {
-  const [logoUrl, signatureImageUrl] = await Promise.all([toDataUri(template.logoUrl), toDataUri(template.signatureImageUrl)])
-  return { ...template, logoUrl, signatureImageUrl }
+  const [logoUrl, signatureImageUrl, backgroundUrl] = await Promise.all([
+    toDataUri(template.logoUrl),
+    toDataUri(template.signatureImageUrl),
+    toDataUri(template.backgroundUrl),
+  ])
+  return { ...template, logoUrl, signatureImageUrl, backgroundUrl }
 }
 
 /**

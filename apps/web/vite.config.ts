@@ -18,6 +18,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test/setup.ts',
+    // O Phaser não sobrevive ao import no jsdom (canvas 2D, phaser3spectorjs,
+    // ResizeObserver). Os testes de cena já o mockam — e o `vi.mock` do arquivo
+    // ganha deste alias —, mas o `import('phaser')` DINÂMICO do ArenaPlayground
+    // escapava: o Vitest externaliza o pacote como CJS e o carregava de verdade,
+    // rendendo 15 rejeições sem dono e exit 1 com os 2635 testes passando.
+    alias: { phaser: new URL('./src/test/phaser-stub.ts', import.meta.url).pathname },
     // Teto de heap por worker. Um loop render→setState→render (identidade de
     // prop/estado nova a cada volta) não estoura como timeout — `testTimeout`
     // nunca dispara, porque o loop é de microtask/timer, não de espera. Sem

@@ -3,6 +3,7 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import {
+  TILE_SIZE,
   createEmptyMapDocumentV1,
   type OfficeDeskDTO,
   type OfficeDeskReminderSummaryDTO,
@@ -31,12 +32,20 @@ function useOfficeInteractions(
   return useOfficeInteractionsRuntime(bridge, occupants, youId, testDocument)
 }
 
-function occ(userId: string, x = 5, y = 5): OfficeOccupant {
+/**
+ * Ocupante posicionado por TILE, guardado em PIXEL — que é o que
+ * `OfficeOccupant.x/y` significa desde o movimento livre.
+ *
+ * A conversão fica aqui, e não nos testes, porque foi exatamente essa mentira
+ * (fixture em tile, runtime em pixel) que escondeu os atalhos de caminhada
+ * quebrados: o Dijkstra recebia (3,4) onde o app manda (112,144).
+ */
+function occ(userId: string, tileX = 5, tileY = 5): OfficeOccupant {
   return {
     userId,
     name: userId,
-    x,
-    y,
+    x: (tileX + 0.5) * TILE_SIZE,
+    y: (tileY + 0.5) * TILE_SIZE,
     dir: 'down',
     avatarSeed: null,
     avatarOptions: null,
@@ -217,27 +226,106 @@ describe('useOfficeInteractions', () => {
   it('tecla de movimento (onMoveIntent) cancela um follow em andamento', async () => {
     const bridge = new OfficeBridge()
     const sent: unknown[] = []
-    bridge.onClientMessage((m) => sent.push(m))
+    bridge.onAutoWalk((dir) => sent.push(dir))
     const { result } = renderHook(
       () => useOfficeInteractions(bridge, [occ('you', 3, 4), occ('bruno', 8, 4)], 'you'),
       { wrapper },
     )
     act(() => result.current.follow('bruno'))
-    const before = sent.length
-    act(() => bridge.emitMoveIntent({ dir: 'up', sprint: false })) // humano assumiu
-    // moved do follow depois do cancel não deve gerar novos passos
-    act(() => bridge.emitServerMessage({ type: 'moved', userId: 'you', x: 4, y: 4, dir: 'right' }))
-    expect(sent.length).toBe(before) // nenhum passo novo após o cancelamento
+    expect(sent).toEqual(['right'])
+    // Humano assumiu: input com intenção NÃO nula cancela o Seguir — e o
+    // cancelamento SOLTA a tecla, senão o personagem voltaria a andar sozinho
+    // assim que a pessoa soltasse a dela.
+    act(() => bridge.emitInput({ seq: 1, dx: 0, dy: -1, dtMs: 33 }))
+    expect(sent).toEqual(['right', null])
+    // Depois do cancel, nem o snapshot nem a posição prevista geram direção.
+    act(() =>
+      bridge.emitServerMessage({
+        type: 'snapshot',
+        players: [{ userId: 'bruno', x: 8 * 32 + 16, y: 2 * 32 + 16, dir: 'up', seq: 2 }],
+      }),
+    )
+    act(() => bridge.emitSelfBody({ x: 4 * 32 + 16, y: 4 * 32 + 16 }))
+    expect(sent).toEqual(['right', null])
+  })
+
+  it('Seguir parte da posição em PIXEL do ocupante e acha caminho (regressão)', async () => {
+    // O movimento livre passou `OfficeOccupant.x/y` para pixel, e o Seguir
+    // continuou entregando esses valores ao Dijkstra como se fossem tile: a
+    // partida caía fora da grade, todo atalho de caminhada respondia "não foi
+    // possível chegar" e o personagem não saía do lugar.
+    const bridge = new OfficeBridge()
+    const sent: unknown[] = []
+    bridge.onAutoWalk((dir) => sent.push(dir))
+    const { result } = renderHook(
+      () => useOfficeInteractions(bridge, [occ('you', 3, 4), occ('bruno', 8, 4)], 'you'),
+      { wrapper },
+    )
+
+    act(() => result.current.follow('bruno'))
+
+    expect(sent).toEqual(['right'])
+    expect(result.current.toast).toBeNull()
+  })
+
+  it('room-entry-denied ensina a recusa: a rota sai da porta em vez de insistir', async () => {
+    const bridge = new OfficeBridge()
+    const sent: unknown[] = []
+    bridge.onAutoWalk((dir) => sent.push(dir))
+    renderHook(() => useOfficeInteractions(bridge, [occ('you', 5, 5)], 'you'), { wrapper })
+
+    act(() => bridge.emitMapRightClick({ x: 8, y: 5 }))
+    expect(sent).toEqual(['right'])
+
+    // O servidor barrou a entrada no tile logo à direita (sala lotada). É o
+    // único aviso de recusa que sobreviveu ao movimento livre — sem ele a rota
+    // devolveria a mesma porta.
+    act(() =>
+      bridge.emitServerMessage({
+        type: 'room-entry-denied',
+        roomId: 'room-1',
+        roomName: 'Aurora',
+        reason: 'capacity',
+        x: 6,
+        y: 5,
+      }),
+    )
+
+    expect(sent[sent.length - 1]).not.toBe('right')
+  })
+
+  it('o input da PRÓPRIA caminhada automática não a cancela (regressão)', async () => {
+    // O Seguir "segura a tecla" e a amostragem da cena manda isso como `input` —
+    // o mesmo canal do teclado. Sem olhar a procedência, o primeiro quadro de
+    // esterço cancelava a caminhada: o personagem dava UM passo e parava.
+    const bridge = new OfficeBridge()
+    const sent: unknown[] = []
+    bridge.onAutoWalk((dir) => sent.push(dir))
+    const { result } = renderHook(
+      () => useOfficeInteractions(bridge, [occ('you', 3, 4), occ('bruno', 8, 4)], 'you'),
+      { wrapper },
+    )
+
+    act(() => result.current.follow('bruno'))
+    act(() => bridge.emitInput({ seq: 1, dx: 1, dy: 0, dtMs: 33 }, 'auto'))
+    // Nada de soltar a tecla: a caminhada continua.
+    expect(sent).toEqual(['right'])
+
+    // Já a tecla de uma PESSOA assume o controle e solta.
+    act(() => bridge.emitInput({ seq: 2, dx: 0, dy: -1, dtMs: 33 }, 'keyboard'))
+    expect(sent).toEqual(['right', null])
   })
 
   it('clique direito no mapa (bridge.emitMapRightClick) anda até o próprio tile clicado', async () => {
     const bridge = new OfficeBridge()
     const sent: unknown[] = []
-    bridge.onClientMessage((m) => sent.push(m))
+    bridge.onAutoWalk((dir) => sent.push(dir))
     renderHook(() => useOfficeInteractions(bridge, [occ('you', 3, 4)], 'you'), { wrapper })
 
     act(() => bridge.emitMapRightClick({ x: 5, y: 4 }))
-    expect(sent).toEqual([{ type: 'move', dir: 'right' }])
+    // O Seguir "segura a tecla" em vez de mandar passo: quem transforma isso em
+    // deslocamento é a amostragem de input da cena.
+    expect(sent).toEqual(['right'])
   })
 
   it('caminhada automática contorna kart estacionado (tile bloqueado no servidor)', async () => {
@@ -245,7 +333,7 @@ describe('useOfficeInteractions', () => {
     // e o Seguir fica retentando o mesmo tile até desistir.
     const bridge = new OfficeBridge()
     const sent: unknown[] = []
-    bridge.onClientMessage((m) => sent.push(m))
+    bridge.onAutoWalk((dir) => sent.push(dir))
     renderHook(
       () =>
         useOfficeInteractionsRuntime(bridge, [occ('you', 3, 4)], 'you', testDocument, noDesks, noDeskReminders, [
@@ -257,7 +345,7 @@ describe('useOfficeInteractions', () => {
     // `await act`: deixa o useQuery interno (showcase) assentar dentro do act.
     await act(async () => bridge.emitMapRightClick({ x: 5, y: 4 }))
 
-    expect(sent).toEqual([{ type: 'move', dir: expect.stringMatching(/^(up|down)$/) }])
+    expect(sent).toEqual([expect.stringMatching(/^(up|down)$/)])
   })
 
   it('movimento manual fecha o card aberto para devolver o foco ao próprio usuário', async () => {
@@ -270,7 +358,7 @@ describe('useOfficeInteractions', () => {
     act(() => bridge.emitCharacterClick('bruno'))
     await waitFor(() => expect(result.current.selected?.userId).toBe('bruno'))
 
-    act(() => bridge.emitMoveIntent({ dir: 'up', sprint: false }))
+    act(() => bridge.emitInput({ seq: 1, dx: 0, dy: -1, dtMs: 33 }))
 
     expect(result.current.selected).toBeNull()
   })
@@ -385,7 +473,7 @@ describe('useOfficeInteractions', () => {
     it('aceito: avisa e entra andando até o tile onde tinha sido barrado', async () => {
       const bridge = new OfficeBridge()
       const sent: unknown[] = []
-      bridge.onClientMessage((m) => sent.push(m))
+      bridge.onAutoWalk((dir) => sent.push(dir))
       const { result } = renderHook(() => useOfficeInteractions(bridge, [occ('you', 5, 5)], 'you'), { wrapper })
       act(() => bridge.emitServerMessage(denied))
       act(() => result.current.knockToEnter())
@@ -404,7 +492,7 @@ describe('useOfficeInteractions', () => {
       expect(result.current.entryDenied).toBeNull()
       await waitFor(() => expect(result.current.toast).toMatch(/liberou/i))
       // O tile recusado (6,5) fica um passo à direita de onde a pessoa está (5,5).
-      expect(sent).toContainEqual({ type: 'move', dir: 'right' })
+      expect(sent).toContainEqual('right')
     })
 
     it('recusado: avisa e não anda', async () => {
@@ -435,20 +523,22 @@ describe('useOfficeInteractions', () => {
   it('desmontar durante um follow em andamento encerra o loop de passos (sem leak)', async () => {
     const bridge = new OfficeBridge()
     const sent: unknown[] = []
-    bridge.onClientMessage((m) => sent.push(m))
+    bridge.onAutoWalk((dir) => sent.push(dir))
     const { result, unmount } = renderHook(
       () => useOfficeInteractions(bridge, [occ('you', 3, 4), occ('bruno', 8, 4)], 'you'),
       { wrapper },
     )
-    act(() => result.current.follow('bruno')) // dispara o 1º passo e arma o timer de 500ms
-    const before = sent.length
-    expect(before).toBeGreaterThan(0)
+    act(() => result.current.follow('bruno')) // segura a tecla
+    expect(sent).toEqual(['right'])
 
     unmount() // navegação para fora do escritório: handlers do bridge são desinscritos
 
-    // Sem o cleanup, o timer de passo (500ms) reagenda a si mesmo indefinidamente
-    // mesmo sem receber `moved` — avançamos dez ciclos para provar que não há mais.
+    // Desmontar SOLTA a tecla: sem isso o último esterço ficaria valendo na cena
+    // e o personagem sairia andando sozinho até bater em alguma coisa.
+    expect(sent).toEqual(['right', null])
+    // E nada mais chega depois — nem posição prevista, nem snapshot.
+    act(() => bridge.emitSelfBody({ x: 4 * 32 + 16, y: 4 * 32 + 16 }))
     act(() => vi.advanceTimersByTime(5000))
-    expect(sent.length).toBe(before) // nenhum passo novo emitido após o unmount
+    expect(sent).toEqual(['right', null])
   })
 })

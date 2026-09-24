@@ -12,6 +12,7 @@ import { apiFetch, ApiError } from '../lib/api'
 import { administersBlock } from '../lib/features'
 import { useAlbumPhotoUpload } from '../lib/use-album-photos'
 import { useAuth } from '../auth/AuthContext'
+import { AlbumUploadProgress } from '../components/AlbumUploadProgress'
 import { Avatar } from '../components/Avatar'
 import { Icon } from '../components/Icon'
 import { FeedbackReactions } from './profile/FeedbackReactions'
@@ -289,20 +290,7 @@ function PhotoUploader({ albumId, onDone }: { albumId: string; onDone: () => voi
         </p>
       )}
 
-      {upload.uploads.length > 0 && (
-        <ul className="flex flex-col gap-1">
-          {upload.uploads.map((u) => (
-            <li key={u.fileName} className="text-body-sm text-on-surface-variant">
-              {u.fileName} —{' '}
-              {u.status === 'erro' ? (
-                <span className="text-error">{u.message}</span>
-              ) : (
-                <span>{u.status === 'pronto' ? 'enviada' : 'enviando…'}</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      <AlbumUploadProgress upload={upload} />
     </section>
   )
 }

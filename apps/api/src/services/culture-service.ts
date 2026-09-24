@@ -9,6 +9,7 @@ import type {
   UpdateCultureVisualAssetRequest,
   UpsertCulturePageRequest,
 } from '@legends/shared'
+import { ONBOARDING_MATERIALS_WINDOW_DAYS } from '@legends/shared'
 import { scopedPrisma } from '../lib/tenant-scope'
 import { deleteS3Object, s3Config } from '../lib/s3-client'
 
@@ -259,6 +260,7 @@ export async function createVisualAsset(input: CreateCultureVisualAssetRequest, 
       storageKey: input.storageKey,
       fileName: input.fileName,
       fit: input.fit ?? 'COVER',
+      brand: input.brand ?? 'CURRENT',
       published: input.published ?? true,
       order: await nextVisualAssetOrder(companyId),
     },
@@ -282,6 +284,7 @@ export async function updateVisualAsset(
       ...(input.storageKey !== undefined ? { storageKey: input.storageKey } : {}),
       ...(input.fileName !== undefined ? { fileName: input.fileName } : {}),
       ...(input.fit !== undefined ? { fit: input.fit } : {}),
+      ...(input.brand !== undefined ? { brand: input.brand } : {}),
       ...(input.published !== undefined ? { published: input.published } : {}),
     },
   })
@@ -428,6 +431,39 @@ export async function deletePersonalAsset(id: string, companyId: string) {
     }
   }
   return existing
+}
+
+/**
+ * Os materiais da chegada — os mesmos materiais pessoais, com a janela dos 90
+ * dias resolvida AQUI, e não no navegador.
+ *
+ * Duas coisas dependem disso ser do servidor. A janela sai de `User.joinedAt`,
+ * que o cliente até conhece, mas quem decide o "hoje" seria o relógio da
+ * máquina — e seção que reaparece mudando a data do sistema não é seção. E,
+ * fechada a janela, a lista **não é carregada**: nada de mandar link assinado
+ * para uma tela que não vai desenhá-lo.
+ *
+ * Nada some de verdade no dia 91: o material continua na aba Kit visual, que é
+ * onde ele mora. O que expira é o destaque no perfil.
+ */
+export async function getOnboardingKitFor(userId: string, companyId: string) {
+  const db = scopedPrisma(companyId)
+  const user = await db.user.findFirst({ where: { id: userId }, select: { joinedAt: true } })
+  if (!user) throw new CultureError('Pessoa não encontrada.', 404)
+
+  const endsAt = new Date(user.joinedAt)
+  endsAt.setUTCDate(endsAt.getUTCDate() + ONBOARDING_MATERIALS_WINDOW_DAYS)
+  const restanteMs = endsAt.getTime() - Date.now()
+  if (restanteMs <= 0) return { active: false as const, endsAt: null, daysLeft: 0, assets: [] }
+
+  return {
+    active: true as const,
+    endsAt,
+    // Arredonda para CIMA: no último dia ainda falta "1 dia", não "0". Zero é o
+    // que o front lê como janela fechada, e ela só fecha quando fecha.
+    daysLeft: Math.ceil(restanteMs / 86_400_000),
+    assets: await listPersonalAssetsFor(userId, companyId),
+  }
 }
 
 export async function reorderVisualAssets(ids: string[], companyId: string) {

@@ -1,23 +1,31 @@
 import { Link } from 'react-router-dom'
-import { tenureLabel } from '@legends/shared'
+import { canSignBirthdayWall, tenureLabel } from '@legends/shared'
 import { useCelebrations } from '../lib/use-celebrations'
+import { useAuth } from '../auth/AuthContext'
 import { CelebrationDateLabel } from './CelebrationDateLabel'
 import { CelebrationTile } from './CelebrationTile'
 import { Icon } from './Icon'
 
-/** Card da sidebar da Home: os próximos aniversários de empresa (3 datas mais próximas, hoje incluso). */
+/** Quantas pessoas cabem no card antes do "ver todos". */
+const PREVIEW = 3
+
+/**
+ * Card da sidebar da Home: os próximos aniversários de empresa. Mesmo corte de
+ * três PESSOAS do `BirthdaysCard`, e pelo mesmo motivo — ver o comentário de lá.
+ */
 export function WorkAnniversariesCard() {
   const { workAnniversaries, isLoading, isError } = useCelebrations()
+  const { user } = useAuth()
   // Mesma regra do card de aniversários: conteúdo acessório não ocupa a sidebar
   // com skeleton nem com mensagem de erro.
   if (isLoading || isError) return null
 
-  const upcoming = workAnniversaries.upcoming
+  const upcoming = workAnniversaries.upcoming.slice(0, PREVIEW)
 
   return (
     <aside
       data-testid="work-anniversaries-card"
-      className="flex flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="flex min-w-0 flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       <h2 className="flex items-center gap-sm font-headline text-body-lg font-semibold text-on-surface">
         <Icon name="workspace_premium" className="text-[20px] text-tertiary" />
@@ -37,6 +45,9 @@ export function WorkAnniversariesCard() {
                 dateLabel={
                   <CelebrationDateLabel daysUntil={anniversary.daysUntil} observedDate={anniversary.observedDate} />
                 }
+                celebrating={anniversary.daysUntil === 0}
+                // Mesma regra do mural: todo mundo menos o próprio homenageado.
+                canCongratulate={canSignBirthdayWall(user, anniversary.user.id)}
               />
             </li>
           ))}

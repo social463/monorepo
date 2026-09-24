@@ -1,13 +1,16 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_COMPANY_ID, LEGENDS_PRESET } from '@legends/shared'
 import { buildApp } from '../app'
 import { signAccessToken } from '../lib/jwt'
 import { prisma } from '../lib/prisma'
+import { clearLogoRasterCache } from '../lib/logo-raster'
+import { isTeamsRenderableLogo } from '../lib/teams-client'
 import {
   BRANDING_SETTING_KEY,
   clearBrandingCache,
   getBranding,
   slugFromHost,
+  teamsBrandFor,
 } from '../services/branding-service'
 
 const MARCA_EMR = {
@@ -42,6 +45,7 @@ let app: Awaited<ReturnType<typeof buildApp>>
 beforeEach(async () => {
   // O cache é de módulo e sobrevive ao truncate das tabelas entre testes.
   clearBrandingCache()
+  clearLogoRasterCache()
   app = buildApp()
   await app.ready()
 })
@@ -204,6 +208,156 @@ describe('GET /branding/manifest.webmanifest', () => {
     expect(manifest.icons[0].src).toBe(MARCA_EMR.logos.light.mark)
     // Tema claro: a cor de fundo do manifest acompanha a superfície da empresa.
     expect(manifest.theme_color).toMatch(/^#[0-9a-f]{6}$/)
+  })
+})
+
+const SVG_DE_MARCA =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="137" height="133"><rect width="137" height="133" fill="#264641"/></svg>'
+
+function stubFetchDeSvg() {
+  const spy = vi.fn(
+    async () => new Response(SVG_DE_MARCA, { status: 200, headers: { 'content-type': 'image/svg+xml' } }),
+  )
+  vi.stubGlobal('fetch', spy)
+  return spy
+}
+
+async function gravarMarcaEmr() {
+  await prisma.appSetting.create({
+    data: { key: BRANDING_SETTING_KEY, companyId: DEFAULT_COMPANY_ID, value: JSON.stringify(MARCA_EMR) },
+  })
+}
+
+describe('teamsBrandFor — a logo que assina o card do Teams', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('manda a logo cadastrada rasterizada quando ela é SVG, e não a arte do produto', async () => {
+    // O caso real: as quatro logos da EMR são SVG. Descartá-las deixava o card
+    // com o nome da empresa e o punho do Legends do lado.
+    await gravarMarcaEmr()
+
+    const brand = await teamsBrandFor(DEFAULT_COMPANY_ID)
+    expect(brand.appName).toBe('EMR Legends')
+    expect(brand.logoUrl).toContain('/api/branding/logo.png')
+    expect(brand.logoUrl).toContain(`company=${DEFAULT_COMPANY_ID}`)
+    // Precisa passar no filtro do card, senão o rodapé volta para a arte do produto.
+    expect(isTeamsRenderableLogo(brand.logoUrl)).toBe(true)
+  })
+
+  it('troca a URL quando a logo muda — a cache de imagem da Microsoft não pode servir a marca velha', async () => {
+    await gravarMarcaEmr()
+    const antes = await teamsBrandFor(DEFAULT_COMPANY_ID)
+
+    clearBrandingCache()
+    await prisma.appSetting.update({
+      where: { key_companyId: { key: BRANDING_SETTING_KEY, companyId: DEFAULT_COMPANY_ID } },
+      data: {
+        value: JSON.stringify({
+          ...MARCA_EMR,
+          logos: { ...MARCA_EMR.logos, light: { wide: null, mark: 'https://cdn.exemplo.com/emr/nova.svg' } },
+        }),
+      },
+    })
+
+    const depois = await teamsBrandFor(DEFAULT_COMPANY_ID)
+    expect(depois.logoUrl).not.toBe(antes.logoUrl)
+  })
+
+  it('logo que o próprio Teams busca continua indo direto, sem passar pela conversão', async () => {
+    await prisma.appSetting.create({
+      data: {
+        key: BRANDING_SETTING_KEY,
+        companyId: DEFAULT_COMPANY_ID,
+        value: JSON.stringify({
+          ...MARCA_EMR,
+          logos: { ...MARCA_EMR.logos, light: { wide: null, mark: 'https://cdn.exemplo.com/emr/simbolo.png' } },
+        }),
+      },
+    })
+
+    const brand = await teamsBrandFor(DEFAULT_COMPANY_ID)
+    expect(brand.logoUrl).toBe('https://cdn.exemplo.com/emr/simbolo.png')
+  })
+
+  it('empresa sem logo nenhuma continua em null — aí sim o rodapé cai na arte do produto', async () => {
+    await prisma.appSetting.create({
+      data: {
+        key: BRANDING_SETTING_KEY,
+        companyId: DEFAULT_COMPANY_ID,
+        value: JSON.stringify({
+          ...MARCA_EMR,
+          logos: { light: { wide: null, mark: null }, dark: { wide: null, mark: null } },
+        }),
+      },
+    })
+
+    expect((await teamsBrandFor(DEFAULT_COMPANY_ID)).logoUrl).toBeNull()
+  })
+})
+
+describe('GET /branding/logo.png', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('serve a logo da empresa em PNG, sem autenticação — quem busca é o servidor da Microsoft', async () => {
+    await gravarMarcaEmr()
+    stubFetchDeSvg()
+
+    const res = await app.inject({ method: 'GET', url: `/branding/logo.png?company=${DEFAULT_COMPANY_ID}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toBe('image/png')
+    expect(res.rawPayload.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+  })
+
+  it('entrega exatamente a logo que o card anunciou', async () => {
+    await gravarMarcaEmr()
+    const spy = stubFetchDeSvg()
+
+    const { logoUrl } = await teamsBrandFor(DEFAULT_COMPANY_ID)
+    const anunciada = new URL(logoUrl!)
+    // O `/api` da URL pública é o prefixo que o nginx retira no proxy — a rota
+    // do Fastify vive um nível abaixo dele.
+    expect(anunciada.pathname).toBe('/api/branding/logo.png')
+    const res = await app.inject({
+      method: 'GET',
+      url: anunciada.pathname.replace(/^\/api/, '') + anunciada.search,
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(spy).toHaveBeenCalledWith(MARCA_EMR.logos.light.mark, expect.anything())
+  })
+
+  it('sem `company`, resolve a empresa pelo Host, como o resto do endpoint público', async () => {
+    await gravarMarcaEmr()
+    stubFetchDeSvg()
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/branding/logo.png',
+      headers: { host: 'legends.eumedicoresidente.com.br' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toBe('image/png')
+  })
+
+  it('sem SVG para converter, redireciona para a arte do produto — melhor que imagem quebrada', async () => {
+    const res = await app.inject({ method: 'GET', url: '/branding/logo.png' })
+    expect(res.statusCode).toBe(302)
+    expect(res.headers.location).toMatch(/\/illustration\/logo-mark\.png$/)
+  })
+
+  it('S3 fora do ar também cai na arte do produto, em vez de estourar', async () => {
+    await gravarMarcaEmr()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 500 })))
+
+    const res = await app.inject({ method: 'GET', url: `/branding/logo.png?company=${DEFAULT_COMPANY_ID}` })
+    expect(res.statusCode).toBe(302)
+    expect(res.headers.location).toMatch(/\/illustration\/logo-mark\.png$/)
   })
 })
 

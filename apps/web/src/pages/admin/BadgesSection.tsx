@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { BADGE_KIND_LABELS } from "@legends/shared";
 import type {
   AwardedBadgeDTO,
+  BadgeCategoryDTO,
   BadgeDTO,
   RecognitionCategoryDTO,
   PublicUser,
@@ -12,11 +14,51 @@ import { Icon } from "../../components/Icon";
 import { BadgeEmblem } from "../../components/BadgeEmblem";
 import { BadgeArtPicker } from "../../components/BadgeArtPicker";
 import { DEFAULT_ART_KEY } from "../../lib/badge-art";
-import { Panel, inputCls, groupBySectorMulti, SectorAccordion, SectorChecklist } from "./shared";
+import { Panel, inputCls, SectorAccordion, SectorChecklist } from "./shared";
 import { Select } from "../../components/Select";
 import { useAuth } from "../../auth/AuthContext";
+import { BadgeCategoriesPanel } from "./BadgeCategoriesPanel";
+import { BadgeClaimsQueue } from "./BadgeClaimsQueue";
+import { BadgeImportPanel } from "./BadgeImportPanel";
 
 type BadgeKind = BadgeDTO["kind"];
+
+/**
+ * Agrupa o catálogo por TEMA (Documento 4, seção 11.3), com contador.
+ *
+ * Substitui o agrupamento por setor: com ele, a pergunta "quantos selos de
+ * Cultura existem" não tinha resposta na tela. O escopo por setor continua
+ * visível, como etiqueta do item.
+ *
+ * Selo sem tema cai numa gaveta "Sem categoria" no fim — e não some, que é o
+ * que aconteceria se o agrupamento fosse um `filter` por tema existente.
+ */
+export function groupByBadgeCategory(
+  badges: BadgeDTO[],
+  categories: BadgeCategoryDTO[],
+): { key: string; name: string; items: BadgeDTO[] }[] {
+  const grupos = categories.map((category) => ({
+    key: category.id,
+    name: category.name,
+    items: badges.filter((badge) => badge.badgeCategoryId === category.id),
+  }));
+  const semTema = badges.filter(
+    (badge) => !badge.badgeCategoryId || !categories.some((c) => c.id === badge.badgeCategoryId),
+  );
+  if (semTema.length > 0) {
+    grupos.push({ key: "sem-categoria", name: "Sem categoria", items: semTema });
+  }
+  // Gaveta vazia não vira cabeçalho: contador zero não informa nada.
+  return grupos.filter((grupo) => grupo.items.length > 0);
+}
+
+/** Etiqueta do escopo por setor de um selo não global. */
+function sectorLabel(badge: BadgeDTO, sectors: SectorDTO[]): string {
+  const nomes = badge.sectorIds
+    .map((id) => sectors.find((sector) => sector.id === id)?.name)
+    .filter(Boolean);
+  return nomes.length > 0 ? nomes.join(", ") : "setor específico";
+}
 
 export const BADGE_KINDS: { value: BadgeKind; label: string }[] = [
   { value: "CATEGORY", label: "Por categoria" },
@@ -189,6 +231,11 @@ export function BadgesSection() {
     iconKey: DEFAULT_ART_KEY,
     threshold: 5,
     categorySlug: "",
+    badgeCategoryId: "",
+    // String vazia = "não concede". O campo numérico precisa poder ficar vazio,
+    // e `0` digitado parece valor escolhido (Documento 4, seção 11.4).
+    rewardPoints: "",
+    rewardCoins: "",
     global: true,
     sectorIds: [] as string[],
   };
@@ -196,6 +243,7 @@ export function BadgesSection() {
   const [editingBadgeId, setEditingBadgeId] = useState<string | null>(null);
   const [badgeError, setBadgeError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [assigningBadge, setAssigningBadge] = useState<BadgeDTO | null>(null);
 
   const badgesQuery = useQuery({
     queryKey: ["admin", "badges"],
@@ -212,6 +260,11 @@ export function BadgesSection() {
   const categoriesQuery = useQuery({
     queryKey: ["admin", "categories"],
     queryFn: () => apiFetch<{ categories: RecognitionCategoryDTO[] }>("/admin/categories"),
+  });
+  // Temas do catálogo — outra lista, outro conceito (ver BadgeCategoriesPanel).
+  const badgeCategoriesQuery = useQuery({
+    queryKey: ["admin", "badgeCategories"],
+    queryFn: () => apiFetch<{ categories: BadgeCategoryDTO[] }>("/admin/badge-categories"),
   });
 
   const createBadge = useMutation({
@@ -259,6 +312,7 @@ export function BadgesSection() {
 
   const badges = badgesQuery.data?.badges ?? [];
   const categories = categoriesQuery.data?.categories ?? [];
+  const badgeCategories = badgeCategoriesQuery.data?.categories ?? [];
   const sectors = sectorsQuery.data?.sectors ?? [];
 
   function startBadgeEdit(badge: BadgeDTO) {
@@ -272,6 +326,9 @@ export function BadgesSection() {
       iconKey: badge.iconKey,
       threshold: badge.threshold,
       categorySlug: badge.categorySlug ?? "",
+      badgeCategoryId: badge.badgeCategoryId ?? "",
+      rewardPoints: badge.rewardPoints == null ? "" : String(badge.rewardPoints),
+      rewardCoins: badge.rewardCoins == null ? "" : String(badge.rewardCoins),
       global: badge.global,
       sectorIds: badge.sectorIds,
     });
@@ -295,6 +352,11 @@ export function BadgesSection() {
       threshold: Number(badgeForm.threshold) || 0,
       categorySlug:
         badgeForm.kind === "CATEGORY" ? badgeForm.categorySlug || null : null,
+      badgeCategoryId: badgeForm.badgeCategoryId || null,
+      // Campo vazio vira `null`: não concede. `Number("")` é 0, e 0 seria
+      // "configurado como zero" — que é outra coisa.
+      rewardPoints: badgeForm.rewardPoints === "" ? null : Number(badgeForm.rewardPoints),
+      rewardCoins: badgeForm.rewardCoins === "" ? null : Number(badgeForm.rewardCoins),
       global: badgeForm.global,
       sectorIds: badgeForm.global ? undefined : badgeForm.sectorIds,
     };
@@ -307,6 +369,10 @@ export function BadgesSection() {
 
   return (
     <div className="flex flex-col gap-lg">
+      {/* A fila vem primeiro: é a única parte da tela com alguém esperando do
+          outro lado. */}
+      <BadgeClaimsQueue />
+
       <Panel
         title="Catálogo de selos"
         action={
@@ -393,6 +459,45 @@ export function BadgesSection() {
                   }
                 />
               )}
+              {/* Tema do catálogo: a gaveta em que o selo aparece. Não é a
+                  categoria de reconhecimento do campo acima. */}
+              <Select
+                ariaLabel="Tema do catálogo"
+                placeholder="Sem categoria"
+                className="sm:col-span-2"
+                value={badgeForm.badgeCategoryId}
+                options={[
+                  { value: "", label: "Sem categoria" },
+                  ...badgeCategories
+                    .filter((c) => c.active)
+                    .map((c) => ({ value: c.id, label: c.name })),
+                ]}
+                onChange={(next) =>
+                  setBadgeForm({ ...badgeForm, badgeCategoryId: next })
+                }
+              />
+              <input
+                className={inputCls}
+                value={badgeForm.rewardPoints}
+                onChange={(e) =>
+                  setBadgeForm({ ...badgeForm, rewardPoints: e.target.value })
+                }
+                aria-label="Recompensa em Pontos"
+                placeholder="Pontos ao conquistar (opcional)"
+                type="number"
+                min={0}
+              />
+              <input
+                className={inputCls}
+                value={badgeForm.rewardCoins}
+                onChange={(e) =>
+                  setBadgeForm({ ...badgeForm, rewardCoins: e.target.value })
+                }
+                aria-label="Recompensa em EMR Coins"
+                placeholder="EMR Coins ao conquistar (opcional)"
+                type="number"
+                min={0}
+              />
             </div>
             {!isSubadmin && (
             <label className="flex items-center gap-xs font-label text-label-sm text-on-surface">
@@ -432,6 +537,7 @@ export function BadgesSection() {
                 <div className="flex-grow">
                   <BadgeArtPicker
                     value={badgeForm.iconKey}
+                    title={badgeForm.name}
                     onChange={(key) =>
                       setBadgeForm({ ...badgeForm, iconKey: key })
                     }
@@ -474,7 +580,7 @@ export function BadgesSection() {
         )}
 
         <div className="flex flex-col gap-sm">
-          {groupBySectorMulti(badges, sectors).map((group) => (
+          {groupByBadgeCategory(badges, badgeCategories).map((group) => (
             <SectorAccordion key={group.key} name={group.name} count={group.items.length}>
               <ul className="grid gap-2 sm:grid-cols-2">
                 {group.items.map((badge) => (
@@ -491,11 +597,32 @@ export function BadgesSection() {
                         {badge.description}
                       </p>
                       <p className="mt-1 font-label text-label-sm text-on-surface-variant">
-                        {badge.kind} · limiar {badge.threshold}
+                        {BADGE_KIND_LABELS[badge.kind]} · limiar {badge.threshold}
                         {badge.categorySlug ? ` · ${badge.categorySlug}` : ""}
+                        {/* O escopo por setor deixou de ser o eixo do
+                            agrupamento, mas continua sendo regra de verdade:
+                            vira etiqueta no item. */}
+                        {!badge.global ? ` · ${sectorLabel(badge, sectors)}` : ""}
                       </p>
+                      {(badge.rewardPoints != null || badge.rewardCoins != null) && (
+                        <p className="mt-1 font-label text-label-sm text-primary">
+                          {[
+                            badge.rewardPoints != null ? `${badge.rewardPoints} pts` : null,
+                            badge.rewardCoins != null ? `${badge.rewardCoins} coins` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                      )}
                     </div>
                     <div className="flex shrink-0 gap-sm">
+                      <button
+                        onClick={() => setAssigningBadge(badge)}
+                        aria-label={`Atribuir selo ${badge.name}`}
+                        className="rounded-md border border-outline-variant/60 p-1 text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+                      >
+                        <Icon name="person_add" className="text-[18px]" />
+                      </button>
                       <button
                         onClick={() => startBadgeEdit(badge)}
                         aria-label={`Editar selo ${badge.name}`}
@@ -519,10 +646,108 @@ export function BadgesSection() {
         </div>
       </Panel>
 
+      {assigningBadge && (
+        <AssignBadgePanel
+          badge={assigningBadge}
+          members={usersQuery.data?.users ?? []}
+          onClose={() => setAssigningBadge(null)}
+        />
+      )}
+
+      <BadgeCategoriesPanel />
+
+      <BadgeImportPanel />
+
       <MemberBadgesPanel
         members={usersQuery.data?.users ?? []}
         badges={badges}
       />
     </div>
+  );
+}
+
+/**
+ * Concede UM selo a uma pessoa — a ação "Atribuir" do item do catálogo
+ * (Documento 4, seção 11.3).
+ *
+ * Existe ao lado do `MemberBadgesPanel` porque as duas telas respondem a
+ * perguntas opostas: lá se parte da pessoa ("que selos o fulano tem"), aqui se
+ * parte do selo, que é a pergunta de quem está olhando um item do catálogo.
+ * Fazer isso pelo painel de baixo obrigava a escolher a pessoa e reencontrar o
+ * selo numa lista de todos.
+ */
+function AssignBadgePanel({
+  badge,
+  members,
+  onClose,
+}: {
+  badge: BadgeDTO;
+  members: PublicUser[];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [memberId, setMemberId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  const grant = useMutation({
+    mutationFn: () =>
+      apiFetch<unknown>(`/admin/users/${memberId}/badges`, {
+        method: "POST",
+        body: JSON.stringify({ badgeId: badge.id }),
+      }),
+    onSuccess: () => {
+      setError(null);
+      setDone(members.find((m) => m.id === memberId)?.name ?? "a pessoa");
+      setMemberId("");
+      queryClient.invalidateQueries({ queryKey: ["admin", "userBadges"] });
+    },
+    onError: (err) =>
+      setError(err instanceof ApiError ? err.message : "Erro ao conceder selo."),
+  });
+
+  return (
+    <Panel
+      title={`Atribuir "${badge.name}"`}
+      action={
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md border border-outline-variant/60 px-md py-1 font-label text-label-sm text-on-surface-variant hover:border-primary hover:text-primary"
+        >
+          Fechar
+        </button>
+      }
+    >
+      <div className="flex flex-wrap items-center gap-sm">
+        <Select
+          ariaLabel="Pessoa que recebe o selo"
+          placeholder="Selecione a pessoa…"
+          className="min-w-[16rem] flex-grow"
+          value={memberId}
+          options={members.map((member) => ({ value: member.id, label: member.name }))}
+          onChange={setMemberId}
+        />
+        <button
+          type="button"
+          disabled={!memberId || grant.isPending}
+          onClick={() => grant.mutate()}
+          className="rounded-md bg-primary px-lg py-sm font-label text-label-md text-on-primary disabled:bg-surface-container disabled:text-on-surface-variant"
+        >
+          Atribuir
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="mt-sm flex items-center gap-sm text-body-sm text-error">
+          <Icon name="error" className="text-[16px]" />
+          {error}
+        </p>
+      )}
+      {done && !error && (
+        <p role="status" className="mt-sm text-body-sm text-primary">
+          Selo concedido a {done}.
+        </p>
+      )}
+    </Panel>
   );
 }

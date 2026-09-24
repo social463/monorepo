@@ -19,9 +19,11 @@ import { Avatar } from "../components/Avatar";
 import { BirthdayConfetti } from "../components/BirthdayConfetti";
 import { FeedbackSection } from "./profile/FeedbackSection";
 import { FeedbackComposer } from "./profile/FeedbackComposer";
+import { BirthdayWallCard } from "./profile/BirthdayWallCard";
 import { BadgeGallery } from "./profile/BadgeGallery";
 import { MoodOfDay } from "./profile/MoodOfDay";
 import { RetroActionsSection } from "./profile/RetroActionsSection";
+import { OnboardingMaterialsCard } from "./profile/OnboardingMaterialsCard";
 import { ProfileSkeleton } from "../components/Skeleton";
 
 function joinedLabel(iso: string): string {
@@ -37,6 +39,9 @@ export function ProfilePage() {
   // Deep-link do mural: ?feedback=<id> destaca um feedback (abre a aba Feedbacks); ?badge=<id> destaca um selo.
   const highlightFeedbackId = searchParams.get("feedback");
   const highlightBadgeId = searchParams.get("badge");
+  // ?parabens=1 vem do botão de festa dos cards de aniversário da Home: rola até
+  // o mural de aniversário e foca o campo de mensagem.
+  const focusBirthdayWall = searchParams.get("parabens") === "1";
   const { user: authUser } = useAuth();
   const navigate = useNavigate();
   const isOwnProfile = authUser?.id === id;
@@ -176,6 +181,16 @@ export function ProfilePage() {
 
           </div>
 
+          {/* Antes do humor e das férias, e some sozinho no 91º dia: para quem
+              acabou de chegar, baixar o plano de 90 dias é a tarefa do dia, e
+              rolar o perfil atrás dela é o que esta seção existe para evitar.
+              Quem decide se a janela está aberta é o servidor. */}
+          {isOwnProfile && (
+            <div className="mb-lg">
+              <OnboardingMaterialsCard />
+            </div>
+          )}
+
           {/* O espaçamento é do call site, e não do `MoodOfDay`: na Home ele
               vive dentro de um container com `gap`, e uma margem própria
               descolaria o termômetro de lá. Aqui as seções se empilham por
@@ -185,6 +200,12 @@ export function ProfilePage() {
               <MoodOfDay />
             </div>
           )}
+
+          {/* Férias saiu do perfil em 08/09/2026: a gestão passa a ser do DP,
+              em Administração › Férias, e o colaborador não registra mais
+              pedido por aqui. Para leitura sobraram o card da Home e "Férias do
+              Mês" (`/ferias`). `MyVacationSection` continua no repo, sem ponto
+              de montagem, junto com as rotas `/me/vacation-planning`. */}
 
           {(hasActions || (isOwnProfile && arquivadas > 0)) && (
             <RetroActionsSection
@@ -204,6 +225,15 @@ export function ProfilePage() {
               do voto vira feedback, então há uma lista só. */}
           <div className="grid grid-cols-12 items-start gap-lg">
             <div className="col-span-12 flex flex-col gap-lg lg:col-span-5">
+              {/* Some sozinho quando a pessoa não tem mural nenhum — nem aberto,
+                  nem histórico. É o lugar onde o parabéns deixou de ser
+                  feedback (spec 2026-08-31-mural-de-aniversarios). */}
+              <BirthdayWallCard
+                targetId={user.id}
+                targetName={user.name}
+                autoFocus={focusBirthdayWall}
+              />
+
               {/* Some sozinho para ADMIN e no próprio perfil — aí a galeria
                   volta a ser o primeiro card da coluna. */}
               <FeedbackComposer targetId={user.id} />

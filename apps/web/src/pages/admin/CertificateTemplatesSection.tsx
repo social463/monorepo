@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { CertificateTemplateDTO, CreateCertificateTemplateRequest } from '@legends/shared'
 import { Icon } from '../../components/Icon'
+import { PhotoUploadField } from '../../components/PhotoUploadField'
 import {
   createCertificateTemplate,
   deleteCertificateTemplate,
@@ -17,12 +18,16 @@ function TemplateForm({ template, onDone }: { template?: CertificateTemplateDTO;
   const qc = useQueryClient()
   const [name, setName] = useState(template?.name ?? '')
   const [title, setTitle] = useState(template?.title ?? '')
-  const [backgroundUrl, setBackgroundUrl] = useState(template?.backgroundUrl ?? '')
+  const [backgroundUrl, setBackgroundUrl] = useState<string | null>(template?.backgroundUrl ?? null)
+  // Modelo novo já nasce herdando a marca — é o padrão que a empresa quer na
+  // esmagadora maioria das vezes, e o `#2f8b4d` fica só de valor inicial para
+  // quem desmarcar.
+  const [useBrandColor, setUseBrandColor] = useState(template ? !template.accentColor : true)
   const [accentColor, setAccentColor] = useState(template?.accentColor ?? '#2f8b4d')
   const [signatureName, setSignatureName] = useState(template?.signatureName ?? '')
   const [signatureRole, setSignatureRole] = useState(template?.signatureRole ?? '')
-  const [signatureImageUrl, setSignatureImageUrl] = useState(template?.signatureImageUrl ?? '')
-  const [logoUrl, setLogoUrl] = useState(template?.logoUrl ?? '')
+  const [signatureImageUrl, setSignatureImageUrl] = useState<string | null>(template?.signatureImageUrl ?? null)
+  const [logoUrl, setLogoUrl] = useState<string | null>(template?.logoUrl ?? null)
   const [isDefault, setIsDefault] = useState(template?.isDefault ?? false)
   const [error, setError] = useState<string | null>(null)
 
@@ -38,7 +43,11 @@ function TemplateForm({ template, onDone }: { template?: CertificateTemplateDTO;
   })
 
   const requiredFilled =
-    name.trim() && title.trim() && accentColor.trim() && signatureName.trim() && signatureRole.trim()
+    name.trim() &&
+    title.trim() &&
+    (useBrandColor || accentColor.trim()) &&
+    signatureName.trim() &&
+    signatureRole.trim()
 
   function submit(event: FormEvent) {
     event.preventDefault()
@@ -46,12 +55,12 @@ function TemplateForm({ template, onDone }: { template?: CertificateTemplateDTO;
     save.mutate({
       name: name.trim(),
       title: title.trim(),
-      backgroundUrl: backgroundUrl.trim() || null,
-      accentColor: accentColor.trim(),
+      backgroundUrl,
+      accentColor: useBrandColor ? null : accentColor.trim(),
       signatureName: signatureName.trim(),
       signatureRole: signatureRole.trim(),
-      signatureImageUrl: signatureImageUrl.trim() || null,
-      logoUrl: logoUrl.trim() || null,
+      signatureImageUrl,
+      logoUrl,
       isDefault,
     })
   }
@@ -71,23 +80,6 @@ function TemplateForm({ template, onDone }: { template?: CertificateTemplateDTO;
           <input value={title} onChange={(event) => setTitle(event.target.value)} className={inputCls} />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="font-label text-label-sm text-on-surface-variant">URL do plano de fundo (opcional)</span>
-          <input
-            value={backgroundUrl ?? ''}
-            onChange={(event) => setBackgroundUrl(event.target.value)}
-            className={inputCls}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-label text-label-sm text-on-surface-variant">Cor de destaque (hex)</span>
-          <input
-            value={accentColor}
-            onChange={(event) => setAccentColor(event.target.value)}
-            placeholder="#2f8b4d"
-            className={inputCls}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
           <span className="font-label text-label-sm text-on-surface-variant">Nome de quem assina</span>
           <input
             value={signatureName}
@@ -103,20 +95,63 @@ function TemplateForm({ template, onDone }: { template?: CertificateTemplateDTO;
             className={inputCls}
           />
         </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-label text-label-sm text-on-surface-variant">
-            URL da imagem de assinatura (opcional)
-          </span>
+      </div>
+
+      {/*
+        Identidade visual: a marca da empresa é o padrão, e o modelo só entra
+        onde alguém escolher que ele entre. A ASSINATURA fica de fora disso —
+        ela é de uma pessoa, não da empresa, e por isso não tem de onde herdar.
+      */}
+      <div className="flex flex-col gap-md rounded-lg border border-outline-variant/30 p-md">
+        <p className="font-label text-label-md text-on-surface">Identidade visual</p>
+
+        <label className="flex items-center gap-sm text-body-sm text-on-surface">
           <input
-            value={signatureImageUrl ?? ''}
-            onChange={(event) => setSignatureImageUrl(event.target.value)}
-            className={inputCls}
+            type="checkbox"
+            checked={useBrandColor}
+            onChange={(event) => setUseBrandColor(event.target.checked)}
           />
+          Usar a cor cadastrada da empresa
         </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-label text-label-sm text-on-surface-variant">URL do logo (opcional)</span>
-          <input value={logoUrl ?? ''} onChange={(event) => setLogoUrl(event.target.value)} className={inputCls} />
-        </label>
+        {!useBrandColor && (
+          <label className="flex max-w-xs flex-col gap-1">
+            <span className="font-label text-label-sm text-on-surface-variant">Cor de destaque (hex)</span>
+            <input
+              value={accentColor}
+              onChange={(event) => setAccentColor(event.target.value)}
+              placeholder="#2f8b4d"
+              className={inputCls}
+            />
+          </label>
+        )}
+
+        <PhotoUploadField
+          value={logoUrl}
+          onChange={setLogoUrl}
+          shape="rect"
+          icon="image"
+          label="Logo"
+          actionLabel="logo"
+          hint="Em branco, usa a logo cadastrada da empresa."
+        />
+        <PhotoUploadField
+          value={backgroundUrl}
+          onChange={setBackgroundUrl}
+          shape="rect"
+          icon="wallpaper"
+          label="Plano de fundo"
+          actionLabel="arte de fundo"
+          hint="Cobre a folha inteira. Deixe em branco para o fundo claro padrão."
+        />
+        <PhotoUploadField
+          value={signatureImageUrl}
+          onChange={setSignatureImageUrl}
+          shape="rect"
+          icon="draw"
+          label="Imagem da assinatura"
+          actionLabel="assinatura"
+          hint="A rubrica de quem assina, sobre fundo transparente."
+        />
       </div>
 
       <label className="flex items-center gap-sm text-body-sm text-on-surface">
@@ -223,9 +258,13 @@ export function CertificateTemplatesSection() {
             key={template.id}
             className="flex flex-wrap items-center gap-md rounded-lg border border-outline-variant/30 bg-surface-container-low px-md py-sm"
           >
+            {/* Sem cor própria, o modelo herda a da empresa — que é exatamente
+                o que `bg-primary` desenha aqui. */}
             <span
-              className="h-8 w-8 shrink-0 rounded-full border border-outline-variant/40"
-              style={{ backgroundColor: template.accentColor }}
+              className={`h-8 w-8 shrink-0 rounded-full border border-outline-variant/40 ${
+                template.accentColor ? '' : 'bg-primary'
+              }`}
+              style={template.accentColor ? { backgroundColor: template.accentColor } : undefined}
               aria-hidden
             />
             <div className="min-w-0 flex-1">

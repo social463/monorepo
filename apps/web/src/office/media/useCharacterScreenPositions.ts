@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
-import type { OfficeCanvasHandle } from '../OfficeCanvas'
-import type { ScreenPosition } from '../scenes/OfficeScene'
+import type { ScreenPosition } from '../../lib/screenPosition'
+
+/**
+ * O mínimo de que este hook precisa. Estrutural (e não `OfficeCanvasHandle`)
+ * porque a cena da arena também ancora balões de webcam por aqui, e ela não é
+ * um canvas de escritório.
+ */
+export interface ScreenPositionSource {
+  getScreenPosition(userId: string): ScreenPosition | null
+}
 
 /**
  * Comparação rasa entre dois `Map` de posições — usada pra evitar
@@ -36,7 +44,7 @@ function positionsEqual(
  * scroll da câmera também mudam a posição, sem disparar nada no React).
  */
 export function useCharacterScreenPositions(
-  canvasRef: RefObject<OfficeCanvasHandle | null>,
+  canvasRef: RefObject<ScreenPositionSource | null>,
   userIds: string[],
 ): Map<string, ScreenPosition | null> {
   const [positions, setPositions] = useState<Map<string, ScreenPosition | null>>(new Map())

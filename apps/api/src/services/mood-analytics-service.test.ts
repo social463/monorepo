@@ -43,18 +43,18 @@ function overview(params: Partial<Parameters<typeof getMoodOverview>[0]> = {}) {
 }
 
 describe('mood-analytics-service', () => {
-  it('o piso de anonimato corta o dia com menos de MOOD_ANONYMITY_MIN respostas', async () => {
-    // 30/07 fica abaixo do piso; 31/07 tem gente suficiente para aparecer.
-    await seedDay('2026-07-30', ['HARD', 'HARD'])
+  it('com o piso em 1, um registro só no dia aparece na série', async () => {
+    // Era o caso que o piso de 3 escondia: a G&G via o dia vazio, e não a
+    // pessoa que registrou. 30/07 tem UMA resposta e sai inteiro.
+    await seedDay('2026-07-30', ['HARD'])
     await seedDay(TODAY, ['GOOD', 'GOOD', 'GOOD'])
 
     const result = await overview()
 
-    const cut = result.trend.find((p) => p.day === '2026-07-30')!
-    expect(cut.suppressed).toBe(true)
-    expect(cut.average).toBeNull()
-    // A contagem também não sai: o piso não expõe "quantos" no recorte cortado.
-    expect(cut.count).toBe(0)
+    const solitario = result.trend.find((p) => p.day === '2026-07-30')!
+    expect(solitario.suppressed).toBe(false)
+    expect(solitario.count).toBe(1)
+    expect(solitario.average).toBe(1)
 
     const shown = result.trend.find((p) => p.day === TODAY)!
     expect(shown.suppressed).toBe(false)
@@ -62,9 +62,24 @@ describe('mood-analytics-service', () => {
     expect(shown.average).toBe(4)
   })
 
-  it('recorte inteiro abaixo do piso não devolve nada', async () => {
-    await seedDay(TODAY, ['GOOD', 'LOW'])
+  it('uma única pessoa Estressada hoje sai na distribuição e na participação', async () => {
+    // O pedido literal da G&G: ver o humor negativo isolado, sem sigilo.
+    await seedDay(TODAY, ['HARD'])
 
+    const result = await overview()
+
+    expect(result.totalEntries).toBe(1)
+    expect(result.participationToday?.responded).toBe(1)
+    expect(result.todayDistribution.find((s) => s.mood === 'HARD')).toMatchObject({
+      count: 1,
+      percent: 100,
+    })
+    expect(result.weekAverage).toBe(1)
+  })
+
+  it('recorte vazio continua não devolvendo nada', async () => {
+    // Zero resposta é o único caso que ainda cai no overview vazio — abaixo de
+    // 1 só existe 0.
     const result = await overview()
 
     expect(result.totalEntries).toBe(0)
@@ -167,30 +182,54 @@ describe('mood-analytics-service', () => {
     ])
   })
 
-  it('comentário de dia abaixo do piso não é devolvido', async () => {
-    // 28/07 tem uma nota só — atribuível a quem registrou naquele dia.
+  it('o piso de anonimato NÃO filtra mais o comentário — ele vem identificado', async () => {
+    // 28/07 tem uma nota só. Antes ela era escondida para o autor não ser
+    // deduzido; agora o comentário vem com nome, e esconder por dedução o que
+    // está assinado seria incoerente (Documento 3, seção 4.6).
     await seedDay('2026-07-28', ['HARD'], DEFAULT_SECTOR_ID, 'nota do dia solitário')
     await seedDay(TODAY, ['LOW', 'LOW', 'LOW'], DEFAULT_SECTOR_ID, 'nota do dia cheio')
 
     const result = await overview()
 
-    expect(result.comments.map((c) => c.note)).toEqual([
-      'nota do dia cheio',
-      'nota do dia cheio',
-      'nota do dia cheio',
-    ])
-    expect(result.comments.every((c) => c.day === TODAY && c.daysAgo === 0)).toBe(true)
+    expect(result.comments.map((c) => c.note)).toContain('nota do dia solitário')
+    expect(result.comments.filter((c) => c.note === 'nota do dia cheio')).toHaveLength(3)
   })
 
-  it('nenhum campo do DTO carrega userId', async () => {
+  it('todo comentário carrega o autor', async () => {
     await seedDay(TODAY, ['HARD', 'LOW', 'LOW'], DEFAULT_SECTOR_ID, 'me sinto sobrecarregado')
 
     const result = await overview()
-    const serialized = JSON.stringify(result)
-    const userIds = await prisma.user.findMany({ select: { id: true } })
 
-    expect(serialized).not.toContain('userId')
-    for (const { id } of userIds) expect(serialized).not.toContain(id)
+    expect(result.comments.length).toBeGreaterThan(0)
+    for (const comment of result.comments) {
+      expect(comment.author.id).toBeTruthy()
+      expect(comment.author.name).toBeTruthy()
+    }
+  })
+
+  it('o comentário solitário agora vem acompanhado dos agregados do dia', async () => {
+    // Enquanto o piso valia 3, o comentário saía identificado mas a média e a
+    // distribuição do mesmo dia vinham vazias — a tela dizia "poucas respostas"
+    // logo acima de uma nota assinada. Com o piso em 1 os dois batem.
+    await seedDay(TODAY, ['HARD'], DEFAULT_SECTOR_ID, 'nota solitária')
+
+    const result = await overview()
+
+    expect(result.comments.map((c) => c.note)).toContain('nota solitária')
+    expect(result.weekAverage).toBe(1)
+    expect(result.todayDistribution.find((s) => s.mood === 'HARD')?.count).toBe(1)
+  })
+
+  it('separa as duas caixas: alerta só do negativo, comentários da escala inteira', async () => {
+    await seedDay(TODAY, ['HARD', 'LOW', 'GREAT'], DEFAULT_SECTOR_ID, 'comentário')
+
+    const result = await overview()
+
+    expect(result.comments).toHaveLength(3)
+    // Caixa 1: só Estressado(a) e Desanimado(a).
+    expect(result.alertComments).toHaveLength(2)
+    expect(result.alertComments.every((c) => c.mood === 'HARD' || c.mood === 'LOW')).toBe(true)
+    expect(result.comments.some((c) => c.mood === 'GREAT')).toBe(true)
   })
 
   it('participação de hoje ignora quem nunca registra humor (admins) no denominador', async () => {
@@ -205,7 +244,7 @@ describe('mood-analytics-service', () => {
     expect(result.participationToday).toEqual({ responded: 3, total: 4, percent: 75 })
   })
 
-  it('MOOD_ANONYMITY_MIN é o limiar efetivo do corte', async () => {
+  it('MOOD_ANONYMITY_MIN é o limiar efetivo do corte — subir a constante volta a suprimir', async () => {
     await seedDay(TODAY, Array(MOOD_ANONYMITY_MIN).fill('NEUTRAL') as MoodLevel[])
 
     const result = await overview()

@@ -18,7 +18,7 @@ vi.mock('./CorporatePostComments', () => ({
 }))
 
 const author = {
-  id: 'u2', name: 'Bia', email: 'b@x.com', role: 'HEAD' as const, area: null, position: null,
+  id: 'u2', name: 'Bia', email: 'b@x.com', role: 'HEAD' as const, area: null, position: null, positionCategory: null,
   squad: null, photoUrl: null, avatarStyle: null, avatarSeed: null,
   avatarOptions: null, active: true, joinedAt: '2026-01-01T00:00:00.000Z',
   leftAt: null, sectorId: 's1', companyId: 'c1', companyName: null,
@@ -35,8 +35,10 @@ function makePost(pinnedAt: string | null, overrides: Partial<CorporatePostDTO> 
     body: null,
     gif: null,
     image: null,
+  poll: null,
     attachments: [],
     status: 'PUBLISHED',
+    publishAt: null,
     audience: 'ALL',
     audienceSectors: [],
     createdAt: '2026-07-20T00:00:00.000Z',
@@ -47,6 +49,8 @@ function makePost(pinnedAt: string | null, overrides: Partial<CorporatePostDTO> 
     reactors: [],
     reactorCount: 0,
     commentCount: 0,
+    viewerRead: true,
+    tag: null,
     mentions: [],
     ...overrides,
   }
@@ -258,6 +262,22 @@ describe('CorporatePostCard: fixar', () => {
   })
 })
 
+describe('CorporatePostCard: gif', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    mockUseAuth.mockReturnValue(viewer('LEGEND'))
+    vi.spyOn(api, 'apiFetch').mockResolvedValue({} as never)
+  })
+
+  it('usa aspect-ratio em vez de width/height de atributo — os dois juntos com max-h/max-w distorcem', () => {
+    wrap(makePost(null, { gif: { url: 'https://media.giphy.com/x/giphy.gif', width: 480, height: 270 } }))
+    const img = screen.getByAltText('GIF')
+    expect(img.style.aspectRatio).toBe('480 / 270')
+    expect(img).not.toHaveAttribute('width')
+    expect(img).not.toHaveAttribute('height')
+  })
+})
+
 describe('CorporatePostCard: imagens', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
@@ -387,3 +407,19 @@ describe('CorporatePostCard: quem reagiu', () => {
     expect(screen.queryByLabelText('Ver quem reagiu')).toBeNull()
   })
 })
+
+describe('CorporatePostCard — comunicado da liderança', () => {
+  it('marca o post como restrito à liderança', () => {
+    wrap(makePost(null, { audience: 'LEADERS' }))
+
+    // Sem a marca, quem lê no feed não teria como saber que o colega ao lado
+    // não vê aquilo — e responderia em público sobre assunto de liderança.
+    expect(screen.getByText('Liderança')).toBeInTheDocument()
+  })
+
+  it('não marca nada quando o comunicado é da empresa toda', () => {
+    wrap(makePost(null, { audience: 'ALL' }))
+    expect(screen.queryByText('Liderança')).not.toBeInTheDocument()
+  })
+})
+

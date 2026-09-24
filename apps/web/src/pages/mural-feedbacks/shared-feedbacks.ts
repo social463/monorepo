@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import type {
   FeedbackWallResponse,
@@ -28,6 +29,29 @@ export function fetchSharedFeedbacks(
   if (filters.q) params.set('q', filters.q)
   if (filters.categoryId) params.set('categoryId', filters.categoryId)
   return apiFetch<FeedbackWallResponse>(`/feedbacks/mural?${params.toString()}`)
+}
+
+/**
+ * "Abri o mural agora": zera a marcação "Novo" da prévia da Home.
+ *
+ * Chamado só pela PÁGINA do mural. A prévia da Home lê a mesma lista, mas não
+ * marca — apagaria o selo que ela acabou de mostrar.
+ *
+ * O cache da prévia é invalidado depois, senão a Home continuaria com o
+ * `wallSeenAt` velho e os selos ficariam até o próximo refetch.
+ */
+export function useMarkFeedbackWallSeen() {
+  const queryClient = useQueryClient()
+  const marcado = useRef(false)
+  useEffect(() => {
+    if (marcado.current) return
+    marcado.current = true
+    apiFetch('/feedbacks/mural/seen', { method: 'POST' })
+      .then(() => queryClient.invalidateQueries({ queryKey: sharedFeedbacksPreviewKey }))
+      // Falhar aqui é inofensivo: o pior caso é o selo "Novo" durar mais um
+      // pouco. Não vale um alerta na cara de quem só abriu o mural.
+      .catch(() => {})
+  }, [queryClient])
 }
 
 /**

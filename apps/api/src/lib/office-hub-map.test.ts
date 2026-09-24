@@ -45,15 +45,21 @@ function socket(): OfficeSocket & { messages: unknown[] } {
   return result
 }
 
+/** O TILE de uma posição em pixel — o occupant fala pixel desde o movimento livre. */
+function tileOf(point: { x: number; y: number }): { x: number; y: number } {
+  return { x: Math.floor(point.x / 32), y: Math.floor(point.y / 32) }
+}
+
 describe('OfficeHub com publicação de mapa', () => {
   it('usa spawn e bloqueia entrada em sala trancada', () => {
     const hub = new OfficeHub()
     const map = runtime()
     const client = socket()
     hub.join(client, user('ana'), map)
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 1 })
-    hub.move(client, 'ana', 'right')
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 1, y: 1, dir: 'right' })
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 1, y: 1 })
+    hub.__walkForTest(client, 'ana', 'right')
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 1, y: 1 })
+    expect(hub.occupantOf('ana')).toMatchObject({ dir: 'right' })
   })
 
   it('aplica allowlist, capacidade e nomes LiveKit estáveis por mapId (edição não re-chaveia mídia/WS)', () => {
@@ -66,11 +72,15 @@ describe('OfficeHub com publicação de mapa', () => {
     const brunoSocket = socket()
     hub.join(anaSocket, user('ana'), map)
     hub.join(brunoSocket, user('bruno'), map)
-    hub.move(anaSocket, 'ana', 'right')
-    expect(hub.occupantOf('ana')).toMatchObject({ x: 2, y: 1 })
-    expect(hub.mediaRoomForPosition(2, 1)).toBe('office-map-map-1-zone-aurora')
-    hub.move(brunoSocket, 'bruno', 'right')
-    expect(hub.occupantOf('bruno')).toMatchObject({ x: 1, y: 1 })
+    hub.__walkForTest(anaSocket, 'ana', 'right')
+    expect(tileOf(hub.occupantOf('ana')!)).toEqual({ x: 2, y: 1 })
+    expect(hub.mediaRoomForTile(2, 1)).toBe('office-map-map-1-zone-aurora')
+    // Na porta da sala. Explícito porque o spawn agora ESPAÇA as pessoas
+    // (`bodySpawnPoint`), e bruno nasceria numa linha que nem passa pela sala —
+    // o teste é sobre a allowlist, não sobre geometria de nascimento.
+    hub.__placeAtTileForTest('bruno', 1, 1)
+    hub.__walkForTest(brunoSocket, 'bruno', 'right')
+    expect(tileOf(hub.occupantOf('bruno')!)).toEqual({ x: 1, y: 1 })
   })
 
   it('avisa map-changed antes de limpar presenças da versão anterior', () => {

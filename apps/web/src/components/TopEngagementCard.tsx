@@ -32,7 +32,7 @@ export function TopEngagementCard({ limit = RANKING_TOP_LIMIT }: { limit?: numbe
   return (
     <aside
       data-testid="top-engagement-card"
-      className="flex flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
+      className="flex min-w-0 flex-col gap-md rounded-2xl border border-outline-variant/40 bg-surface-container-low p-lg"
     >
       <h2 className="flex items-center gap-sm font-headline text-body-lg font-semibold text-on-surface">
         <Icon name="trophy" className="text-[20px] text-primary" />
@@ -73,38 +73,45 @@ export function TopEngagementCard({ limit = RANKING_TOP_LIMIT }: { limit?: numbe
 function TopEngagementRow({ entry }: { entry: RankingEntryDTO }) {
   const { user, position, points, online } = entry
   return (
+    // Linha única: nome e setor dividem o mesmo parágrafo, e "pts" virou sufixo
+    // da pontuação. Cinco linhas de duas alturas fechavam a coluna da Home — a
+    // informação continua toda aqui, só que numa faixa metade do tamanho.
     <Link
       to={`/perfil/${user.id}`}
-      className={`flex items-center gap-md rounded-xl px-sm py-sm transition-colors hover:bg-surface-container ${
+      className={`flex items-center gap-sm rounded-lg px-sm py-1 transition-colors hover:bg-surface-container ${
         position === 1 ? 'bg-primary/10' : ''
       }`}
     >
       <PositionBadge position={position} />
 
       <div className="relative shrink-0">
-        <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
+        <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-outline-variant/50 bg-surface-container-highest">
           <Avatar user={user} />
         </div>
         <OnlineDot online={online} label={user.name} />
       </div>
 
-      <div className="min-w-0 flex-1">
-        <p
-          className={`truncate font-label text-label-md leading-tight ${
+      <p className="min-w-0 flex-1 truncate leading-tight">
+        <span
+          className={`font-label text-label-md ${
             position === 1 ? 'font-bold text-primary' : 'text-on-surface'
           }`}
         >
           {user.name}
-        </p>
+        </span>
         {/* Setor, e não cargo: a lista cruza a empresa inteira, e é o setor que
             situa a pessoa (mesma escolha do card de aniversariantes). */}
-        <p className="truncate text-body-sm text-on-surface-variant">{user.sectorName || 'Sem setor'}</p>
-      </div>
+        <span className="ml-1 text-body-sm text-on-surface-variant">
+          {user.sectorName || 'Sem setor'}
+        </span>
+      </p>
 
-      <div className="shrink-0 text-right">
-        <p className="font-label text-label-md font-bold tabular-nums text-on-surface">{points}</p>
-        <p className="font-label text-[10px] uppercase tracking-wide text-on-surface-variant">pts</p>
-      </div>
+      <p className="shrink-0 font-label text-label-md font-bold tabular-nums text-on-surface">
+        {points}
+        <span className="ml-0.5 font-normal text-[10px] uppercase tracking-wide text-on-surface-variant">
+          pts
+        </span>
+      </p>
     </Link>
   )
 }
@@ -129,11 +136,11 @@ function PositionBadge({ position }: { position: number }) {
   return (
     <span
       aria-label={`${position}º lugar`}
-      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full font-label text-label-sm font-bold ${
+      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-label text-label-sm font-bold ${
         medal ?? 'bg-surface-container-highest text-on-surface-variant'
       }`}
     >
-      {medal ? <Icon name="trophy" className="text-[16px]" filled /> : position}
+      {medal ? <Icon name="trophy" className="text-[14px]" filled /> : position}
     </span>
   )
 }

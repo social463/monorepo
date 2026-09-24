@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  CORPORATE_POST_AUDIENCE_LABELS,
   CORPORATE_POST_REACTIONS,
   canPinCorporatePost,
   type CorporatePostDTO,
@@ -22,6 +23,7 @@ import { RichTextView } from '../../components/rich-text/RichTextView'
 import { ImageLightbox } from '../../components/ImageLightbox'
 import { PostReactorsDialog } from '../../components/PostReactorsDialog'
 import { CorporatePostComments } from './CorporatePostComments'
+import { CorporatePostPollCard } from './CorporatePostPollCard'
 import { CorporatePostEditForm } from './CorporatePostEditForm'
 
 /** Assinatura do comunicado: "11 de ago., 13:31". Data e hora por extenso, e não
@@ -214,6 +216,15 @@ export function CorporatePostCard({ post }: { post: CorporatePostDTO }) {
                 {post.audienceSectors.map((s) => s.name).join(', ')}
               </span>
             )}
+            {/* Comunicado restrito precisa DIZER que é restrito: sem a marca,
+                quem lê no feed não tem como saber que o colega ao lado não vê
+                aquilo — e responderia em público sobre assunto de liderança. */}
+            {post.audience === 'LEADERS' && (
+              <span className="flex shrink-0 items-center gap-xs rounded-full bg-surface-container-highest px-sm font-label text-label-sm text-on-surface-variant">
+                <Icon name="shield_person" className="text-[14px]" />
+                {CORPORATE_POST_AUDIENCE_LABELS.LEADERS}
+              </span>
+            )}
           </div>
           {/* Segunda linha da autoria: SETOR · data e hora, como no desenho da
               G&G. Maiúsculas pequenas para não competir com o nome. */}
@@ -221,6 +232,15 @@ export function CorporatePostCard({ post }: { post: CorporatePostDTO }) {
             {post.authorSectorName && <span className="uppercase tracking-wide">{post.authorSectorName} · </span>}
             <span title={formatFullDate(post.createdAt)}>{formatStamp(post.createdAt)}</span>
             {post.editedAt && <span title={`Editado em ${formatFullDate(post.editedAt)}`}> · editado</span>}
+            {/* Tipo de comunicação (seção 13). Na linha da autoria, e não no topo
+                do card: é metadado do comunicado, não manchete. A cor vem do
+                catálogo, com o nome ao lado — cor sozinha não identifica nada. */}
+            {post.tag && (
+              <span className="ml-xs inline-flex items-center gap-xs rounded-full border border-outline-variant/50 px-sm py-[1px] normal-case">
+                <span aria-hidden className="h-2 w-2 rounded-full" style={{ backgroundColor: post.tag.color }} />
+                {post.tag.name}
+              </span>
+            )}
           </p>
         </div>
 
@@ -365,15 +385,21 @@ export function CorporatePostCard({ post }: { post: CorporatePostDTO }) {
           )}
 
           {post.gif && (
+            // Ver o comentário equivalente em CorporatePostComments: `width`/`height`
+            // de atributo ao lado de `max-h-80`/`max-w-full` distorce sempre que um
+            // dos dois vira o gargalo — `aspect-ratio` evita isso.
             <img
               src={post.gif.url}
               alt="GIF"
-              width={post.gif.width || undefined}
-              height={post.gif.height || undefined}
               loading="lazy"
+              style={post.gif.width && post.gif.height ? { aspectRatio: `${post.gif.width} / ${post.gif.height}` } : undefined}
               className="mt-sm max-h-80 max-w-full rounded-xl border border-outline-variant/40"
             />
           )}
+
+          {/* A enquete fica DEPOIS dos anexos: quando há banner e enquete no
+              mesmo post, a imagem é o contexto e a pergunta é a ação. */}
+          {post.poll && <CorporatePostPollCard postId={post.id} poll={post.poll} />}
 
           {/* `post.image` (legado) NÃO é renderizado aqui: o serialize já devolve
               a imagem antiga dentro de `attachments`, então desenhá-la de novo

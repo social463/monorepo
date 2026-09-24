@@ -4,6 +4,7 @@ import type {
   CultureManualDownloadResponse,
   CultureManualDTO,
   CulturePageDTO,
+  CultureOnboardingKitResponse,
   CulturePersonalAssetDownloadResponse,
   CulturePersonalAssetsResponse,
   CultureVisualAssetsResponse,
@@ -60,6 +61,20 @@ export function useMyPersonalAssets() {
     queryKey: ['culture', 'personal-assets'],
     queryFn: () => apiFetch<CulturePersonalAssetsResponse>('/culture/personal-assets'),
     // O DTO carrega link assinado de 5 min: cache longo entregaria URL vencida.
+    staleTime: 2 * 60_000,
+  })
+}
+
+/**
+ * Os materiais da chegada, para a seção do perfil. Quem decide se a janela dos
+ * 90 dias está aberta é o servidor — aqui não há conta de data nenhuma, e é de
+ * propósito: o relógio do navegador é do usuário.
+ */
+export function useMyOnboardingKit() {
+  return useQuery({
+    queryKey: ['culture', 'onboarding-kit'],
+    queryFn: () => apiFetch<CultureOnboardingKitResponse>('/culture/onboarding-kit'),
+    // Mesmo motivo do kit pessoal: o DTO carrega link assinado de 5 min.
     staleTime: 2 * 60_000,
   })
 }

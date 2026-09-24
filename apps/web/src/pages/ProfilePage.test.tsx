@@ -52,7 +52,7 @@ function setupFetch() {
         },
         categoryBreakdown: [
           {
-            categorySlug: "colaboracao",
+            categorySlug: "colaboracao", badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
             categoryName: "Colaboração",
             count: 2,
           },
@@ -70,7 +70,7 @@ function setupFetch() {
               kind: "CATEGORY",
               iconKey: "link",
               threshold: 5,
-              categorySlug: "colaboracao",
+              categorySlug: "colaboracao", badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
             },
           },
         ],
@@ -232,7 +232,7 @@ describe("ProfilePage", () => {
                 kind: "CATEGORY",
                 iconKey: "link",
                 threshold: 0,
-                categorySlug: null,
+                categorySlug: null, badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
               },
             },
           ],
@@ -475,7 +475,7 @@ describe("ProfilePage — votar desligado no setor do perfil", () => {
           },
           stats: { totalFeedbacksReceived: 3, monthsWithFeedback: 2 },
           categoryBreakdown: [
-            { categorySlug: "colaboracao", categoryName: "Colaboração", count: 2 },
+            { categorySlug: "colaboracao", badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null, categoryName: "Colaboração", count: 2 },
           ],
           months: ["2026-06"],
           badges: [],

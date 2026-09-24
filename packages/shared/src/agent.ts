@@ -7,9 +7,9 @@
  * dois admins da mesma empresa.
  */
 
-export type AgentKey = 'benchmark' | 'glass' | 'assistant'
+export type AgentKey = 'benchmark' | 'glass' | 'assistant' | 'inova' | 'apprentice'
 
-export const AGENT_KEYS: readonly AgentKey[] = ['benchmark', 'glass', 'assistant']
+export const AGENT_KEYS: readonly AgentKey[] = ['benchmark', 'glass', 'assistant', 'inova', 'apprentice']
 
 export function isAgentKey(value: unknown): value is AgentKey {
   return typeof value === 'string' && (AGENT_KEYS as readonly string[]).includes(value)
@@ -19,6 +19,8 @@ export const AGENT_LABELS: Record<AgentKey, string> = {
   benchmark: 'Agente de Benchmarking',
   glass: 'GlassAgent',
   assistant: 'Assistente de RH',
+  inova: 'IA Analista do INOVA',
+  apprentice: 'Assistente da trilha Eu Aprendiz',
 }
 
 export type AgentMessageRole = 'user' | 'assistant'

@@ -279,24 +279,70 @@ export function computeRowSpans(
   rowIsos: readonly string[],
   events: readonly CalendarEventOccurrenceDTO[],
 ): EventSpan[] {
+  return computeSpans(rowIsos, events, (event) => ({ start: event.iso, end: event.endIso })).map(
+    (span) => ({
+      event: span.item,
+      start: span.start,
+      length: span.length,
+      isStart: span.isStart,
+      isEnd: span.isEnd,
+    }),
+  )
+}
+
+/** Um trecho de qualquer coisa com começo e fim, dentro de uma linha da grade. */
+export interface RowSpan<T> {
+  item: T
+  /** Coluna inicial dentro da linha, base 0. */
+  start: number
+  /** Quantas colunas o trecho ocupa. */
+  length: number
+  isStart: boolean
+  isEnd: boolean
+}
+
+/**
+ * A faixa contínua, sem saber o que está desenhando.
+ *
+ * Nasceu de `computeRowSpans`, que só sabia recortar `CalendarEventOccurrence`.
+ * O calendário editorial precisa da MESMA conta para a campanha, e copiar o
+ * recorte de semana para lá deixaria duas versões de "quando a barra começa na
+ * segunda e termina no sábado" para divergir na primeira correção de borda.
+ *
+ * `rangeOf` devolve as duas pontas em data civil (AAAA-MM-DD), comparáveis como
+ * string — é o que permite `<`/`>` direto, sem `Date` e sem fuso.
+ */
+export function computeSpans<T>(
+  rowIsos: readonly string[],
+  items: readonly T[],
+  rangeOf: (item: T) => { start: string; end: string },
+): RowSpan<T>[] {
   if (rowIsos.length === 0) return []
   const rowStart = rowIsos[0]
   const rowEnd = rowIsos[rowIsos.length - 1]
 
-  const spans: EventSpan[] = []
-  for (const event of events) {
-    if (event.endIso < rowStart || event.iso > rowEnd) continue
-    const segStart = event.iso > rowStart ? event.iso : rowStart
-    const segEnd = event.endIso < rowEnd ? event.endIso : rowEnd
+  const spans: RowSpan<T>[] = []
+  for (const item of items) {
+    const { start, end } = rangeOf(item)
+    if (end < rowStart || start > rowEnd) continue
+    const segStart = start > rowStart ? start : rowStart
+    const segEnd = end < rowEnd ? end : rowEnd
     spans.push({
-      event,
+      item,
       start: daysBetween(rowStart, segStart),
       length: daysBetween(segStart, segEnd) + 1,
-      isStart: event.iso === segStart,
-      isEnd: event.endIso === segEnd,
+      isStart: start === segStart,
+      isEnd: end === segEnd,
     })
   }
-  spans.sort((a, b) => b.length - a.length || a.start - b.start || a.event.iso.localeCompare(b.event.iso))
+  // Trecho mais longo primeiro: o fluxo automático do CSS grid empilha as
+  // barras curtas embaixo das longas, em vez de deixar buraco.
+  spans.sort(
+    (a, b) =>
+      b.length - a.length ||
+      a.start - b.start ||
+      rangeOf(a.item).start.localeCompare(rangeOf(b.item).start),
+  )
   return spans
 }
 

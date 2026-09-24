@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { DEFAULT_SECTOR_ID, DEFAULT_COMPANY_ID } from '@legends/shared'
 import { prisma } from '../lib/prisma'
 import { createSector } from './sector-service'
@@ -41,7 +41,18 @@ function fetchSpyOk() {
   return vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }))
 }
 
-afterEach(() => vi.restoreAllMocks())
+// O envio ao Teams obedece a `TEAMS_NOTIFICATIONS_ENABLED`, e o `.env` do
+// ambiente local costuma deixá-la em `false` (senão qualquer teste vira DM
+// para a empresa inteira) — mesmo isolamento de `teams-client.test.ts`.
+const teamsFlag = process.env.TEAMS_NOTIFICATIONS_ENABLED
+beforeEach(() => {
+  process.env.TEAMS_NOTIFICATIONS_ENABLED = 'true'
+})
+afterEach(() => {
+  vi.restoreAllMocks()
+  if (teamsFlag === undefined) delete process.env.TEAMS_NOTIFICATIONS_ENABLED
+  else process.env.TEAMS_NOTIFICATIONS_ENABLED = teamsFlag
+})
 
 describe('notification-service write path', () => {
   it('notifyFeedbackReceived cria notificação para o alvo com link', async () => {

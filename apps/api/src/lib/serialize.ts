@@ -1,5 +1,5 @@
 import type { RecognitionCategory } from '@prisma/client'
-import type { AgentConversation, AgentKind, AgentMessage, AgentMessageRole as PrismaAgentMessageRole, Badge, BenchmarkPractice, CalendarConnection, CalendarEvent, CalendarEventSector, CalendarEventType, Challenge, CharacterFavorite, CoinRule, CultureBenefit, CultureManual, CulturePage, CulturePersonalAsset, CultureVisualAsset, DevelopmentThursdayEvent, EventAlbum, EventPhoto, EventPhotoComment, EventPhotoReaction, GlassReview, Prisma, RetroCard, Squad, StoreProduct, User, Vacation, VotingPeriod, XpRule, XpTransaction } from '@prisma/client'
+import type { AgentConversation, AgentKind, AgentMessage, AgentMessageRole as PrismaAgentMessageRole, Badge, BenchmarkPractice, CalendarConnection, CalendarEvent, CalendarEventSector, CalendarEventType, Challenge, CharacterFavorite, CoinRule, CultureBenefit, CultureManual, CulturePage, CulturePersonalAsset, CultureVisualAsset, DevelopmentThursdayEvent, EventAlbum, EventPhoto, EventPhotoComment, EventPhotoReaction, GlassReview, InovaActivity, InovaDiaryEntry, InovaGuiaVideo, InovaPhaseHistory, InovaProject, InovaProjectTask, Prisma, RetroCard, Squad, StoreProduct, User, Vacation, VotingPeriod, XpRule, XpTransaction } from '@prisma/client'
 import {
   FEEDBACK_REACTIONS,
   LPC_AVATAR_STYLE,
@@ -14,7 +14,19 @@ import {
   SHAPE_HEIGHT,
   SHAPE_WIDTH,
   retroRoomTitle,
+  asApprenticeSchema,
+  asApprenticeValues,
+  trainingQuarter,
+  trainingSemester,
+  trainingSlaDays,
+  trainingSlaStatus,
+  trainingYear,
   type AdminUserDTO,
+  type ApprenticeActivityDTO,
+  type ApprenticeMaterialDTO,
+  type ApprenticeMeetingDTO,
+  type ApprenticeMeetingStatus,
+  type ApprenticeSubmissionDTO,
   type AssistantSourceDTO,
   type CalendarEventDTO,
   type CalendarEventTypeDTO,
@@ -50,6 +62,13 @@ import {
   type EventPhotoDTO,
   type FeedbackCommentDTO,
   type FeedbackDTO,
+  type InovaActivityDTO,
+  type InovaDiaryEntryDTO,
+  type InovaGuiaVideoDTO,
+  type InovaPhaseHistoryDTO,
+  type InovaProjectDTO,
+  type InovaProjectPhase,
+  type InovaProjectTaskDTO,
   type MonthlyHighlightDTO,
   type MonthlyHighlightGroupDTO,
   type MyFeedbackDTO,
@@ -66,6 +85,7 @@ import {
   type AgentMessageRole,
   type BenchmarkPracticeDTO,
   type CampaignPostDTO,
+  type ScheduledFeedPostDTO,
   type KnowledgeEntryDTO,
   type MoodLevel,
   type MoodReason,
@@ -79,6 +99,8 @@ import {
   type OfficeRoomOptionDTO,
   type PublicUser,
   type ReactionSummary,
+  type BirthdayGreetingDTO,
+  type BirthdayWallOccurrenceDTO,
   type RetroActionItemDTO,
   type RetroCarryoverItemDTO,
   type RetroCardDTO,
@@ -96,6 +118,8 @@ import {
   type ReviewDTO,
   type CorporatePostCommentDTO,
   type CorporatePostDTO,
+  type CorporatePostPollDTO,
+  isInCorporatePostAudience,
   type PendingCorporatePostDTO,
   type SectorDTO,
   type SquadDTO,
@@ -110,6 +134,7 @@ import {
   type VoteDTO,
   type VotingPeriodDTO,
   type ReactorRef,
+  type TrainingRecordDTO,
 } from '@legends/shared'
 import type { StoreOrderWithProduct } from '../services/store-service'
 import type { StoreOrderWithRefs } from '../services/store-admin-service'
@@ -122,10 +147,12 @@ import type {
   SharedFeedbackRow,
 } from '../services/feedback-service'
 import type { MonthlyHighlightRow } from '../services/monthly-highlight-service'
+import type { GreetingRow, WallOccurrence } from '../services/birthday-greeting-service'
 import type { PublishedHighlight } from '../services/highlight-service'
 import type { BadgeCatalogEntry } from '../services/badge-service'
 import type { CoinTransactionWithActor } from '../services/coin-service'
 import { ymdOf } from './sao-paulo-date'
+import type { TrainingRecordRow } from '../services/training-service'
 import type { NotificationWithActor } from '../services/notification-service'
 import type { RetroCardWithRelations, RetroRoomWithRelations } from '../services/retro-service'
 import type { ReviewCommentWithRelations, ReviewWithRelations } from '../services/review-service'
@@ -137,7 +164,17 @@ import type { SectorWithRoles } from '../services/sector-service'
 import type { HrDashboardWithSector } from '../services/hr-dashboard-service'
 import type { KnowledgeEntryWithSector } from '../services/assistant-service'
 import type { AuditLogWithActor } from '../services/audit-log-service'
+// `import type` de propósito: um import de VALOR daqui para um service inverte a
+// camada (lib → services) e fecha um ciclo — `corporate-mural-service` importa
+// este arquivo, e `campaign-service` importa aquele. O ciclo não quebra o
+// runtime, mas quebrou o `vi.mock` do teste de rollback da campanha: a fábrica
+// do mock chama `importOriginal()`, que reentra no grafo e faz o
+// `campaign-service` casar com o módulo REAL em vez do mockado. Por isso
+// `campaignPostImage` mora aqui embaixo, e não lá.
+import type { AttachedImage } from '@legends/shared'
 import type { CampaignPostWithRelations } from '../services/campaign-service'
+import type { ScheduledFeedPost } from '../services/corporate-mural-service'
+import { toCorporatePostTagDTO } from '../services/corporate-post-tag-service'
 import { derivePeriodState, isPeriodEditable } from './period-state'
 import { buildGoogleCalendarUrl, buildOutlookCalendarUrl, type CalendarMeeting } from './calendar-export'
 
@@ -188,6 +225,7 @@ export function toPublicUser(
     role: user.role,
     area: user.area,
     position: user.position,
+    positionCategory: user.positionCategory,
     squad: user.squad,
     photoUrl: user.photoUrl,
     avatarStyle: sanitizeAvatarStyle(user.avatarStyle),
@@ -278,7 +316,9 @@ export function toVoteDTO(vote: VoteWithRelations): VoteDTO {
   }
 }
 
-export function toBadgeDTO(badge: Badge & { sectors?: { sectorId: string }[] }): BadgeDTO {
+export function toBadgeDTO(
+  badge: Badge & { sectors?: { sectorId: string }[]; badgeCategory?: { name: string } | null },
+): BadgeDTO {
   return {
     id: badge.id,
     slug: badge.slug,
@@ -288,6 +328,12 @@ export function toBadgeDTO(badge: Badge & { sectors?: { sectorId: string }[] }):
     iconKey: badge.iconKey,
     threshold: badge.threshold,
     categorySlug: badge.categorySlug,
+    badgeCategoryId: badge.badgeCategoryId,
+    // Só vem preenchido quando o chamador incluiu a relação; a galeria do
+    // colaborador não precisa do nome do tema e não paga o join.
+    badgeCategoryName: badge.badgeCategory?.name ?? null,
+    rewardPoints: badge.rewardPoints,
+    rewardCoins: badge.rewardCoins,
     global: badge.global,
     sectorIds: badge.sectors?.map((s) => s.sectorId) ?? [],
   }
@@ -390,7 +436,7 @@ export function toHighlightDTO(entry: PublishedHighlight): HighlightDTO {
   }
 }
 
-function summarizeReactions(
+export function summarizeReactions(
   reactions: { emoji: string; userId: string; user: { id: string; name: string } }[],
   viewerId: string,
   order: readonly string[] = FEEDBACK_REACTIONS,
@@ -599,7 +645,58 @@ export function toReviewCommentDTO(comment: ReviewCommentWithRelations, viewerId
   }
 }
 
-export function toCorporatePostDTO(post: CorporatePostWithRelations, viewerId: string): CorporatePostDTO {
+/**
+ * Enquete do post para ESTE viewer.
+ *
+ * Antes de votar, `totalVotes`, `voteCount` e `percentage` saem `null` — o
+ * servidor não manda número que a pessoa ainda não pode ver, em vez de mandar e
+ * pedir para o front esconder. O autor não é exceção: como qualquer um, precisa
+ * votar para ver o resultado.
+ *
+ * `hasVoted` vem do include, que traz só o voto do próprio viewer.
+ */
+function toCorporatePostPollDTO(
+  post: CorporatePostWithRelations,
+  viewer: { sectorId: string; role: string },
+): CorporatePostPollDTO | null {
+  const poll = post.poll
+  if (!poll) return null
+  const selectedOptionId = poll.votes[0]?.optionId ?? null
+  const hasVoted = selectedOptionId !== null
+  const totalVotes = poll.options.reduce((total, option) => total + option._count.votes, 0)
+  return {
+    id: poll.id,
+    question: poll.question,
+    hasVoted,
+    selectedOptionId,
+    totalVotes: hasVoted ? totalVotes : null,
+    // Só post publicado aceita voto, e só quem está no público-alvo vota.
+    canVote:
+      post.status === 'PUBLISHED' &&
+      isInCorporatePostAudience(post, viewer),
+    options: poll.options.map((option) => ({
+      id: option.id,
+      text: option.text,
+      voteCount: hasVoted ? option._count.votes : null,
+      percentage: hasVoted
+        ? totalVotes === 0
+          ? 0
+          : Math.round((option._count.votes / totalVotes) * 100)
+        : null,
+    })),
+  }
+}
+
+/**
+ * `viewer` inteiro, e não só o id, por causa da enquete: `canVote` depende do
+ * papel e do setor de quem olha, porque quem modera enxerga post fora do
+ * próprio alcance mas não vota nele (ver `isInCorporatePostAudience`).
+ */
+export function toCorporatePostDTO(
+  post: CorporatePostWithRelations,
+  viewer: { userId: string; sectorId: string; role: string },
+): CorporatePostDTO {
+  const viewerId = viewer.userId
   const reactors = distinctReactors(post.reactions)
   // `contentJson` é coluna Json: o tipo do Prisma é `JsonValue`, então a guarda
   // de runtime é obrigatória — linha gravada por versão anterior do código não
@@ -617,6 +714,7 @@ export function toCorporatePostDTO(post: CorporatePostWithRelations, viewerId: s
     body,
     gif: post.gifUrl ? { url: post.gifUrl, width: post.gifWidth ?? 0, height: post.gifHeight ?? 0 } : null,
     image: legacyImage,
+    poll: toCorporatePostPollDTO(post, viewer),
     // A imagem legada entra na MESMA lista dos anexos novos: assim a web tem um
     // caminho só de render, e post antigo não precisa de backfill.
     attachments: [
@@ -646,6 +744,7 @@ export function toCorporatePostDTO(post: CorporatePostWithRelations, viewerId: s
       })),
     ],
     status: post.status,
+    publishAt: post.publishAt ? post.publishAt.toISOString() : null,
     audience: post.audienceScope,
     audienceSectors: post.sectors.map((s) => ({ id: s.sector.id, name: s.sector.name })),
     createdAt: post.createdAt.toISOString(),
@@ -656,6 +755,9 @@ export function toCorporatePostDTO(post: CorporatePostWithRelations, viewerId: s
     reactors: reactors.slice(0, MAX_REACTOR_AVATARS).map(toReactorRef),
     reactorCount: reactors.length,
     commentCount: post._count.comments,
+    tag: post.tag ? toCorporatePostTagDTO(post.tag) : null,
+    // O include já filtrou as leituras por quem está olhando: array vazio = não leu.
+    viewerRead: post.reads.length > 0,
     mentions: post.mentions.map((m) => ({ userId: m.userId, name: m.name })),
   }
 }
@@ -667,10 +769,10 @@ export function toCorporatePostDTO(post: CorporatePostWithRelations, viewerId: s
  */
 export function toPendingCorporatePostDTO(
   post: CorporatePostWithRelations,
-  viewerId: string,
+  viewer: { userId: string; sectorId: string; role: string },
 ): PendingCorporatePostDTO {
   return {
-    ...toCorporatePostDTO(post, viewerId),
+    ...toCorporatePostDTO(post, viewer),
     rejectionReason: post.rejectionReason,
     reviewedAt: post.reviewedAt ? post.reviewedAt.toISOString() : null,
   }
@@ -1140,6 +1242,7 @@ export function toCalendarEventDTO(
   event: CalendarEvent & {
     type: CalendarEventType
     sectors: (CalendarEventSector & { sector: { id: string; name: string } })[]
+    guests: { user: User }[]
     createdBy: { name: string }
   },
 ): CalendarEventDTO {
@@ -1147,6 +1250,7 @@ export function toCalendarEventDTO(
     id: event.id,
     title: event.title,
     description: event.description,
+    tag: event.tag,
     date: event.date.toISOString().slice(0, 10),
     endDate: event.endDate ? event.endDate.toISOString().slice(0, 10) : null,
     startTime: event.startTime,
@@ -1157,6 +1261,7 @@ export function toCalendarEventDTO(
     type: toCalendarEventTypeDTO(event.type),
     sectorIds: event.sectors.map((s) => s.sectorId),
     sectorNames: event.sectors.map((s) => s.sector.name),
+    guests: event.guests.map((g) => toPublicUser(g.user)),
     recurrence: event.recurrence,
     recurrenceUntil: event.recurrenceUntil ? event.recurrenceUntil.toISOString().slice(0, 10) : null,
     recurrenceCount: event.recurrenceCount,
@@ -1213,6 +1318,7 @@ export function toCultureVisualAssetDTO(asset: CultureVisualAsset): CultureVisua
     imageUrl: cfg ? publicUrlFor(asset.storageKey, cfg) : '',
     fileName: asset.fileName,
     fit: asset.fit,
+    brand: asset.brand,
     order: asset.order,
     published: asset.published,
     updatedAt: asset.updatedAt.toISOString(),
@@ -1464,6 +1570,8 @@ const AGENT_KIND_TO_KEY: Record<AgentKind, AgentKey> = {
   BENCHMARK: 'benchmark',
   GLASS: 'glass',
   ASSISTANT: 'assistant',
+  INOVA: 'inova',
+  APPRENTICE: 'apprentice',
 }
 
 const AGENT_ROLE_TO_KEY: Record<PrismaAgentMessageRole, AgentMessageRole> = {
@@ -1518,6 +1626,16 @@ export function toAssistantSourceDTO(entry: {
 }
 
 /** Item do calendário editorial de campanhas, com campanha e responsável reduzidos ao nome. */
+/** Colunas → DTO. O trio é indivisível: sem URL não há imagem. */
+export function campaignPostImage(post: {
+  imageUrl: string | null
+  imageWidth: number | null
+  imageHeight: number | null
+}): AttachedImage | null {
+  if (!post.imageUrl) return null
+  return { url: post.imageUrl, width: post.imageWidth ?? 0, height: post.imageHeight ?? 0 }
+}
+
 export function toCampaignPostDTO(post: CampaignPostWithRelations): CampaignPostDTO {
   return {
     id: post.id,
@@ -1526,6 +1644,7 @@ export function toCampaignPostDTO(post: CampaignPostWithRelations): CampaignPost
     title: post.title,
     body: post.body,
     visualHint: post.visualHint,
+    image: campaignPostImage(post),
     scheduledFor: post.scheduledFor.toISOString(),
     channel: post.channel,
     audience: post.audience,
@@ -1534,6 +1653,23 @@ export function toCampaignPostDTO(post: CampaignPostWithRelations): CampaignPost
     responsibleName: post.responsible?.name ?? null,
     publishedPostId: post.publishedPostId,
     publishedAt: post.publishedAt?.toISOString() ?? null,
+    createdAt: post.createdAt.toISOString(),
+  }
+}
+
+/**
+ * Agendado do feed na grade do calendário editorial. `publishAt` é o que põe o
+ * item no dia certo — um agendado sem data não existe (é o `status` que garante
+ * isso), então o fallback para `createdAt` é só para o compilador.
+ */
+export function toScheduledFeedPostDTO(post: ScheduledFeedPost): ScheduledFeedPostDTO {
+  return {
+    id: post.id,
+    title: post.title,
+    content: post.content,
+    authorId: post.author.id,
+    authorName: post.author.name,
+    publishAt: (post.publishAt ?? post.createdAt).toISOString(),
     createdAt: post.createdAt.toISOString(),
   }
 }
@@ -1605,5 +1741,317 @@ export function toEventPhotoCommentDTO(
     body: comment.body,
     createdAt: comment.createdAt.toISOString(),
     canDelete: ctx.canModerate || comment.authorId === ctx.viewerId,
+  }
+}
+
+/**
+ * Uma assinatura do mural de aniversário. `canEdit` é só do autor (moderar é
+ * apagar o que não cabe, não reescrever o que o colega assinou) e `canDelete`
+ * abre também para o admin.
+ */
+export function toBirthdayGreetingDTO(
+  greeting: GreetingRow,
+  viewerId: string,
+  viewerModerates: boolean,
+): BirthdayGreetingDTO {
+  return {
+    id: greeting.id,
+    author: toPublicUser(greeting.author),
+    message: greeting.message,
+    createdAt: greeting.createdAt.toISOString(),
+    updatedAt: greeting.updatedAt.toISOString(),
+    reactions: summarizeReactions(greeting.reactions, viewerId),
+    canEdit: greeting.authorId === viewerId,
+    canDelete: greeting.authorId === viewerId || viewerModerates,
+  }
+}
+
+export function toBirthdayWallOccurrenceDTO(
+  occurrence: WallOccurrence & { greetingCount: number },
+): BirthdayWallOccurrenceDTO {
+  return {
+    kind: occurrence.kind,
+    year: occurrence.year,
+    date: occurrence.date,
+    years: occurrence.years,
+    isToday: occurrence.isToday,
+    isOpen: occurrence.isOpen,
+    greetingCount: occurrence.greetingCount,
+  }
+}
+
+export function toInovaProjectDTO(
+  project: InovaProject & {
+    createdBy: User
+    responsible1: User | null
+    responsible2: User | null
+    // Só a listagem inclui: é o que o painel usa para o filtro de período e
+    // o gráfico de avanços. Quem não inclui devolve o DTO sem os campos.
+    phaseHistory?: { phase: InovaProjectPhase; occurredAt: Date }[]
+    diaryEntries?: { occurredAt: Date }[]
+  },
+): InovaProjectDTO {
+  return {
+    ...(project.phaseHistory && {
+      phaseHistory: project.phaseHistory.map((h) => ({ phase: h.phase, occurredAt: h.occurredAt.toISOString() })),
+    }),
+    ...(project.diaryEntries && { diaryDates: project.diaryEntries.map((d) => d.occurredAt.toISOString()) }),
+    id: project.id,
+    title: project.title,
+    category: project.category,
+    sector: project.sector,
+    description: project.description,
+    problemDescription: project.problemDescription,
+    results: project.results,
+    hoursSaved: project.hoursSaved,
+    costReduction: project.costReduction,
+    otherMetrics: project.otherMetrics,
+    projectCosts: project.projectCosts,
+    toolsUsed: project.toolsUsed,
+    deadline: project.deadline ? project.deadline.toISOString().slice(0, 10) : null,
+    priority: project.priority,
+    leadershipChallenge: project.leadershipChallenge,
+    estimatedDeadline: project.estimatedDeadline,
+    sectorRepresentative: project.sectorRepresentative,
+    responsible1: project.responsible1 ? toPublicUser(project.responsible1) : null,
+    responsible2: project.responsible2 ? toPublicUser(project.responsible2) : null,
+    phase: project.phase,
+    archived: project.archived,
+    createdById: project.createdById,
+    createdByName: project.createdBy.name,
+    createdAt: project.createdAt.toISOString(),
+    updatedAt: project.updatedAt.toISOString(),
+  }
+}
+
+export function toInovaPhaseHistoryDTO(entry: InovaPhaseHistory): InovaPhaseHistoryDTO {
+  return {
+    id: entry.id,
+    projectId: entry.projectId,
+    phase: entry.phase,
+    note: entry.note,
+    occurredAt: entry.occurredAt.toISOString(),
+  }
+}
+
+export function toInovaDiaryEntryDTO(entry: InovaDiaryEntry & { createdBy: User }): InovaDiaryEntryDTO {
+  return {
+    id: entry.id,
+    projectId: entry.projectId,
+    title: entry.title,
+    description: entry.description,
+    learnings: entry.learnings,
+    tools: entry.tools,
+    entryType: entry.entryType,
+    occurredAt: entry.occurredAt.toISOString(),
+    imageUrls: entry.imageUrls,
+    videoLinks: entry.videoLinks,
+    externalLinks: entry.externalLinks,
+    createdById: entry.createdById,
+    createdByName: entry.createdBy.name,
+    createdAt: entry.createdAt.toISOString(),
+  }
+}
+
+export function toInovaProjectTaskDTO(task: InovaProjectTask): InovaProjectTaskDTO {
+  return {
+    id: task.id,
+    projectId: task.projectId,
+    title: task.title,
+    description: task.description,
+    responsible: task.responsible,
+    dueDate: task.dueDate ? task.dueDate.toISOString().slice(0, 10) : null,
+    status: task.status,
+    createdAt: task.createdAt.toISOString(),
+    updatedAt: task.updatedAt.toISOString(),
+  }
+}
+
+export function toInovaActivityDTO(activity: InovaActivity & { actor: User }): InovaActivityDTO {
+  return {
+    id: activity.id,
+    projectId: activity.projectId,
+    action: activity.action,
+    entity: activity.entity,
+    summary: activity.summary,
+    actorId: activity.actorId,
+    actorName: activity.actor.name,
+    details: (activity.details as Record<string, unknown> | null) ?? null,
+    createdAt: activity.createdAt.toISOString(),
+  }
+}
+
+export function toInovaGuiaVideoDTO(video: InovaGuiaVideo): InovaGuiaVideoDTO {
+  const cfg = s3Config()
+  return {
+    id: video.id,
+    videoId: video.videoId,
+    title: video.title,
+    description: video.description,
+    category: video.category,
+    duration: video.duration,
+    behavior: video.behavior,
+    videoUrl: video.storagePath && cfg ? publicUrlFor(video.storagePath, cfg) : video.videoUrl,
+    createdAt: video.createdAt.toISOString(),
+    updatedAt: video.updatedAt.toISOString(),
+  }
+}
+
+/**
+ * Registro de treinamento → DTO.
+ *
+ * Ano, trimestre, semestre e SLA são CALCULADOS aqui (funções puras do
+ * `@legends/shared`), não guardados: na origem eram colunas geradas do Postgres,
+ * que o Prisma não expressa — e o mesmo cálculo precisa valer no filtro do
+ * servidor e no rótulo da tela.
+ *
+ * O comprovante sai como URL assinada de curta duração; a chave crua do S3 nunca
+ * atravessa a API. `hasCertificate` existe separado porque sem S3 configurado a
+ * URL é null e a tela ainda precisa saber que o anexo existe.
+ */
+export async function toTrainingRecordDTO(
+  record: TrainingRecordRow,
+  slaDays: number,
+): Promise<TrainingRecordDTO> {
+  const requestDate = ymdOf(record.requestDate)
+  const completionDate = record.completionDate ? ymdOf(record.completionDate) : null
+
+  let certificateUrl: string | null = null
+  if (record.attachmentKey && s3Config()) {
+    try {
+      certificateUrl = await presignDocumentDownload({ key: record.attachmentKey })
+    } catch {
+      certificateUrl = null
+    }
+  }
+
+  return {
+    id: record.id,
+    userId: record.userId,
+    userName: record.userName,
+    userPhotoUrl: record.user?.photoUrl ?? null,
+    sectorName: record.sectorName,
+    squad: record.squad,
+    leaderName: record.leaderName,
+    position: record.position,
+    positionCategory: record.positionCategory,
+    employmentType: record.employmentType,
+    eventId: record.eventId,
+    eventName: record.event?.name ?? null,
+    courseTitle: record.courseTitle,
+    learningType: record.learningType,
+    modality: record.modality,
+    trainingType: record.trainingType,
+    hours: Number(record.hours),
+    institution: record.institution,
+    sponsor: record.sponsor,
+    sponsorOther: record.sponsorOther,
+    investmentCents: record.investmentCents,
+    reasons: record.reasons,
+    priority: record.priority as TrainingRecordDTO['priority'],
+    requestDate,
+    completionDate,
+    participationStatus: record.participationStatus as TrainingRecordDTO['participationStatus'],
+    source: record.source as TrainingRecordDTO['source'],
+    notes: record.notes,
+    certificateUrl,
+    hasCertificate: Boolean(record.attachmentKey),
+    validationStatus: record.validationStatus,
+    reviewedBy: record.reviewedBy ?? null,
+    reviewedAt: record.reviewedAt?.toISOString() ?? null,
+    rejectionReason: record.rejectionReason,
+    year: trainingYear(completionDate),
+    quarter: trainingQuarter(completionDate),
+    semester: trainingSemester(completionDate),
+    slaDays: trainingSlaDays(requestDate, completionDate),
+    slaStatus: trainingSlaStatus({ requestDate, completionDate }, slaDays),
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  }
+}
+
+// ---- Eu Aprendiz (spec 2026-09-14) ----
+
+export type ApprenticeMeetingRow = Prisma.ApprenticeMeetingGetPayload<object>
+export type ApprenticeActivityRow = Prisma.ApprenticeActivityGetPayload<object>
+export type ApprenticeSubmissionRow = Prisma.ApprenticeSubmissionGetPayload<object>
+
+/**
+ * O status NÃO sai da linha: ele é derivado da data, junto com o dos outros
+ * encontros (`meetingStatusesOf`), então quem chama já o calculou e o passa.
+ */
+export function toApprenticeMeetingDTO(
+  meeting: ApprenticeMeetingRow,
+  status: ApprenticeMeetingStatus,
+): ApprenticeMeetingDTO {
+  return {
+    id: meeting.id,
+    order: meeting.order,
+    title: meeting.title,
+    theme: meeting.theme,
+    objectives: meeting.objectives,
+    deliverable: meeting.deliverable,
+    // `@db.Date` volta como Date à meia-noite UTC: o ISO já é o YYYY-MM-DD civil.
+    scheduledOn: meeting.scheduledOn ? meeting.scheduledOn.toISOString().slice(0, 10) : null,
+    status,
+    accessReleased: meeting.accessReleased,
+    surveyOpen: meeting.surveyOpen,
+    slideUrl: meeting.slideUrl,
+  }
+}
+
+export function toApprenticeActivityDTO(activity: ApprenticeActivityRow): ApprenticeActivityDTO {
+  return {
+    id: activity.id,
+    meetingId: activity.meetingId,
+    order: activity.order,
+    kind: activity.kind,
+    title: activity.title,
+    schema: asApprenticeSchema(activity.schema),
+  }
+}
+
+export function toApprenticeSubmissionDTO(
+  submission: ApprenticeSubmissionRow,
+): ApprenticeSubmissionDTO {
+  return {
+    id: submission.id,
+    activityId: submission.activityId,
+    userId: submission.userId,
+    values: asApprenticeValues(submission.values),
+    submittedAt: submission.submittedAt?.toISOString() ?? null,
+    draftSavedAt: submission.draftSavedAt?.toISOString() ?? null,
+  }
+}
+
+export type ApprenticeMaterialRow = Prisma.ApprenticeMeetingMaterialGetPayload<object>
+
+/**
+ * O arquivo sai como URL ASSINADA e temporária, nunca como a chave do S3 —
+ * mesmo contrato do comprovante de treinamento. Material que é link externo
+ * continua saindo pelo `url`.
+ */
+export async function toApprenticeMaterialDTO(
+  material: ApprenticeMaterialRow,
+): Promise<ApprenticeMaterialDTO> {
+  let downloadUrl: string | null = null
+  if (material.documentKey && s3Config()) {
+    try {
+      downloadUrl = await presignDocumentDownload({
+        key: material.documentKey,
+        fileName: material.fileName,
+      })
+    } catch {
+      // S3 fora do ar não pode derrubar a tela do encontro inteira.
+      downloadUrl = null
+    }
+  }
+  return {
+    id: material.id,
+    name: material.name,
+    url: material.url,
+    downloadUrl,
+    fileName: material.fileName,
+    sizeBytes: material.sizeBytes,
   }
 }

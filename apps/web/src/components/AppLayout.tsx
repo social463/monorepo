@@ -20,6 +20,7 @@ import { useAccessLogPing } from "../hooks/useAccessLogPing";
 import { usePresenceHeartbeat } from "../hooks/usePresenceHeartbeat";
 import { AssistantWidget } from "./assistant/AssistantWidget";
 import { CorporatePostToasts } from "./CorporatePostToasts";
+import { CalendarInviteToasts } from "./CalendarInviteToasts";
 
 /**
  * Casca do app: barra superior fixa + conteúdo.
@@ -99,11 +100,14 @@ export function AppLayout() {
     enabledFeatures: user?.enabledFeatures,
     sectorFeatures: user?.sectorFeatures,
     impulseUpUrl: developmentSettings?.settings?.impulseUpUrl,
-    inovaCommunityUrl: developmentSettings?.settings?.inovaCommunityUrl,
+    inovaModuleEnabled: developmentSettings?.settings?.inovaModuleEnabled,
+    positionCategory: user?.positionCategory,
   });
   // Dentro de /admin a barra troca de conteúdo, não de forma: os mesmos
   // dropdowns, com os grupos do console.
-  const navGroups = inAdminSection ? buildAdminNavGroups(user) : collaboratorNavGroups;
+  const navGroups = inAdminSection
+    ? buildAdminNavGroups(user, developmentSettings?.settings?.inovaModuleEnabled)
+    : collaboratorNavGroups;
   // Quem administra sem ser conta de administração — o acesso delegado — tem
   // produto do outro lado e precisa de caminho de volta. Para ADMIN/SUBADMIN a
   // raiz devolve ao /admin (ver `HomeRoute`), então o botão seria um laço.
@@ -311,8 +315,13 @@ export function AppLayout() {
       <main>
         <Outlet />
       </main>
-      {/* Comunicado novo avisa em qualquer tela, não só no feed. */}
-      <CorporatePostToasts />
+      {/* Avisos que aparecem em QUALQUER tela — comunicado novo e convite de
+          evento. Um stack só: dois containers fixos no mesmo canto se
+          sobreporiam, e os dois são notificação para a mesma pessoa. */}
+      <div className="pointer-events-none fixed bottom-lg right-lg z-50 flex flex-col gap-sm">
+        <CorporatePostToasts />
+        <CalendarInviteToasts />
+      </div>
       <AssistantWidget />
     </div>
   );

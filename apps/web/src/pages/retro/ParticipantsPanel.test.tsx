@@ -4,7 +4,7 @@ import type { PublicUser, RetroParticipantDTO } from '@legends/shared'
 import { ParticipantsPanel } from './ParticipantsPanel'
 
 const pub = (id: string, name: string): PublicUser => ({
-  id, name, email: `${id}@x`, role: 'LEGEND', area: null, position: null, squad: null,
+  id, name, email: `${id}@x`, role: 'LEGEND', area: null, position: null, positionCategory: null, squad: null,
   photoUrl: null, avatarStyle: null, avatarSeed: null, avatarOptions: null, active: true, joinedAt: '', leftAt: null, enabledFeatures: [], sectorId: 'sector-dev-produto', companyId: 'company-emr', companyName: null, sectorFeatures: [], adminAccess: false,
 })
 const participants: RetroParticipantDTO[] = [

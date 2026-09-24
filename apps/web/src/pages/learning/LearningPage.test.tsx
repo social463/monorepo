@@ -39,6 +39,8 @@ function course(overrides: Partial<CourseCardDTO> = {}): CourseCardDTO {
     title: 'Liderança na prática',
     shortDescription: 'Conduzir 1:1 e dar feedback.',
     coverUrl: null,
+    icon: null,
+    primaryColor: null,
     category: 'Liderança',
     level: 'INTERMEDIATE',
     durationMinutes: 90,
@@ -101,12 +103,18 @@ describe('LearningPage', () => {
     expect(lastCall).toMatchObject({ search: 'lideran' })
   })
 
-  it('mostra o estado vazio dos certificados', async () => {
+  it('mostra o estado vazio dos certificados, com o caminho de envio à vista', async () => {
     const user = userEvent.setup()
     wrap(<LearningPage />)
 
     await user.click(await screen.findByRole('tab', { name: 'Certificados' }))
 
     expect(await screen.findByText('Nenhum certificado ainda')).toBeInTheDocument()
+    // Quem não tem certificado nenhum é justamente quem procura por onde enviar.
+    const envio = screen.getByRole('link', { name: /Fez um curso fora do portal\?/i })
+    // O envio saiu do Notion e virou página do portal (Documento 4, seção 9.8):
+    // link interno, e não mais uma aba nova para fora do produto.
+    expect(envio).toHaveAttribute('href', '/aprendizado/enviar-certificado')
+    expect(envio).not.toHaveAttribute('target')
   })
 })

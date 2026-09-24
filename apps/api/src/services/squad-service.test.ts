@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { DEFAULT_COMPANY_ID, DEFAULT_SECTOR_ID } from '@legends/shared'
 import { prisma } from '../lib/prisma'
-import { createSquad, updateSquad, addMember, removeMember, listSquads, SquadError } from './squad-service'
+import { createSquad, updateSquad, deleteSquad, addMember, removeMember, listSquads, SquadError } from './squad-service'
 
 async function mkUser(role: 'LEGEND' | 'LEAD' | 'ADMIN' | 'SUBADMIN', name: string, sectorId?: string) {
   return prisma.user.create({ data: { name, email: `${name}@x.com`, passwordHash: 'x', role, ...(sectorId ? { sectorId } : {}) } })
@@ -145,6 +145,63 @@ describe('squad-service', () => {
 
     const listed = await listSquads(DEFAULT_COMPANY_ID)
     expect(listed.some((x) => x.id === s.id)).toBe(true)
+  })
+})
+
+describe('squad-service — excluir', () => {
+  it('exclui a squad e leva os vínculos de integrante junto', async () => {
+    const admin = await mkUser('ADMIN', 'AdminDel1')
+    const dev = await mkUser('LEGEND', 'DevDel1')
+    const squad = await createSquad({ name: 'Receita Antiga', sectorId: DEFAULT_SECTOR_ID }, admin.id, DEFAULT_COMPANY_ID)
+    await addMember(squad.id, dev.id, admin.id, DEFAULT_COMPANY_ID)
+
+    await deleteSquad(squad.id, admin.id, DEFAULT_COMPANY_ID)
+
+    expect(await prisma.squad.findUnique({ where: { id: squad.id } })).toBeNull()
+    expect(await prisma.squadMember.count({ where: { squadId: squad.id } })).toBe(0)
+    // O nome volta a ficar livre — é o que desativar não devolvia.
+    const renascida = await createSquad({ name: 'Receita Antiga', sectorId: DEFAULT_SECTOR_ID }, admin.id, DEFAULT_COMPANY_ID)
+    expect(renascida.id).not.toBe(squad.id)
+  })
+
+  it('exclui squad desativada', async () => {
+    const admin = await mkUser('ADMIN', 'AdminDel2')
+    const squad = await createSquad({ name: 'Squad Morta', sectorId: DEFAULT_SECTOR_ID }, admin.id, DEFAULT_COMPANY_ID)
+    await updateSquad(squad.id, { active: false }, admin.id, DEFAULT_COMPANY_ID)
+    await deleteSquad(squad.id, admin.id, DEFAULT_COMPANY_ID)
+    expect(await prisma.squad.findUnique({ where: { id: squad.id } })).toBeNull()
+  })
+
+  it('recusa com 409 quando a squad tem retrospectiva ligada', async () => {
+    const admin = await mkUser('ADMIN', 'AdminDel3')
+    const squad = await createSquad({ name: 'Squad Com Retro', sectorId: DEFAULT_SECTOR_ID }, admin.id, DEFAULT_COMPANY_ID)
+    const room = await prisma.retroRoom.create({ data: { sprint: 1, createdById: admin.id, votesPerParticipant: 3 } })
+    await prisma.retroRoomSquad.create({ data: { roomId: room.id, squadId: squad.id } })
+
+    await expect(deleteSquad(squad.id, admin.id, DEFAULT_COMPANY_ID)).rejects.toMatchObject({ status: 409 })
+    expect(await prisma.squad.findUnique({ where: { id: squad.id } })).not.toBeNull()
+  })
+
+  it('registra no log de auditoria', async () => {
+    const admin = await mkUser('ADMIN', 'AdminDel4')
+    const squad = await createSquad({ name: 'Squad Auditada', sectorId: DEFAULT_SECTOR_ID }, admin.id, DEFAULT_COMPANY_ID)
+    await deleteSquad(squad.id, admin.id, DEFAULT_COMPANY_ID)
+    const log = await prisma.adminAuditLog.findFirst({ where: { entityType: 'Squad', entityId: squad.id, action: 'DELETE' } })
+    expect(log).not.toBeNull()
+  })
+
+  it('squad de outra empresa rejeita com 404 e continua de pé', async () => {
+    const admin = await mkUser('ADMIN', 'AdminDel5')
+    const outra = await prisma.company.create({ data: { name: 'Outra Empresa Del Squad', slug: 'outra-empresa-del-squad-test' } })
+    const outroSetor = await prisma.sector.create({
+      data: { name: 'Setor Outra Del', slug: 'setor-outra-del-squad-test', enabledFeatures: [], companyId: outra.id },
+    })
+    const alheia = await prisma.squad.create({
+      data: { name: 'Squad Alheia Del', slug: 'squad-alheia-del-test', sectorId: outroSetor.id, companyId: outra.id },
+    })
+
+    await expect(deleteSquad(alheia.id, admin.id, DEFAULT_COMPANY_ID)).rejects.toMatchObject({ status: 404 })
+    expect(await prisma.squad.findUnique({ where: { id: alheia.id } })).not.toBeNull()
   })
 })
 

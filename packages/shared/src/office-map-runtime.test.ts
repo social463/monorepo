@@ -7,14 +7,16 @@ import {
   findMapPath,
   isHighFiveAudible,
   isInSilenceZone,
+  officeSoundLevel,
+  OFFICE_SOUND_MIN_LEVEL,
   isMapTileWalkable,
   mapSpawnTiles,
   mapKarts,
-  mapZoneAt,
+  mapZoneAtTile,
   meetingRoomEntryTile,
   meetingRoomForDeskKey,
   officeOpenRoom,
-  officeRoomForMapPosition,
+  officeRoomForTile,
   officeZoneDisplayName,
   OFFICE_DESK_SIZE_TILES,
 } from './index'
@@ -48,9 +50,11 @@ describe('runtime do documento de mapa', () => {
       },
     )
 
+    // Em PIXEL, no centro do tile em que o editor publicou o asset: o kart
+    // acompanha o piloto, que se move em pixel desde o movimento livre.
     expect(mapKarts(document)).toEqual([
-      { id: 'kart-a', x: 2, y: 3, dir: 'up' },
-      { id: 'kart-b', x: 4, y: 5, dir: 'right' },
+      { id: 'kart-a', x: 2 * 32 + 16, y: 3 * 32 + 16, dir: 'up' },
+      { id: 'kart-b', x: 4 * 32 + 16, y: 5 * 32 + 16, dir: 'right' },
     ])
   })
 
@@ -73,9 +77,9 @@ describe('runtime do documento de mapa', () => {
 
     expect(isMapTileWalkable(document, 1, 1)).toBe(false)
     expect(mapSpawnTiles(document)).toHaveLength(1)
-    expect(mapZoneAt(document, 3, 3)?.properties.name).toBe('Aurora')
-    expect(officeRoomForMapPosition('map-1', document, 3, 3)).toBe('office-map-map-1-zone-aurora')
-    expect(officeRoomForMapPosition('map-1', document, 0, 0)).toBe('office-map-map-1-open')
+    expect(mapZoneAtTile(document, 3, 3)?.properties.name).toBe('Aurora')
+    expect(officeRoomForTile('map-1', document, 3, 3)).toBe('office-map-map-1-zone-aurora')
+    expect(officeRoomForTile('map-1', document, 0, 0)).toBe('office-map-map-1-open')
   })
 
   it('deriva o nome da sala a partir do mapId (estável entre publicações)', () => {
@@ -88,8 +92,8 @@ describe('runtime do documento de mapa', () => {
         voiceEnabled: true, accessPolicy: 'OPEN',
       },
     })
-    expect(officeRoomForMapPosition('map-1', document, 3, 3)).toBe('office-map-map-1-zone-aurora')
-    expect(officeRoomForMapPosition('map-1', document, 0, 0)).toBe('office-map-map-1-open')
+    expect(officeRoomForTile('map-1', document, 3, 3)).toBe('office-map-map-1-zone-aurora')
+    expect(officeRoomForTile('map-1', document, 0, 0)).toBe('office-map-map-1-open')
     expect(officeOpenRoom('map-1')).toBe('office-map-map-1-open')
   })
 
@@ -243,6 +247,74 @@ describe('runtime do documento de mapa', () => {
       // O par pode ficar meio dentro, meio fora (um na porta): basta um membro
       // audível para o som valer.
       expect(isHighFiveAudible(document, { x: 8, y: 3 }, { x: 6, y: 3 }, { x: 7, y: 3 })).toBe(true)
+    })
+  })
+
+  describe('officeSoundLevel — bola e paintball', () => {
+    /** Sala de chamada em tiles 3..6 nos dois eixos; zona privada em 10..12. */
+    const mapComSala = () => {
+      const document = createEmptyMapDocumentV1({ width: 30, height: 30, tileSize: 32 })
+      document.objects.push(
+        {
+          id: 'room-1', layerKey: 'meeting-rooms', type: 'meeting-room',
+          geometry: { kind: 'rectangle', x: 96, y: 96, width: 128, height: 128 },
+          properties: {
+            externalKey: 'aurora', name: 'Aurora', status: 'OPEN', capacity: 4,
+            voiceEnabled: true, accessPolicy: 'OPEN',
+          },
+        },
+        {
+          id: 'zone-1', layerKey: 'private-zones', type: 'private-zone',
+          geometry: { kind: 'rectangle', x: 320, y: 320, width: 96, height: 96 },
+          properties: { name: 'Silêncio', accessPolicy: 'OPEN' },
+        },
+      )
+      return document
+    }
+
+    it('em cima do som ouve inteiro, e o volume cai com a distância', () => {
+      const document = mapComSala()
+      const perto = officeSoundLevel(document, { x: 20, y: 20 }, { x: 20, y: 20 }, 10)
+      const meio = officeSoundLevel(document, { x: 25, y: 20 }, { x: 20, y: 20 }, 10)
+      const borda = officeSoundLevel(document, { x: 20, y: 20 }, { x: 20, y: 10 }, 10)
+
+      expect(perto).toBe(1)
+      expect(meio).toBeGreaterThan(borda)
+      expect(meio).toBeLessThan(perto)
+      expect(borda).toBeCloseTo(OFFICE_SOUND_MIN_LEVEL, 5)
+    })
+
+    it('fora do raio não chega nada', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 20, y: 20 }, { x: 20, y: 9 }, 10)).toBe(0)
+    })
+
+    // O pedido que originou a regra: o tiro de paintball (e o chute) do espaço
+    // aberto não pode entrar na sala de chamada ao lado, por mais perto que ela
+    // esteja — lá dentro é reunião.
+    it('som do espaço aberto não vaza para quem está em sala de chamada ao lado', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 4, y: 4 }, { x: 7, y: 4 }, 10)).toBe(0)
+    })
+
+    it('nem para quem está em zona privada', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 11, y: 11 }, { x: 13, y: 11 }, 10)).toBe(0)
+    })
+
+    it('som que acontece dentro da sala não sai dela', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 7, y: 4 }, { x: 4, y: 4 }, 10)).toBe(0)
+    })
+
+    it('na mesma sala ouve inteiro, sem desconto de distância', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 6, y: 6 }, { x: 3, y: 3 }, 1)).toBe(1)
+    })
+
+    it('não vaza de uma sala para outra zona', () => {
+      const document = mapComSala()
+      expect(officeSoundLevel(document, { x: 11, y: 11 }, { x: 4, y: 4 }, 30)).toBe(0)
     })
   })
 

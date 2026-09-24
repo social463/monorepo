@@ -119,8 +119,11 @@ describe('badge service', () => {
     const sectorB = await prisma.sector.create({ data: { name: 'Setor B', slug: 'setor-b-badge-test', enabledFeatures: [] } })
     const user = await prisma.user.create({ data: { name: 'U', email: 'u-badge-sector@x.com', passwordHash: 'x', sectorId: sectorA.id } })
     const badgeB = await prisma.badge.create({
-      data: { name: 'Só Setor B', slug: 'so-setor-b-badge', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 0, global: false, sectors: { create: [{ sectorId: sectorB.id }] } },
+      data: { name: 'Só Setor B', slug: 'so-setor-b-badge', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1, global: false, sectors: { create: [{ sectorId: sectorB.id }] } },
     })
+    // Qualifica pela CONTAGEM: sem isso o teste passaria mesmo que o recorte
+    // por setor sumisse, porque ninguém atingiria o limiar de qualquer forma.
+    await receiveFeedback(user.id)
     await evaluateBadgesForUser(user.id)
     const owned = await prisma.userBadge.findMany({ where: { userId: user.id, badgeId: badgeB.id } })
     expect(owned).toHaveLength(0)
@@ -130,11 +133,68 @@ describe('badge service', () => {
     const sectorA = await prisma.sector.create({ data: { name: 'Setor A2', slug: 'setor-a2-badge-test', enabledFeatures: [] } })
     const user = await prisma.user.create({ data: { name: 'U2', email: 'u2-badge-sector@x.com', passwordHash: 'x', sectorId: sectorA.id } })
     const badgeGlobal = await prisma.badge.create({
-      data: { name: 'Global Impact', slug: 'global-impact-badge', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 0 },
+      data: { name: 'Global Impact', slug: 'global-impact-badge', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 1 },
     })
+    await receiveFeedback(user.id)
     await evaluateBadgesForUser(user.id)
     const owned = await prisma.userBadge.findMany({ where: { userId: user.id, badgeId: badgeGlobal.id } })
     expect(owned).toHaveLength(1)
+  })
+
+  // Limiar 0 vinha da planilha da G&G (coluna Limiar vazia vira 0 na
+  // importação) e de `Badge.threshold @default(0)`. Como toda regra compara
+  // `contagem >= limiar`, o selo caía na empresa inteira.
+  it('selo com limiar 0 não é concedido a ninguém, nem a quem tem contagem', async () => {
+    const alvo = await makeUser('SemLimiar')
+    const badge = await prisma.badge.create({
+      data: { name: 'Vazio', slug: 'selo-sem-limiar', description: 'd', kind: 'IMPACT', iconKey: 'star', threshold: 0 },
+    })
+    await receiveFeedback(alvo.id)
+
+    expect(await evaluateBadgesForUser(alvo.id)).toHaveLength(0)
+    const owned = await prisma.userBadge.findMany({ where: { userId: alvo.id, badgeId: badge.id } })
+    expect(owned).toHaveLength(0)
+  })
+
+  it('revoga o selo de limiar 0 que já tinha saído automático', async () => {
+    // O conserto retroativo: quem já recebeu o selo pelo bug perde na próxima
+    // sincronização — e só a concessão AUTO, nunca a manual.
+    const alvo = await makeUser('JaRecebeu')
+    const badge = await prisma.badge.create({
+      data: { name: 'Feedback Vazio', slug: 'feedback-sem-limiar', description: 'd', kind: 'FEEDBACK', iconKey: 'star', threshold: 0 },
+    })
+    await prisma.userBadge.create({ data: { userId: alvo.id, badgeId: badge.id, source: 'AUTO' } })
+
+    const { revoked } = await syncFeedbackBadgesForUser(alvo.id)
+
+    expect(revoked).toBe(1)
+    expect(await prisma.userBadge.findMany({ where: { userId: alvo.id, badgeId: badge.id } })).toHaveLength(0)
+  })
+
+  it('não revoga o que o admin concedeu à mão, mesmo com limiar 0', async () => {
+    const alvo = await makeUser('ConcedidoAMao')
+    const admin = await makeUser('AdminQueConcedeu')
+    const badge = await prisma.badge.create({
+      data: { name: 'Manual Vazio', slug: 'manual-sem-limiar', description: 'd', kind: 'FEEDBACK', iconKey: 'star', threshold: 0 },
+    })
+    await grantBadgeManually(alvo.id, badge.id, admin.id)
+
+    const { revoked } = await syncFeedbackBadgesForUser(alvo.id)
+
+    expect(revoked).toBe(0)
+    expect(await prisma.userBadge.findMany({ where: { userId: alvo.id, badgeId: badge.id } })).toHaveLength(1)
+  })
+
+  it('catálogo de selo sem limiar não promete meta zero nem barra de progresso', async () => {
+    const alvo = await makeUser('OlhaCatalogo')
+    await prisma.badge.create({
+      data: { name: 'Sem Meta', slug: 'selo-sem-meta', description: 'd', kind: 'COURSE', iconKey: 'star', threshold: 0 },
+    })
+
+    const entry = (await getBadgeCatalog(alvo.id)).find((e) => e.badge.slug === 'selo-sem-meta')!
+
+    expect(entry.requirement).toBe('Concedido pela liderança ou por solicitação aprovada')
+    expect(entry.progress).toBeNull()
   })
 
   it('concede o selo de RECORRÊNCIA por meses distintos com feedback recebido', async () => {

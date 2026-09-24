@@ -44,7 +44,10 @@ export function officeRoomAt(x: number, y: number): string {
   return zone ? officeRoomForZone(zone.id) : OFFICE_OPEN_ROOM;
 }
 
-export function isWithinProximity(ax: number, ay: number, bx: number, by: number): boolean {
+/**
+ * Alcance da voz, medido em TILES — ver o aviso de unidade em `mapZoneAtTile`.
+ */
+export function isWithinProximityTiles(ax: number, ay: number, bx: number, by: number): boolean {
   return Math.max(Math.abs(ax - bx), Math.abs(ay - by)) <= PROXIMITY_RADIUS;
 }
 

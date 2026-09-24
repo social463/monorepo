@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
+  OFFICE_USER_STATUSES,
+  isOfficeUserStatus,
+  isOfficeAudioIsolated,
   OFFICE_MAP,
   OFFICE_WIDTH,
   OFFICE_HEIGHT,
@@ -85,5 +88,42 @@ describe('call-failed', () => {
   it('aceita o motivo "away" na união do servidor', () => {
     const message: OfficeServerMessage = { type: 'call-failed', targetUserId: 'ana', reason: 'away' }
     expect(message.reason).toBe('away')
+  })
+})
+
+describe('status "Ocupado" e moderação de sala (#22775)', () => {
+  it('busy entra no catálogo de status e é aceito pelo guard', () => {
+    expect(OFFICE_USER_STATUSES).toContain('busy')
+    expect(isOfficeUserStatus('busy')).toBe(true)
+    expect(isOfficeUserStatus('offline')).toBe(false)
+  })
+
+  it('só Ocupado isola o áudio — os outros status não', () => {
+    expect(isOfficeAudioIsolated('busy')).toBe(true)
+    expect(isOfficeAudioIsolated('away')).toBe(false)
+    expect(isOfficeAudioIsolated('brb')).toBe(false)
+    expect(isOfficeAudioIsolated('online')).toBe(false)
+    expect(isOfficeAudioIsolated(undefined)).toBe(false)
+  })
+
+  it('aceita a remoção de participante nas duas pontas do contrato', () => {
+    const pedido: OfficeClientMessage = { type: 'remove-from-room', userId: 'bruno' }
+    const aviso: OfficeServerMessage = {
+      type: 'removed-from-room',
+      roomId: 'room-1',
+      userId: 'bruno',
+      byUserId: 'ana',
+      byName: 'Ana',
+    }
+    expect(pedido.userId).toBe('bruno')
+    expect(aviso.byName).toBe('Ana')
+  })
+
+  it('aceita a lista de managers na união do servidor', () => {
+    const message: OfficeServerMessage = {
+      type: 'room-managers-changed',
+      managers: [{ roomId: 'room-1', userId: 'ana', byDeskOwner: true }],
+    }
+    expect(message.managers[0]?.byDeskOwner).toBe(true)
   })
 })

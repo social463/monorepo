@@ -1,6 +1,6 @@
-import type { Direction, MapDocumentV1, TilePosition } from './index'
+import { ballDistance, ballRadius, kickBodyBall, type BodyBallState } from './body-ball'
 import { DIRECTION_DELTAS } from './office'
-import { isMapTileWalkable } from './office-map-runtime'
+import type { Direction } from './index'
 
 /**
  * Bola chutável do escritório. Como o kart (`OfficeKart`), nasce de um
@@ -12,12 +12,9 @@ import { isMapTileWalkable } from './office-map-runtime'
  * de colisão (`isMapTileWalkable`) e, com ela, na predição do cliente e no
  * pathfinding — custo alto para o que o objeto é: um brinquedo.
  */
-export interface OfficeBall {
+export interface OfficeBall extends BodyBallState {
   /** Id do `tile-object` que ancora a peça (o primeiro slice, no caso das de 2×2). */
   id: string
-  /** Tile do canto superior-esquerdo da bola. */
-  x: number
-  y: number
   /**
    * Tamanho em tiles. Ausente = 1×1, que é a esmagadora maioria — só a bola
    * de pilates ocupa 2×2. Quem lê precisa considerar a PEGADA inteira: uma
@@ -39,20 +36,31 @@ export function ballFootprint(ball: OfficeBall): { w: number; h: number } {
 }
 
 /**
- * Distância (Chebyshev) de um tile até a PEGADA da bola — 0 quando o tile está
- * em cima dela. É o que faz a bola de pilates ser alcançável pelos quatro
- * lados dela, e não só a partir do canto que a ancora.
+ * Distância da SUPERFÍCIE da bola até um ponto, em pixel — 0 quando o ponto
+ * está em cima dela.
+ *
+ * Descontar o raio é o que faz a bola de pilates continuar alcançável pelos
+ * quatro lados, e não só a partir do centro: ela é grande, e medir do centro
+ * exigiria enfiar o personagem dentro dela.
+ *
+ * Era Chebyshev em tiles até o movimento livre; virou euclidiana em pixel pelo
+ * mesmo motivo que todo o resto virou — quem pergunta agora é um corpo contínuo.
  */
-export function ballDistanceFrom(ball: OfficeBall, tile: TilePosition): number {
-  const { w, h } = ballFootprint(ball)
-  const dx = Math.max(ball.x - tile.x, tile.x - (ball.x + w - 1), 0)
-  const dy = Math.max(ball.y - tile.y, tile.y - (ball.y + h - 1), 0)
-  return Math.max(dx, dy)
+export function ballDistanceFrom(ball: OfficeBall, from: { x: number; y: number }): number {
+  return Math.max(0, ballDistance(ball, from) - ballRadius(ball))
 }
 
-/** Se dá para tocar/chutar a bola a partir deste tile. */
-export function isBallInReach(ball: OfficeBall, tile: TilePosition): boolean {
-  return ballDistanceFrom(ball, tile) <= BALL_REACH
+/**
+ * Alcance do pé, em PIXEL, medido da superfície da bola.
+ *
+ * Ancorado no que ele sempre significou — "um tile" —, agora que a pergunta é
+ * de um corpo contínuo.
+ */
+export const BALL_REACH_PX = 32
+
+/** Se dá para tocar/chutar a bola a partir daqui. */
+export function isBallInReach(ball: OfficeBall, from: { x: number; y: number }): boolean {
+  return ballDistanceFrom(ball, from) <= BALL_REACH_PX
 }
 
 /**
@@ -71,8 +79,7 @@ export function isOfficeBallPower(value: unknown): value is OfficeBallPower {
   return value === 'touch' || value === 'kick' || value === 'lob'
 }
 
-/** Distância (Chebyshev) de onde ainda dá pra alcançar a bola — inclui diagonais. */
-export const BALL_REACH = 1
+
 
 /** Quantos tiles cada gesto empurra a bola, antes dos modificadores. */
 export const BALL_TOUCH_TILES = 1
@@ -115,208 +122,62 @@ export const BALL_TOUCH_TILE_MS = 150
 export const BALL_KICK_TILE_MS = 80
 export const BALL_LOB_TILE_MS = 110
 
-/** Resultado de um chute: a trajetória INTEIRA, calculada de uma vez. */
-export interface OfficeBallKick {
-  ballId: string
-  /**
-   * Tiles por onde a bola passa, em ordem, sem o tile de origem. O último é
-   * onde ela para — e é a posição autoritativa assim que o hub responde.
-   */
-  path: TilePosition[]
-  /** Duração total da rolagem, em ms; o cliente só interpola. */
-  durationMs: number
-  power: OfficeBallPower
-  /** `true` quando o pé pegou de raspão (diagonal ou de costas). */
-  grazed: boolean
-  /**
-   * Quantas vezes a bola bateu e voltou no caminho. Sempre 0 no chute alto: no
-   * ar não há em que bater, e ao cair ela para.
-   */
-  bounces: number
-}
-
-function stepFor(from: TilePosition, ball: OfficeBall, dir: Direction): { sx: number; sy: number } {
-  const { w, h } = ballFootprint(ball)
-  // Contato medido contra a FAIXA que a peça ocupa em cada eixo, não contra um
-  // ponto: quem está ao lado de uma bola de 2×2 fica alinhado com ela naquele
-  // eixo (componente 0) e o chute sai reto. Comparar com o centro faria toda
-  // batida numa peça de lado par sair na diagonal, porque nenhum tile cai
-  // exatamente no meio.
-  const sx = from.x < ball.x ? 1 : from.x > ball.x + w - 1 ? -1 : 0
-  const sy = from.y < ball.y ? 1 : from.y > ball.y + h - 1 ? -1 : 0
-  // Em cima da própria bola não há vetor de contato: vale a direção encarada.
-  if (sx === 0 && sy === 0) {
-    const delta = DIRECTION_DELTAS[dir]
-    return { sx: delta.x, sy: delta.y }
-  }
-  return { sx, sy }
-}
-
 /**
- * Chute limpo é o que sai na direção que o personagem encara, sem diagonal.
- * Qualquer outro contato (bola na diagonal, bola atrás de quem chuta) pega de
- * raspão.
- */
-function isCleanContact(step: { sx: number; sy: number }, dir: Direction): boolean {
-  if (step.sx !== 0 && step.sy !== 0) return false
-  const delta = DIRECTION_DELTAS[dir]
-  return step.sx === delta.x && step.sy === delta.y
-}
-
-export interface KickBallOptions {
-  document: MapDocumentV1
-  ball: OfficeBall
-  kicker: TilePosition & { dir: Direction }
-  power: OfficeBallPower
-  /** Shift segurado no momento do chute. */
-  sprint?: boolean
-  /** Tiles que também param a bola — as pessoas presentes, tirando quem chuta. */
-  obstacles?: readonly TilePosition[]
-  /**
-   * Vetor do empurrão, quando quem chuta não está usando o pé "de frente":
-   * a condução passa o vetor do PASSO, que numa diagonal não é o mesmo que a
-   * pose encarada (ver `facingForMove`).
-   */
-  pushDirection?: { x: number; y: number }
-}
-
-/**
- * Calcula a trajetória inteira do chute de uma vez, em vez de simular a bola
- * quadro a quadro no servidor. O hub é orientado a evento (não tem loop de
- * tick) e a posição final é o que importa para o estado autoritativo: o
- * cliente recebe o caminho e anima a rolagem, do mesmo jeito que já anima o
- * passo de quem anda.
+ * Quanto tempo a bola do chute alto passa NO AR, em ms.
  *
- * Devolve `null` quando a bola está fora do alcance (o chamador não precisa
- * checar distância antes).
+ * Era medido em tiles (`BALL_LOB_TILES`), porque a trajetória inteira era
+ * resolvida de uma vez sobre a grade. No contínuo não há trajetória resolvida —
+ * há física —, então o que sobrevive do chute alto é o PRAZO em que a bola
+ * ignora parede e mobília (`BodyBallState.airborneMs`).
  */
-export function kickBall({
-  document,
-  ball,
-  kicker,
-  power,
-  sprint = false,
-  obstacles = [],
-  pushDirection,
-}: KickBallOptions): OfficeBallKick | null {
+export const BALL_LOB_AIRBORNE_MS = 700
+
+/**
+ * Piso do voo do chute alto carregável — o toque rápido em C. Mesma ideia do
+ * piso de força (`BODY_BALL_KICK_MIN_SPEED`): `BALL_LOB_AIRBORNE_MS` virou o
+ * teto (tecla segurada até o fim), não mais um valor fixo.
+ */
+export const BALL_LOB_MIN_AIRBORNE_MS = 250
+
+/**
+ * Chuta a bola do escritório.
+ *
+ * O GESTO vem do cliente — qual tecla ele apertou — e agora também a CARGA:
+ * quanto tempo ela segurou X ou C, de 0 (toque rápido) a 1 (segurou até o
+ * teto). A direção sai do FACING autoritativo, e a força de `kickBodyBall`: o
+ * escritório nunca teve mira de mouse, e não é a migração para pixel que vai
+ * dar uma. O toque (Z) ignora a carga — ele já era o gesto fraco e fixo, e
+ * carregar um toque não faria sentido.
+ *
+ * Devolve `null` quando a bola está fora do alcance, para o chamador não
+ * precisar medir antes.
+ */
+export function officeKickBall(options: {
+  ball: OfficeBall
+  kicker: { x: number; y: number; dir: Direction }
+  power: OfficeBallPower
+  sprint?: boolean
+  /** 0 a 1. Padrão 1 — força cheia, para quem não manda carga nenhuma. */
+  charge?: number
+}): BodyBallState | null {
+  const { ball, kicker, power, sprint, charge = 1 } = options
   if (!isBallInReach(ball, kicker)) return null
-
-  const { w, h } = ballFootprint(ball)
-  const blocked = new Set(obstacles.map((tile) => `${tile.x},${tile.y}`))
-  // A bola inteira precisa caber: a de pilates não passa por vão de um tile.
-  const passable = (x: number, y: number) => {
-    for (let dy = 0; dy < h; dy += 1) {
-      for (let dx = 0; dx < w; dx += 1) {
-        if (!isMapTileWalkable(document, x + dx, y + dy)) return false
-        if (blocked.has(`${x + dx},${y + dy}`)) return false
-      }
-    }
-    return true
-  }
-
-  let { sx, sy } = pushDirection
-    ? { sx: Math.sign(pushDirection.x), sy: Math.sign(pushDirection.y) }
-    : stepFor(kicker, ball, kicker.dir)
-  const grazed = pushDirection ? false : !isCleanContact({ sx, sy }, kicker.dir)
-
-  // Condução: um tile na direção do passo, e só. Sem rebatida (a bola apenas
-  // não sai do lugar quando não há para onde) e sem raspão — quem conduz não
-  // está chutando, está empurrando com o pé a cada passo.
-  if (power === 'dribble') {
-    const target = { x: ball.x + sx, y: ball.y + sy }
-    return {
-      ballId: ball.id,
-      path: passable(target.x, target.y) ? [target] : [],
-      durationMs: sprint ? BALL_DRIBBLE_SPRINT_TILE_MS : BALL_DRIBBLE_TILE_MS,
-      power,
-      grazed: false,
-      bounces: 0,
-    }
-  }
-
-  const withModifiers = (base: number) => {
-    let tiles = base
-    if (grazed) tiles *= BALL_GRAZE_FACTOR
-    if (sprint) tiles *= BALL_SPRINT_FACTOR
-    return Math.max(1, Math.round(tiles))
-  }
-
-  // Chute alto: o caminho é reto e os tiles do meio são SOBREVOADOS — mesa,
-  // planta e gente no meio não param nada. O que precisa estar livre é o
-  // POUSO; se não estiver, a bola cai antes, no último tile livre da linha.
-  // (É por isso que ele não é só um chute com a colisão desligada: quem
-  // recebe a bola em cima de uma mesa precisaria buscá-la lá.)
-  if (power === 'lob') {
-    const reach = withModifiers(BALL_LOB_TILES)
-    for (let distance = reach; distance >= 1; distance -= 1) {
-      if (!passable(ball.x + sx * distance, ball.y + sy * distance)) continue
-      const path: TilePosition[] = []
-      for (let step = 1; step <= distance; step += 1) {
-        path.push({ x: ball.x + sx * step, y: ball.y + sy * step })
-      }
-      return {
-        ballId: ball.id,
-        path,
-        durationMs: path.length * BALL_LOB_TILE_MS,
-        power,
-        grazed,
-        bounces: 0,
-      }
-    }
-    // Nenhum pouso livre na linha (bola contra a parede): não sai do lugar.
-    return { ballId: ball.id, path: [], durationMs: 0, power, grazed, bounces: 0 }
-  }
-
-  let remaining = BALL_TOUCH_TILES
-  if (power === 'kick') remaining = withModifiers(BALL_KICK_TILES)
-
-  const path: TilePosition[] = []
-  let x = ball.x
-  let y = ball.y
-  let bounces = 0
-
-  while (remaining > 0) {
-    const nx = x + sx
-    const ny = y + sy
-    // Na diagonal a bola não passa por fresta entre dois cantos: exige ao
-    // menos um dos ortogonais livre, a mesma regra do personagem.
-    const diagonalSqueeze = sx !== 0 && sy !== 0 && !passable(x + sx, y) && !passable(x, y + sy)
-    if (passable(nx, ny) && !diagonalSqueeze) {
-      x = nx
-      y = ny
-      path.push({ x, y })
-      remaining -= 1
-      continue
-    }
-    if (bounces >= BALL_MAX_BOUNCES) break
-    // Rebate: inverte só o eixo que encontrou o obstáculo (canto inverte os dois).
-    if (sx !== 0 && sy !== 0) {
-      const blockedX = !passable(x + sx, y)
-      const blockedY = !passable(x, y + sy)
-      if (blockedX) sx = -sx
-      if (blockedY) sy = -sy
-      if (!blockedX && !blockedY) {
-        sx = -sx
-        sy = -sy
-      }
-    } else if (sx !== 0) {
-      sx = -sx
-    } else {
-      sy = -sy
-    }
-    bounces += 1
-    remaining = Math.floor(remaining * BALL_BOUNCE_FACTOR)
-    // Sem saída pelos dois lados (bola entalada): para onde estava.
-    if (!passable(x + sx, y + sy)) break
-  }
-
-  const tileMs = power === 'touch' ? BALL_TOUCH_TILE_MS : BALL_KICK_TILE_MS
-  return {
-    ballId: ball.id,
-    path,
-    durationMs: path.length * tileMs,
-    power,
-    grazed,
-    bounces,
-  }
+  const angle = Math.atan2(DIRECTION_DELTAS[kicker.dir].y, DIRECTION_DELTAS[kicker.dir].x)
+  const carga = Number.isFinite(charge) ? Math.max(0, Math.min(1, charge)) : 1
+  return kickBodyBall({
+    ball,
+    kicker,
+    angle,
+    sprint,
+    charge: carga,
+    // Do CENTRO, somando o raio: `isBallInReach` já mediu da superfície, e sem
+    // isto a segunda checagem recusaria toda bola grande.
+    reach: BALL_REACH_PX + ballRadius(ball),
+    // O toque é o passe; chute e chute alto saem com a força do chute — o que
+    // distingue o alto é o voo, não a potência.
+    power: power === 'touch' ? 'passe' : 'chute',
+    ...(power === 'lob'
+      ? { airborneMs: BALL_LOB_MIN_AIRBORNE_MS + (BALL_LOB_AIRBORNE_MS - BALL_LOB_MIN_AIRBORNE_MS) * carga }
+      : {}),
+  })
 }

@@ -17,6 +17,11 @@ import {
 import { slugify } from "../src/lib/slug";
 import { LEARNING_SEED, LEARNING_TRACKS_SEED } from "./learning-seed-content";
 import { EMILY_KNOWLEDGE_SEED, EMILY_PERSONA_NAME } from "./emily-knowledge-seed-content";
+import {
+  APPRENTICE_CLASSES_SEED,
+  APPRENTICE_CONTRACT_SEED,
+  APPRENTICE_MEETINGS_SEED,
+} from "./apprentice-seed-content";
 
 const prisma = new PrismaClient();
 
@@ -220,6 +225,24 @@ async function main() {
     await prisma.user.update({
       where: { email: link.email },
       data: { managerId: manager.id },
+    });
+  }
+
+  // Temas do catálogo de selos (Documento 4, seção 11.4). São a prateleira do
+  // Painel de Emblemas — não confundir com RecognitionCategory, que é a
+  // categoria do FEEDBACK e é o que `Badge.categorySlug` referencia.
+  const badgeCategories = [
+    { slug: "feedback", name: "Feedback", order: 0 },
+    { slug: "social", name: "Social", order: 1 },
+    { slug: "desenvolvimento", name: "Desenvolvimento", order: 2 },
+    { slug: "clima", name: "Clima", order: 3 },
+    { slug: "cultura", name: "Cultura", order: 4 },
+  ];
+  for (const c of badgeCategories) {
+    await prisma.badgeCategory.upsert({
+      where: { companyId_slug: { companyId: DEFAULT_COMPANY_ID, slug: c.slug } },
+      update: {},
+      create: { ...c, companyId: DEFAULT_COMPANY_ID },
     });
   }
 
@@ -470,6 +493,47 @@ async function main() {
 
   // Catálogo inicial de Aprendizado. A autoria de curso é do CMS (PBI #22272);
   // isto aqui é só semente de desenvolvimento, para o catálogo não nascer vazio.
+  // Catálogo do curso (Documento 4, 9.6 e 9.7): categoria, competência e
+  // instrutor viraram cadastro, então o seed cadastra antes de ligar.
+  const slugDe = (nome: string) =>
+    nome
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+
+  const categoriaPorNome = new Map<string, string>();
+  for (const nome of new Set(LEARNING_SEED.map((c) => c.category))) {
+    const row = await prisma.courseCategory.upsert({
+      where: { companyId_slug: { companyId: DEFAULT_COMPANY_ID, slug: slugDe(nome) } },
+      create: { name: nome, slug: slugDe(nome), companyId: DEFAULT_COMPANY_ID },
+      update: {},
+    });
+    categoriaPorNome.set(nome, row.id);
+  }
+
+  const competenciaPorNome = new Map<string, string>();
+  for (const nome of new Set(LEARNING_SEED.flatMap((c) => c.competencies))) {
+    const row = await prisma.competency.upsert({
+      where: { companyId_slug: { companyId: DEFAULT_COMPANY_ID, slug: slugDe(nome) } },
+      create: { name: nome, slug: slugDe(nome), companyId: DEFAULT_COMPANY_ID },
+      update: {},
+    });
+    competenciaPorNome.set(nome, row.id);
+  }
+
+  const instrutorPorNome = new Map<string, string>();
+  for (const nome of new Set(LEARNING_SEED.map((c) => c.instructorName))) {
+    const existente = await prisma.instructor.findFirst({
+      where: { name: nome, companyId: DEFAULT_COMPANY_ID },
+    });
+    const row =
+      existente ??
+      (await prisma.instructor.create({ data: { name: nome, companyId: DEFAULT_COMPANY_ID } }));
+    instrutorPorNome.set(nome, row.id);
+  }
+
   for (const [courseIndex, course] of LEARNING_SEED.entries()) {
     const saved = await prisma.course.upsert({
       where: { slug_companyId: { slug: course.slug, companyId: DEFAULT_COMPANY_ID } },
@@ -479,13 +543,14 @@ async function main() {
         title: course.title,
         shortDescription: course.shortDescription,
         description: course.description,
-        category: course.category,
+        categoryId: categoriaPorNome.get(course.category) ?? null,
         level: course.level,
-        competencies: course.competencies,
         objectives: course.objectives,
-        instructorName: course.instructorName,
         mandatory: course.mandatory,
-        published: true,
+        // `published Boolean` virou o ciclo de vida `CourseStatus` (só PUBLISHED
+        // aparece para o aluno). O seed tinha ficado para trás e derrubava o
+        // `db:seed` inteiro aqui, antes de qualquer coisa depois deste bloco.
+        status: 'PUBLISHED',
         publishedAt: new Date(Date.now() - courseIndex * 86_400_000),
         companyId: DEFAULT_COMPANY_ID,
       },
@@ -493,6 +558,21 @@ async function main() {
 
     const alreadySeeded = await prisma.courseModule.count({ where: { courseId: saved.id } });
     if (alreadySeeded > 0) continue;
+
+    await prisma.courseCompetency.createMany({
+      data: course.competencies.flatMap((nome) => {
+        const competencyId = competenciaPorNome.get(nome);
+        return competencyId ? [{ courseId: saved.id, competencyId }] : [];
+      }),
+      skipDuplicates: true,
+    });
+    const instructorId = instrutorPorNome.get(course.instructorName);
+    if (instructorId) {
+      await prisma.courseInstructor.createMany({
+        data: [{ courseId: saved.id, instructorId }],
+        skipDuplicates: true,
+      });
+    }
 
     for (const [moduleIndex, mod] of course.modules.entries()) {
       const savedModule = await prisma.courseModule.create({
@@ -509,9 +589,7 @@ async function main() {
             courseId: saved.id,
             moduleId: savedModule.id,
             title: lesson.title,
-            type: lesson.type,
-            videoUrl: lesson.videoUrl ?? null,
-            contentHtml: lesson.contentHtml,
+            contentBlocks: lesson.blocks,
             durationMinutes: lesson.durationMinutes,
             sortOrder: lessonIndex,
             companyId: DEFAULT_COMPANY_ID,
@@ -609,9 +687,77 @@ async function main() {
     create: { key: "assistant_persona_name", companyId: DEFAULT_COMPANY_ID, value: EMILY_PERSONA_NAME },
   });
 
+  await seedApprentice();
+
   console.log(
     `Seed concluído. ${devs.length + leads.length} usuários criados.`,
   );
+}
+
+/**
+ * Trilha Eu Aprendiz — turmas, os seis encontros, as fichas e o contrato.
+ *
+ * Só cria o que ainda não existe: o painel edita tudo isso, e rodar o seed de
+ * novo não pode desfazer o ajuste que a G&G fez na véspera do encontro.
+ */
+async function seedApprentice() {
+  for (const turma of APPRENTICE_CLASSES_SEED) {
+    const existing = await prisma.apprenticeClass.findFirst({
+      where: { companyId: DEFAULT_COMPANY_ID, name: turma.name },
+    });
+    if (!existing) {
+      await prisma.apprenticeClass.create({
+        data: { companyId: DEFAULT_COMPANY_ID, name: turma.name, shift: turma.shift },
+      });
+    }
+  }
+
+  for (const meeting of APPRENTICE_MEETINGS_SEED) {
+    let row = await prisma.apprenticeMeeting.findFirst({
+      where: { companyId: DEFAULT_COMPANY_ID, order: meeting.order },
+    });
+    if (!row) {
+      row = await prisma.apprenticeMeeting.create({
+        data: {
+          companyId: DEFAULT_COMPANY_ID,
+          order: meeting.order,
+          title: meeting.title,
+          theme: meeting.theme,
+          objectives: meeting.objectives,
+          deliverable: meeting.deliverable,
+          scheduledOn: new Date(`${meeting.scheduledOn}T00:00:00.000Z`),
+          // O primeiro encontro nasce liberado; os demais, o facilitador abre.
+          accessReleased: meeting.order === 1,
+        },
+      });
+    }
+
+    for (const activity of meeting.activities) {
+      const found = await prisma.apprenticeActivity.findFirst({
+        where: { companyId: DEFAULT_COMPANY_ID, meetingId: row.id, title: activity.title },
+      });
+      if (found) continue;
+      await prisma.apprenticeActivity.create({
+        data: {
+          companyId: DEFAULT_COMPANY_ID,
+          meetingId: row.id,
+          title: activity.title,
+          kind: activity.kind,
+          order: activity.order,
+          schema: activity.schema as object,
+        },
+      });
+    }
+  }
+
+  const contract = await prisma.apprenticeContract.findFirst({
+    where: { companyId: DEFAULT_COMPANY_ID },
+  });
+  if (!contract) {
+    await prisma.apprenticeContract.create({
+      data: { companyId: DEFAULT_COMPANY_ID, clauses: APPRENTICE_CONTRACT_SEED },
+    });
+  }
 }
 
 main()

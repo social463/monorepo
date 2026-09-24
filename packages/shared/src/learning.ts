@@ -6,6 +6,7 @@
  * player, progresso, avaliação e certificado.
  */
 
+import type { CourseLessonBlock } from './course-lesson-block'
 import { extractYouTubeId } from './office-audio-share'
 
 export const COURSE_LEVELS = ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'] as const
@@ -17,12 +18,33 @@ export const COURSE_LEVEL_LABELS: Record<CourseLevel, string> = {
   ADVANCED: 'Avançado',
 }
 
-export const COURSE_LESSON_TYPES = ['VIDEO', 'TEXT'] as const
-export type CourseLessonType = (typeof COURSE_LESSON_TYPES)[number]
+/**
+ * Ciclo de vida do curso (Documento 4, seção 9.6).
+ *
+ * Era `Course.published`, um booleano. O documento pede cinco estados — e é
+ * explícito sobre os rótulos: o protótipo os mostra em inglês e em formato
+ * técnico (`review`, `pending_approval`, `archived`), e a implementação
+ * padroniza em português.
+ *
+ * **Só `PUBLISHED` aparece para o aluno.** Os outros quatro são etapas da
+ * autoria: o que muda entre eles é o que a G&G vê na fila de trabalho, não o
+ * que o colaborador enxerga no catálogo. Por isso `isPublishedStatus` existe —
+ * ela é a tradução do antigo `published`, e é ela que os `where` usam.
+ */
+export const COURSE_STATUSES = ['DRAFT', 'REVIEW', 'PENDING_APPROVAL', 'PUBLISHED', 'ARCHIVED'] as const
+export type CourseStatus = (typeof COURSE_STATUSES)[number]
 
-export const COURSE_LESSON_TYPE_LABELS: Record<CourseLessonType, string> = {
-  VIDEO: 'Vídeo',
-  TEXT: 'Leitura',
+export const COURSE_STATUS_LABELS: Record<CourseStatus, string> = {
+  DRAFT: 'Rascunho',
+  REVIEW: 'Em revisão',
+  PENDING_APPROVAL: 'Aguardando aprovação',
+  PUBLISHED: 'Publicado',
+  ARCHIVED: 'Arquivado',
+}
+
+/** Quem enxerga o curso no catálogo. Um estado, e não uma lista: publicar é um só. */
+export function isPublishedStatus(status: CourseStatus): boolean {
+  return status === 'PUBLISHED'
 }
 
 export const COURSE_ENROLLMENT_STATUSES = ['IN_PROGRESS', 'COMPLETED'] as const
@@ -53,9 +75,14 @@ export interface CourseCardDTO {
   title: string
   shortDescription: string | null
   coverUrl: string | null
-  category: string
+  /** Emoji e cor da identidade visual (seção 9.6): vestem o card sem capa. */
+  icon: string | null
+  primaryColor: string | null
+  /** Nome da categoria do catálogo; nulo quando o curso ainda não tem uma. */
+  category: string | null
   level: CourseLevel
   durationMinutes: number
+  /** Primeiro instrutor do curso — é o que cabe no card. */
   instructorName: string | null
   competencies: string[]
   mandatory: boolean
@@ -69,14 +96,25 @@ export interface CourseCardDTO {
   enrollment: CourseEnrollmentSummary | null
 }
 
+/** Instrutor como as telas o exibem — derivado do catálogo (seção 9.7). */
+export interface CourseInstructorRef {
+  id: string
+  name: string
+  photoUrl: string | null
+  bio: string | null
+}
+
 export interface CourseLessonDTO {
   id: string
   moduleId: string
   title: string
   description: string | null
-  type: CourseLessonType
-  videoUrl: string | null
-  contentHtml: string | null
+  /**
+   * Conteúdo da aula, em ordem. Substituiu `type`/`videoUrl`/`contentHtml`
+   * (Documento 4, seção 9.1) — o formato da aula agora se deriva daqui, por
+   * `lessonKindOf`, porque uma aula com vídeo E texto não cabe numa coluna só.
+   */
+  blocks: CourseLessonBlock[]
   durationMinutes: number
   sortOrder: number
   completed: boolean
@@ -102,14 +140,38 @@ export interface CourseDetailDTO extends CourseCardDTO {
   description: string | null
   objectives: string[]
   prerequisites: string | null
-  instructorBio: string | null
+  /**
+   * SUPERADO em 08/09/2026: o curso passou a ter UMA imagem, e ela é a
+   * `coverUrl`. O campo nunca chegou a ser desenhado em lugar nenhum do
+   * portal, e o formulário do admin não o escreve mais — a coluna fica no
+   * banco para não perder o que já foi digitado. Não religue: uma segunda
+   * imagem por curso é exatamente o que a G&G pediu para acabar.
+   */
+  bannerUrl: string | null
+  /** Vídeo de apresentação do curso — não é aula; abre antes de começar. */
+  introVideoUrl: string | null
+  /** Todos os instrutores, na ordem — a 9.7 permite mais de um por curso. */
+  instructors: CourseInstructorRef[]
   modules: CourseModuleDTO[]
   totalLessons: number
   completedLessons: number
   myRating: CourseRatingDTO | null
   certificate: CertificateDTO | null
+  /**
+   * A solicitação de certificado DESTA pessoa neste curso, quando existe
+   * (Documento 4, seção 9.3). Só o que a tela do aluno precisa mostrar —
+   * a fila completa é `CertificateRequestDTO`, documento de admin.
+   */
+  certificateRequest: MyCertificateRequestDTO | null
   /** Id do quiz final do curso (`lessonId: null`), se houver — condiciona o certificado. */
   finalQuizId: string | null
+}
+
+/** Estado da solicitação de certificado, do ponto de vista de quem pediu. */
+export interface MyCertificateRequestDTO {
+  status: 'PENDING' | 'APPROVED' | 'REJECTED'
+  rejectionReason: string | null
+  createdAt: string
 }
 
 export interface EnrollmentDTO {
@@ -129,7 +191,7 @@ export interface LearningTrackDTO {
   title: string
   description: string | null
   coverUrl: string | null
-  category: string
+  category: string | null
   competencies: string[]
   courses: CourseCardDTO[]
   /** Média do progresso da pessoa nos cursos da trilha (0–100). */
@@ -181,9 +243,7 @@ export interface AdminCourseLessonDTO {
   moduleId: string
   title: string
   description: string | null
-  type: CourseLessonType
-  videoUrl: string | null
-  contentHtml: string | null
+  blocks: CourseLessonBlock[]
   durationMinutes: number
   sortOrder: number
 }
@@ -203,15 +263,43 @@ export interface AdminCourseDTO {
   shortDescription: string | null
   description: string | null
   coverUrl: string | null
-  category: string
+  categoryId: string | null
+  /** Resolvido para exibir sem uma segunda consulta na tela. */
+  categoryName: string | null
   level: CourseLevel
-  competencies: string[]
+  competencyIds: string[]
   objectives: string[]
   prerequisites: string | null
-  instructorName: string | null
-  instructorBio: string | null
+  instructors: CourseInstructorRef[]
   mandatory: boolean
+  status: CourseStatus
+  /** Recompensa ao concluir (seção 9.6). Zero = sem recompensa. */
+  rewardPoints: number
+  rewardCoins: number
+  /**
+   * SUPERADO em 08/09/2026: o curso passou a ter UMA imagem, e ela é a
+   * `coverUrl`. O campo nunca chegou a ser desenhado em lugar nenhum do
+   * portal, e o formulário do admin não o escreve mais — a coluna fica no
+   * banco para não perder o que já foi digitado. Não religue: uma segunda
+   * imagem por curso é exatamente o que a G&G pediu para acabar.
+   */
+  bannerUrl: string | null
+  introVideoUrl: string | null
+  icon: string | null
+  primaryColor: string | null
+  /**
+   * Público-alvo (Documento 4, seção 9.2). `sectorId` continua sendo o setor
+   * DONO do curso — quem administra —, e estes são os setores que também o
+   * enxergam. Lista vazia em qualquer um dos dois = sem restrição por ele.
+   */
+  audienceSectorIds: string[]
+  audiencePositionCategories: string[]
+  /** Rótulo, não regra de acesso. */
+  recommendedFor: string[]
+  /** Matricula sozinho quem entra no público-alvo. */
+  autoEnroll: boolean
   certificateEnabled: boolean
+  /** Derivado de `status` — mantido porque as telas do aluno perguntam isso. */
   published: boolean
   publishedAt: string | null
   /** Soma da duração das aulas — derivada, não é campo de formulário. */
@@ -232,8 +320,9 @@ export interface AdminCourseDTO {
 export interface AdminCourseListItemDTO {
   id: string
   title: string
-  category: string
+  category: string | null
   level: CourseLevel
+  status: CourseStatus
   published: boolean
   mandatory: boolean
   durationMinutes: number
@@ -244,16 +333,36 @@ export interface AdminCourseListItemDTO {
 
 export interface CreateCourseRequest {
   title: string
-  category: string
+  categoryId?: string | null
   level?: CourseLevel
   shortDescription?: string | null
   description?: string | null
   coverUrl?: string | null
-  competencies?: string[]
+  /** Ids do catálogo de competências; a lista inteira é regravada a cada save. */
+  competencyIds?: string[]
   objectives?: string[]
   prerequisites?: string | null
-  instructorName?: string | null
-  instructorBio?: string | null
+  /** Ids do catálogo de instrutores, na ordem — o primeiro é o principal. */
+  instructorIds?: string[]
+  rewardPoints?: number
+  rewardCoins?: number
+  /**
+   * SUPERADO em 08/09/2026: o curso passou a ter UMA imagem, e ela é a
+   * `coverUrl`. O campo nunca chegou a ser desenhado em lugar nenhum do
+   * portal, e o formulário do admin não o escreve mais — a coluna fica no
+   * banco para não perder o que já foi digitado. Não religue: uma segunda
+   * imagem por curso é exatamente o que a G&G pediu para acabar.
+   */
+  bannerUrl?: string | null
+  introVideoUrl?: string | null
+  /** Emoji. */
+  icon?: string | null
+  /** Hex `#rrggbb`. */
+  primaryColor?: string | null
+  audienceSectorIds?: string[]
+  audiencePositionCategories?: string[]
+  recommendedFor?: string[]
+  autoEnroll?: boolean
   mandatory?: boolean
   certificateEnabled?: boolean
   /**
@@ -277,7 +386,13 @@ export interface CreateCourseRequest {
 }
 
 export interface UpdateCourseRequest extends Partial<CreateCourseRequest> {
-  published?: boolean
+  /**
+   * Substituiu `published?: boolean` (Documento 4, seção 9.6). Publicar virou
+   * "mandar o status para `PUBLISHED`", e despublicar virou escolher para onde
+   * o curso volta — rascunho, revisão ou arquivo — em vez de um único destino
+   * implícito.
+   */
+  status?: CourseStatus
 }
 
 export interface CreateCourseModuleRequest {
@@ -289,11 +404,9 @@ export type UpdateCourseModuleRequest = Partial<CreateCourseModuleRequest> & { s
 
 export interface CreateCourseLessonRequest {
   title: string
-  type: CourseLessonType
   description?: string | null
-  /** Link como se copia do navegador; o player normaliza (ver `toVideoEmbedUrl`). */
-  videoUrl?: string | null
-  contentHtml?: string | null
+  /** Ausente = aula sem conteúdo ainda; o editor grava a lista inteira a cada salvamento. */
+  blocks?: CourseLessonBlock[]
   durationMinutes?: number
 }
 

@@ -128,6 +128,71 @@ export function buildChallengeEvidenceKey(userId: string, id: string = randomUUI
 }
 
 /**
+ * Chave da comprovação de uma reivindicação de selo:
+ * `badge-claims/<userId>/<uuid>.<ext>` (Documento 4, seção 11.2).
+ *
+ * Namespaced por USUÁRIO, como a evidência de desafio e pelo mesmo motivo: é
+ * esse prefixo que o service confere no envio, para ninguém apontar o anexo
+ * para o objeto de outra pessoa.
+ *
+ * Aceita imagem **ou** PDF, que é o que o documento pede — daí a extensão sair
+ * do content-type em vez de ser fixa como em `buildChallengeEvidenceKey`.
+ */
+export function buildBadgeClaimKey(
+  userId: string,
+  contentType: string,
+  id: string = randomUUID(),
+): string {
+  // `MEDIA_EXT_BY_TYPE` já é imagem + PDF + Office; é declarado mais abaixo no
+  // arquivo, e só é lido na chamada — não na avaliação do módulo.
+  return `badge-claims/${userId}/${id}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
+}
+
+/**
+ * Prefixo do anexo de certificado externo. Exportado porque o service confere o
+ * início da chave antes de gravar: sem isso, alguém poderia mandar a chave do
+ * documento de outra pessoa e anexá-lo ao próprio pedido.
+ */
+export const CERTIFICATE_ATTACHMENT_PREFIX = 'certificate-requests'
+
+/**
+ * Prefixo do material da trilha Eu Aprendiz. Exportado para o service conferir
+ * o início da chave antes de gravar, como o anexo de certificado.
+ */
+export const APPRENTICE_MATERIAL_PREFIX = 'apprentice-materials'
+
+/**
+ * Chave de material/apresentação do encontro: apprentice-materials/<companyId>/<uuid>.<ext>.
+ *
+ * Namespaced pela EMPRESA, e não pela pessoa: o material é do encontro e a
+ * turma inteira lê. Quem sobe é o facilitador, e a rota já é do bloco de Gente
+ * e Gestão — o recorte que importa aqui é o tenant.
+ */
+export function buildApprenticeMaterialKey(
+  companyId: string,
+  contentType: string,
+  id: string = randomUUID(),
+): string {
+  return `${APPRENTICE_MATERIAL_PREFIX}/${companyId}/${id}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
+}
+
+/**
+ * Chave do certificado de curso EXTERNO anexado pelo colaborador (Documento 4,
+ * seção 9.8): certificate-requests/<userId>/<uuid>.<ext>.
+ *
+ * Namespaced pela pessoa, como `badge-claims/` e `challenges/`, e aceitando
+ * imagem OU PDF — é o que o formulário pede ("anexe uma foto visível do seu
+ * certificado"). A chave nasce no servidor; o cliente nunca escolhe onde grava.
+ */
+export function buildCertificateAttachmentKey(
+  userId: string,
+  contentType: string,
+  id: string = randomUUID(),
+): string {
+  return `${CERTIFICATE_ATTACHMENT_PREFIX}/${userId}/${id}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
+}
+
+/**
  * Chave da foto de um álbum de evento: event-photos/<companyId>/<uuid>.<ext>.
  * Prefixo próprio (não `reviews/`) e namespaced por empresa. A chave nasce SEMPRE
  * no servidor — o cliente nunca escolhe onde a foto é gravada.
@@ -195,6 +260,17 @@ export function buildFeedMediaKey(
   return `feed-media/${companyId}/${userId}/${id}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
 }
 
+/**
+ * Chave de evidência do diário de bordo do INOVA:
+ * `inova-diary/<companyId>/<userId>/<uuid>.<ext>`. Mesmo critério de
+ * `buildFeedMediaKey` (extensão pelo content-type, nunca escolhida pelo
+ * cliente), namespaced por empresa E por usuário — evidência é do autor do
+ * registro, dentro da empresa que só a EMR usa hoje.
+ */
+export function buildInovaDiaryKey(companyId: string, userId: string, contentType: string): string {
+  return `inova-diary/${companyId}/${userId}/${randomUUID()}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
+}
+
 const MEDIA_EXT_BY_TYPE: Record<string, string> = {
   ...EXT_BY_TYPE,
   'video/mp4': 'mp4',
@@ -238,6 +314,16 @@ export async function presignDocumentDownload(input: {
       : {}),
   })
   return getSignedUrl(getClient(cfg.region), command, { expiresIn: 300 })
+}
+
+/**
+ * Chave de um vídeo enviado para a biblioteca do Guia AI First:
+ * `inova-guia-videos/<companyId>/<uuid>.<ext>`. Só por empresa (não por
+ * usuário): o vídeo é do card, não de quem subiu — qualquer admin pode
+ * substituir o de outro depois.
+ */
+export function buildInovaGuiaVideoKey(companyId: string, contentType: string): string {
+  return `inova-guia-videos/${companyId}/${randomUUID()}.${MEDIA_EXT_BY_TYPE[contentType] ?? 'bin'}`
 }
 
 export async function deleteS3Object(key: string): Promise<void> {

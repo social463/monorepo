@@ -30,7 +30,9 @@ export function TargetPicker({
   onChange,
   sectorId,
   excludeIds,
+  scope = 'feedback',
   placeholder = 'Procurar colega na empresa…',
+  ariaLabel = 'Para quem é o feedback',
 }: {
   value: PublicUser | null
   onChange: (user: PublicUser | null) => void
@@ -38,16 +40,29 @@ export function TargetPicker({
   sectorId?: string
   /** Quem já foi escolhido no reconhecimento grupal não reaparece na busca. */
   excludeIds?: string[]
+  /**
+   * Quem entra na lista. `feedback` (padrão) é a de destinatários: sem você mesmo,
+   * sem admins. `all` é a de pessoas da empresa, para campos que escolhem alguém
+   * qualquer — dono de projeto, participante — onde essas duas exclusões só escondem
+   * gente que devia aparecer.
+   */
+  scope?: 'feedback' | 'all'
   placeholder?: string
+  /** Rótulo de acessibilidade do campo de busca — outros usos (fora do feedback) devem sobrescrever o padrão. */
+  ariaLabel?: string
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // A chave do escopo `feedback` continua sendo `['users','company']` crua: é a mesma
+  // que meia dúzia de telas usa (convidados de reunião, calendário, 1:1…) e trocá-la
+  // faria cada uma buscar a lista de novo, por conta própria.
   const { data, isLoading } = useQuery({
-    queryKey: ['users', 'company'],
-    queryFn: () => apiFetch<{ users: PublicUser[] }>('/users/company'),
+    queryKey: scope === 'all' ? ['users', 'company', 'all'] : ['users', 'company'],
+    queryFn: () =>
+      apiFetch<{ users: PublicUser[] }>(scope === 'all' ? '/users/company?scope=all' : '/users/company'),
   })
   const users = useMemo(() => {
     const all = data?.users ?? []
@@ -142,7 +157,7 @@ export function TargetPicker({
           aria-expanded={open}
           aria-controls="feedback-target-list"
           aria-autocomplete="list"
-          aria-label="Para quem é o feedback"
+          aria-label={ariaLabel}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value)

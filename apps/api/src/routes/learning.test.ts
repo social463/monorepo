@@ -22,13 +22,20 @@ function thirdPartyToken(app: ReturnType<typeof buildApp>, userId: string, featu
 }
 
 async function seedCourse(companyId = 'company-emr', sectorId: string | null = null) {
+  // Categoria virou catálogo (Documento 4, seção 9.6): a fixture cadastra e
+  // liga, em vez de escrever a string dentro do curso.
+  const categoria = await prisma.courseCategory.upsert({
+    where: { companyId_slug: { companyId, slug: 'lideranca' } },
+    create: { name: 'Liderança', slug: 'lideranca', companyId },
+    update: {},
+  })
   const course = await prisma.course.create({
     data: {
       slug: `curso-${Math.random().toString(36).slice(2, 8)}`,
       title: 'Liderança na prática',
-      category: 'Liderança',
-      published: true,
+      status: 'PUBLISHED',
       publishedAt: new Date(),
+      categoryId: categoria.id,
       companyId,
       sectorId,
     },

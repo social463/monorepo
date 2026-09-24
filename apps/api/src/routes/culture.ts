@@ -9,6 +9,7 @@ import {
   CULTURE_SUMMARY_MAX_LENGTH,
   CULTURE_TITLE_MAX_LENGTH,
   CULTURE_VISUAL_ASSET_FILE_NAME_MAX_LENGTH,
+  CULTURE_VISUAL_ASSET_BRANDS,
   CULTURE_VISUAL_ASSET_FITS,
   CULTURE_PERSONAL_ASSET_KINDS,
   isCulturePageSlug,
@@ -25,6 +26,7 @@ import {
   deletePersonalAsset,
   deleteVisualAsset,
   getPageForAdmin,
+  getOnboardingKitFor,
   getPersonalAssetForViewer,
   getPublishedManual,
   getPublishedPage,
@@ -96,6 +98,7 @@ const visualAssetBaseSchema = {
   storageKey: z.string().trim().min(1).max(500),
   fileName: z.string().trim().min(1).max(CULTURE_VISUAL_ASSET_FILE_NAME_MAX_LENGTH),
   fit: z.enum(CULTURE_VISUAL_ASSET_FITS).optional(),
+  brand: z.enum(CULTURE_VISUAL_ASSET_BRANDS).optional(),
   published: z.boolean().optional(),
 }
 const createVisualAssetSchema = z.object(visualAssetBaseSchema)
@@ -410,6 +413,28 @@ export async function cultureRoutes(app: FastifyInstance) {
   app.get('/culture/personal-assets', publicReadGuard, async (request, reply) => {
     const assets = await listPersonalAssetsFor(request.user.sub, request.user.companyId)
     return reply.send({ assets: await Promise.all(assets.map(toCulturePersonalAssetDTO)) })
+  })
+
+  /**
+   * Os mesmos materiais, com a janela dos 90 dias da chegada resolvida pelo
+   * servidor — é o que o perfil desenha. Rota separada de
+   * `/culture/personal-assets` de propósito: a aba Kit visual mostra o material
+   * para sempre, e misturar as duas leituras faria a decisão de mostrar virar
+   * um `if` no cliente. Mesmo recorte pelo `sub` do token, sem parâmetro de
+   * pessoa.
+   */
+  app.get('/culture/onboarding-kit', publicReadGuard, async (request, reply) => {
+    try {
+      const kit = await getOnboardingKitFor(request.user.sub, request.user.companyId)
+      return reply.send({
+        active: kit.active,
+        endsAt: kit.endsAt ? kit.endsAt.toISOString() : null,
+        daysLeft: kit.daysLeft,
+        assets: await Promise.all(kit.assets.map(toCulturePersonalAssetDTO)),
+      })
+    } catch (err) {
+      return handleCultureError(err, reply)
+    }
   })
 
   /**

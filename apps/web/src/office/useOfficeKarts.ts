@@ -2,6 +2,12 @@ import { useEffect, useMemo } from 'react'
 import type { OfficeKart, OfficeOccupant } from '@legends/shared'
 import type { OfficeBridge } from './OfficeBridge'
 
+/**
+ * Alcance para montar, em pixel. Um tile e meio: o servidor usa o mesmo, e o
+ * cliente não pode oferecer o botão onde o servidor recusa.
+ */
+const KART_RIDE_REACH = 48
+
 function isTextInput(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   return target.isContentEditable || Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
@@ -16,19 +22,15 @@ export function useOfficeKarts(
   const riding = Boolean(you?.ridingKartId)
   const nearbyKart = useMemo(() => {
     if (!enabled || !you || riding) return null
+    // Em PIXEL, como o servidor mede (`OfficeHub.rideKart`) — kart e pessoa
+    // falam pixel desde o movimento livre. Ancorado no que sempre significou,
+    // "um tile de distância", com a folga que um corpo contínuo pede: montar não
+    // pode virar teste de pontaria.
+    const distancia = (kart: OfficeKart) => Math.hypot(kart.x - you.x, kart.y - you.y)
     return (
       karts
-        .filter(
-          (kart) =>
-            !kart.riderUserId &&
-            Math.abs(kart.x - you.x) <= 1 &&
-            Math.abs(kart.y - you.y) <= 1,
-        )
-        .sort((a, b) => {
-          const distanceA = Math.abs(a.x - you.x) + Math.abs(a.y - you.y)
-          const distanceB = Math.abs(b.x - you.x) + Math.abs(b.y - you.y)
-          return distanceA - distanceB || a.id.localeCompare(b.id)
-        })[0] ?? null
+        .filter((kart) => !kart.riderUserId && distancia(kart) <= KART_RIDE_REACH)
+        .sort((a, b) => distancia(a) - distancia(b) || a.id.localeCompare(b.id))[0] ?? null
     )
   }, [enabled, karts, riding, you])
   const canInteract = enabled && (riding || nearbyKart !== null)

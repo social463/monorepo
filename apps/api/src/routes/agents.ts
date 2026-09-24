@@ -1,13 +1,29 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
-import { AGENT_MESSAGE_MAX_LENGTH, isAgentKey } from '@legends/shared'
+import { AGENT_MESSAGE_MAX_LENGTH, isAgentKey, type AgentKey } from '@legends/shared'
 import { AgentError } from '../lib/agent-error'
 import { toAgentConversationDTO, toAgentConversationSummaryDTO } from '../lib/serialize'
 import { askAgent, getConversation, listConversations, type AgentActor } from '../services/agent-service'
 import { captureFor } from '../lib/analytics/request'
 
+/**
+ * O INOVA tem rota própria (`/inova/admin/chat/*`, em `routes/inova.ts`), com
+ * a guarda certa (`ensureInovaModuleEnabled`, não `gente-gestao`) e o
+ * tratamento do próprio `InovaError`. Esta rota genérica não reconhece
+ * `InovaError` — deixar `inova` passar aqui faria a checagem de módulo
+ * estourar como 500 em vez de 403, e ainda liberaria o chat do INOVA para
+ * qualquer SUBADMIN de Gente e Gestão, sem nenhum direito de administração do
+ * INOVA. Por isso `inova` é rejeitado especificamente aqui, sem mexer em
+ * `isAgentKey`/`AgentKey` (que continuam válidos para o resto do sistema).
+ */
+type GenericAgentKey = Exclude<AgentKey, 'inova'>
+
+function isGenericAgentKey(value: unknown): value is GenericAgentKey {
+  return isAgentKey(value) && value !== 'inova'
+}
+
 const agentParamsSchema = z.object({
-  agent: z.string().refine(isAgentKey, { message: 'Agente desconhecido.' }),
+  agent: z.string().refine(isGenericAgentKey, { message: 'Agente desconhecido.' }),
 })
 
 const conversationParamsSchema = agentParamsSchema.extend({ id: z.string().min(1) })

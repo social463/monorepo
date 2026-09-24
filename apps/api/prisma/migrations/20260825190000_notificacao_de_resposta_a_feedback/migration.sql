@@ -1,0 +1,13 @@
+-- Notificação de resposta a um feedback.
+--
+-- Responder já existia (mural, e agora também o perfil), mas não avisava
+-- ninguém: quem escreveu o feedback e quem o recebeu só descobriam a resposta
+-- se voltassem à tela por conta própria.
+--
+-- Um tipo só, e não um par COMMENT/COMMENT_REPLY como em resenha e comunicado:
+-- resposta a feedback é lista plana, sem thread — o que muda entre quem é dono
+-- do feedback e quem só respondeu antes é o TÍTULO, não o tipo.
+--
+-- `ADD VALUE` dentro de transação é aceito desde o Postgres 12, contanto que o
+-- valor não seja usado no mesmo bloco — e não é.
+ALTER TYPE "NotificationType" ADD VALUE IF NOT EXISTS 'FEEDBACK_COMMENT';

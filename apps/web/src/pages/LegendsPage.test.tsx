@@ -125,7 +125,7 @@ describe("LegendsPage — comportamento existente (filtro, busca, ex-lendas)", (
             {
               user: { id: "u1", name: "Ana Souza", position: "Backend" },
               feedbacksReceived: 5,
-              badges: [{ id: "ub1", awardedAt: "2026-06-01T00:00:00.000Z", badge: { id: "b1", slug: "reconhecido", name: "Reconhecido", description: "d", kind: "IMPACT", iconKey: "star", threshold: 1, categorySlug: null } }],
+              badges: [{ id: "ub1", awardedAt: "2026-06-01T00:00:00.000Z", badge: { id: "b1", slug: "reconhecido", name: "Reconhecido", description: "d", kind: "IMPACT", iconKey: "star", threshold: 1, categorySlug: null } }], badgeCategoryId: null, badgeCategoryName: null, rewardPoints: null, rewardCoins: null,
             },
             {
               user: { id: "u2", name: "Bruno Lima", position: "Frontend" },

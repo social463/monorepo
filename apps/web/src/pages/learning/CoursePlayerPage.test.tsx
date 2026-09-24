@@ -1,17 +1,20 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { vi, type Mock } from 'vitest'
 import type { CourseDetailDTO } from '@legends/shared'
 import { CoursePlayerPage } from './CoursePlayerPage'
-import { getCourse } from '../../lib/learning-api'
+import { getCourse, rateCourse, requestCourseCertificate } from '../../lib/learning-api'
 
 vi.mock('../../lib/learning-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/learning-api')>()
-  return { ...actual, getCourse: vi.fn() }
+  return { ...actual, getCourse: vi.fn(), rateCourse: vi.fn(), requestCourseCertificate: vi.fn() }
 })
 
 const mockGetCourse = getCourse as unknown as Mock
+const mockRateCourse = rateCourse as unknown as Mock
+const mockRequestCertificate = requestCourseCertificate as unknown as Mock
 
 function buildCourse(overrides: Partial<CourseDetailDTO> = {}): CourseDetailDTO {
   return {
@@ -19,6 +22,10 @@ function buildCourse(overrides: Partial<CourseDetailDTO> = {}): CourseDetailDTO 
     title: 'Liderança na prática',
     shortDescription: 'Conduzir 1:1 e dar feedback.',
     coverUrl: null,
+    icon: null,
+    primaryColor: null,
+    bannerUrl: null,
+    introVideoUrl: null,
     category: 'Liderança',
     level: 'INTERMEDIATE',
     durationMinutes: 30,
@@ -41,7 +48,7 @@ function buildCourse(overrides: Partial<CourseDetailDTO> = {}): CourseDetailDTO 
     description: null,
     objectives: [],
     prerequisites: null,
-    instructorBio: null,
+    instructors: [],
     modules: [
       {
         id: 'module-1',
@@ -54,9 +61,7 @@ function buildCourse(overrides: Partial<CourseDetailDTO> = {}): CourseDetailDTO 
             moduleId: 'module-1',
             title: 'Aula 1',
             description: null,
-            type: 'VIDEO',
-            videoUrl: null,
-            contentHtml: '<p>Conteúdo</p>',
+            blocks: [{ id: 'b1', type: 'text', text: 'Conteúdo' }],
             durationMinutes: 30,
             sortOrder: 0,
             completed: false,
@@ -69,6 +74,7 @@ function buildCourse(overrides: Partial<CourseDetailDTO> = {}): CourseDetailDTO 
     completedLessons: 0,
     myRating: null,
     certificate: null,
+    certificateRequest: null,
     finalQuizId: null,
     ...overrides,
   }
@@ -124,5 +130,84 @@ describe('CoursePlayerPage — links de quiz', () => {
 
     await screen.findByText('Liderança na prática')
     expect(screen.queryByRole('link', { name: 'Fazer quiz final' })).not.toBeInTheDocument()
+  })
+})
+
+// Documento 4, seção 9.3: o certificado era 100% automático — a pessoa não
+// tinha o que clicar nem o que ler enquanto a fila não andava.
+describe('CoursePlayerPage — solicitação de certificado', () => {
+  it('trava o botão enquanto o curso não está concluído', async () => {
+    renderPage(buildCourse())
+
+    const botao = await screen.findByRole('button', { name: 'Solicitar certificado' })
+    expect(botao).toBeDisabled()
+    expect(screen.getByText(/Conclua todas as aulas do curso/)).toBeInTheDocument()
+  })
+
+  it('solicita o certificado com o curso concluído', async () => {
+    const course = buildCourse({
+      enrollment: {
+        status: 'COMPLETED',
+        progressPct: 100,
+        completedAt: '2026-08-01T00:00:00.000Z',
+        lastAccessedAt: null,
+        lastLessonId: null,
+      },
+    })
+    mockRequestCertificate.mockResolvedValue({ course })
+    renderPage(course)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Solicitar certificado' }))
+
+    expect(mockRequestCertificate).toHaveBeenCalledWith('course-1')
+  })
+
+  it('mostra o estado da fila em vez do botão quando já solicitou', async () => {
+    renderPage(
+      buildCourse({
+        certificateRequest: { status: 'PENDING', rejectionReason: null, createdAt: '2026-08-01T00:00:00.000Z' },
+      }),
+    )
+
+    expect(await screen.findByText(/Solicitação enviada/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Solicitar certificado' })).not.toBeInTheDocument()
+  })
+
+  it('deixa pedir de novo depois de uma recusa, com o motivo à vista', async () => {
+    renderPage(
+      buildCourse({
+        enrollment: {
+          status: 'COMPLETED',
+          progressPct: 100,
+          completedAt: '2026-08-01T00:00:00.000Z',
+          lastAccessedAt: null,
+          lastLessonId: null,
+        },
+        certificateRequest: {
+          status: 'REJECTED',
+          rejectionReason: 'Falta o quiz final.',
+          createdAt: '2026-08-01T00:00:00.000Z',
+        },
+      }),
+    )
+
+    expect(await screen.findByText(/Falta o quiz final\./)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Solicitar novamente' })).toBeEnabled()
+  })
+})
+
+// Documento 4, seção 9.4: salvava em silêncio, e o rótulo "Atualizar avaliação"
+// não confirmava envio nenhum.
+describe('CoursePlayerPage — avaliação do curso', () => {
+  it('confirma o envio e nunca oferece "Atualizar avaliação"', async () => {
+    mockRateCourse.mockResolvedValue({ rating: { rating: 5, comment: null, updatedAt: '2026-08-01T00:00:00.000Z' } })
+    renderPage(buildCourse({ myRating: { rating: 4, comment: null, updatedAt: '2026-08-01T00:00:00.000Z' } }))
+
+    const botao = await screen.findByRole('button', { name: 'Enviar avaliação' })
+    expect(screen.queryByRole('button', { name: 'Atualizar avaliação' })).not.toBeInTheDocument()
+
+    await userEvent.click(botao)
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Obrigada pelo seu Feedback!')
   })
 })

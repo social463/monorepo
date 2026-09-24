@@ -10,7 +10,6 @@
     "dev": "pnpm -r --parallel dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "test:changed": "pnpm -r test:changed",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:migrate": "pnpm --filter @legends/api exec prisma migrate dev",

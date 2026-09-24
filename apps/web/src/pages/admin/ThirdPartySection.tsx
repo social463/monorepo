@@ -7,7 +7,7 @@ import type {
   ThirdPartyInviteDTO,
   FeatureKey,
 } from '@legends/shared'
-import {isSectorAdminOnly, AREAS, AREA_LABELS, COLLABORATOR_FEATURE_KEYS, FEATURE_LABELS } from '@legends/shared'
+import {isSectorAdminOnly, AREAS, AREA_LABELS, FEATURE_LABELS, THIRD_PARTY_FEATURE_KEYS } from '@legends/shared'
 import { ApiError, apiFetch } from '../../lib/api'
 import { Icon } from '../../components/Icon'
 import { Select } from '../../components/Select'
@@ -25,8 +25,10 @@ function FeatureChecklist({
     <div className="grid grid-cols-2 gap-sm sm:grid-cols-3">
       {/* Só features de colaborador: as de bloco administrativo (`gente-gestao`,
           `desenvolvimento-produto`) não valem para THIRD_PARTY — a guarda exige
-          ADMIN ou SUBADMIN — e oferecê-las aqui só sugeriria um poder inexistente. */}
-      {COLLABORATOR_FEATURE_KEYS.map((key) => (
+          ADMIN ou SUBADMIN — e oferecê-las aqui só sugeriria um poder inexistente.
+          Pelo mesmo motivo ficam de fora as internas (`metas`), que a API nega
+          a terceirizado. */}
+      {THIRD_PARTY_FEATURE_KEYS.map((key) => (
         <label key={key} className="flex items-center gap-xs font-label text-label-sm text-on-surface">
           <input
             type="checkbox"

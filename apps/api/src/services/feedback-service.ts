@@ -210,6 +210,26 @@ export function listSharedFeedbacks(
 }
 
 /**
+ * Quando a pessoa abriu o Mural de Feedbacks pela última vez. Null = nunca — e
+ * aí todo feedback compartilhado conta como novo, que é o certo para quem chega.
+ */
+export async function getFeedbackWallSeenAt(companyId: string, userId: string): Promise<Date | null> {
+  const user = await scopedPrisma(companyId).user.findUnique({
+    where: { id: userId },
+    select: { feedbackWallSeenAt: true },
+  })
+  return user?.feedbackWallSeenAt ?? null
+}
+
+/** Registra que a pessoa abriu o mural agora. Idempotente por natureza: sobrescreve. */
+export async function markFeedbackWallSeen(companyId: string, userId: string): Promise<void> {
+  await scopedPrisma(companyId).user.update({
+    where: { id: userId },
+    data: { feedbackWallSeenAt: new Date() },
+  })
+}
+
+/**
  * Aba **Recebidos**: tudo o que a pessoa recebeu, público ou privado. Lê por
  * `FeedbackRecipient` (e não por `targetId`) — é o que faz o reconhecimento
  * grupal aparecer para as N pessoas, não só para a principal.
@@ -480,21 +500,38 @@ export async function createFeedbackComment(input: {
   feedbackId: string
   message: string
   viewer: { id: string; role: string; adminAccess?: boolean; companyId: string }
-}): Promise<{ comment: FeedbackCommentWithAuthor; feedbackAuthorId: string; recipientIds: string[] }> {
+}): Promise<{
+  comment: FeedbackCommentWithAuthor
+  feedbackAuthorId: string
+  feedbackTargetId: string
+  recipientIds: string[]
+  /** Quem já tinha respondido antes desta resposta, sem repetir e sem o autor dela. */
+  previousCommenterIds: string[]
+}> {
   const message = input.message.trim()
   if (!message) throw new FeedbackError('Escreva um comentário.', 400)
   if (message.length > FEEDBACK_COMMENT_MAX_LENGTH) {
     throw new FeedbackError(`O comentário precisa ter no máximo ${FEEDBACK_COMMENT_MAX_LENGTH} caracteres.`, 400)
   }
   const feedback = await requireVisibleFeedback(input.feedbackId, input.viewer)
-  const comment = await scopedPrisma(input.viewer.companyId).feedbackComment.create({
+  const db = scopedPrisma(input.viewer.companyId)
+  const comment = await db.feedbackComment.create({
     data: { feedbackId: input.feedbackId, authorId: input.viewer.id, message },
     include: feedbackCommentInclude,
+  })
+  // Depois de criar, e filtrando quem respondeu agora: a resposta recém-gravada
+  // é do próprio autor, que nunca é avisado da própria resposta.
+  const previous = await db.feedbackComment.findMany({
+    where: { feedbackId: input.feedbackId, authorId: { not: input.viewer.id } },
+    distinct: ['authorId'],
+    select: { authorId: true },
   })
   return {
     comment,
     feedbackAuthorId: feedback.authorId,
+    feedbackTargetId: feedback.targetId,
     recipientIds: feedback.recipients.map((r) => r.userId),
+    previousCommenterIds: previous.map((c) => c.authorId),
   }
 }
 

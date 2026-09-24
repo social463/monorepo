@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  mapZoneAt,
+  TILE_SIZE,
+  tileOfPixel,
+  mapZoneAtTile,
   meetingRoomEntryTile,
   officeZoneDisplayName,
   type MapDocumentV1,
@@ -27,6 +29,8 @@ import { BroadcastBanner } from '../office/media/BroadcastBanner'
 import { useOfficeInteractions } from '../office/useOfficeInteractions'
 import { useOfficeLinks } from '../office/useOfficeLinks'
 import { useOfficeBall } from '../office/useOfficeBall'
+import { BallChargeBar } from '../office/BallChargeBar'
+import { useOfficePaintball } from '../office/useOfficePaintball'
 import { useOfficeKarts } from '../office/useOfficeKarts'
 import { CharacterCard } from '../office/CharacterCard'
 import { DeskActionPanel } from '../office/DeskActionPanel'
@@ -108,6 +112,7 @@ export function OfficePage() {
     roomChat,
     raisedHands,
     roomLock,
+    roomModeration,
     roomAudio,
     setUserStatus,
     setCharacterName,
@@ -173,7 +178,13 @@ export function OfficePage() {
   }, [bridge, editing.state.active, editing.state.dirty])
 
   const you = occupants.find((o) => o.userId === youId) ?? null
-  const zone = you && activeMap ? mapZoneAt(activeMap.document, you.x, you.y) : null
+  // A régua de pixel→tile é sempre a do mapa ATIVO — radar, grade de câmeras,
+  // reações e zona medem todos por ela. `TILE_SIZE` só cobre o instante antes
+  // de o mapa chegar.
+  const tileSize = activeMap?.document.map.tileWidth ?? TILE_SIZE
+  // `mapZoneAtTile` recebe TILE; o occupant fala pixel desde o movimento livre.
+  const youTile = you ? tileOfPixel(you, tileSize) : null
+  const zone = youTile && activeMap ? mapZoneAtTile(activeMap.document, youTile.x, youTile.y) : null
   const inMeetingRoom = zone?.type === 'meeting-room'
   const inSilenceZone = zone?.type === 'private-zone'
   const zoneOccupantIds =
@@ -181,15 +192,29 @@ export function OfficePage() {
       ? new Set(
           occupants
             .filter(
-              (o) => mapZoneAt(activeMap.document, o.x, o.y)?.properties.externalKey === zone.properties.externalKey,
+              (o) => {
+                const tile = tileOfPixel(o, tileSize)
+                return (
+                  mapZoneAtTile(activeMap.document, tile.x, tile.y)?.properties.externalKey ===
+                  zone.properties.externalKey
+                )
+              },
             )
             .map((o) => o.userId),
         )
       : null
-  const floatingReactions = useOfficeFloatingReactions(bridge, occupants, you, zoneOccupantIds, camerasExpanded)
+  const floatingReactions = useOfficeFloatingReactions(
+    bridge,
+    occupants,
+    you,
+    zoneOccupantIds,
+    tileSize,
+    camerasExpanded,
+  )
   const annotations = useScreenAnnotations(bridge, youId)
   const kartAction = useOfficeKarts(bridge, you, karts, !editing.state.active)
   const ballAction = useOfficeBall(bridge, you, balls, !editing.state.active)
+  const paintball = useOfficePaintball(bridge, you, !editing.state.active)
   const { nearbyLink } = useOfficeLinks(
     you,
     activeMap?.document,
@@ -310,8 +335,10 @@ export function OfficePage() {
           const row0 = Math.floor(bounds.y / tileHeight)
           const col1 = Math.floor((bounds.x + bounds.width - 1) / tileWidth)
           const row1 = Math.floor((bounds.y + bounds.height - 1) / tileHeight)
-          const dx = Math.max(col0 - you.x, 0, you.x - col1)
-          const dy = Math.max(row0 - you.y, 0, you.y - row1)
+          // A mesa é medida em COLUNA/LINHA; a pessoa, em pixel.
+          const tile = tileOfPixel(you, tileWidth)
+          const dx = Math.max(col0 - tile.x, 0, tile.x - col1)
+          const dy = Math.max(row0 - tile.y, 0, tile.y - row1)
           const distance = Math.max(dx, dy)
           return distance <= 1 ? { reminder, distance } : null
         })
@@ -685,6 +712,7 @@ export function OfficePage() {
             name={o.name}
             isGuest={o.isGuest}
             status={o.status}
+            isRoomManager={o.userId === roomModeration.currentManager?.userId}
             cameraTrack={o.cameraTrack}
             screenTrack={o.screenTrack}
             mirrored={o.mirrored}
@@ -741,6 +769,9 @@ export function OfficePage() {
               onCall={interactions.call}
               onFollow={interactions.follow}
               onViewProfile={interactions.viewProfile}
+              roomManagerId={roomModeration.currentManager?.userId ?? null}
+              removableUserIds={roomOccupants.map((o) => o.userId)}
+              onRemoveFromRoom={roomModeration.canRemove ? roomModeration.remove : undefined}
             />
           </aside>
         </div>
@@ -825,7 +856,7 @@ export function OfficePage() {
 
       {media.roomName !== null && media.roomName === media.openRoom && (
         <div className="absolute bottom-4 left-[calc(68px+1rem)] z-20">
-          <ProximityRadar you={you} occupants={occupants} micEnabled={media.micEnabled} />
+          <ProximityRadar you={you} occupants={occupants} micEnabled={media.micEnabled} tileSize={tileSize} />
         </div>
       )}
 
@@ -845,7 +876,7 @@ export function OfficePage() {
       {/* Grade de câmeras em tela cheia (Meet-style) — fora do modo
           expandido, este componente não renderiza nada visível. */}
       <MediaTiles
-        remotes={nearbyRemotesForGrid(media.remotes, occupants, you, !!zone)}
+        remotes={nearbyRemotesForGrid(media.remotes, occupants, you, !!zone, tileSize)}
         local={local}
         expanded={camerasExpanded}
         onToggleExpanded={() => setCamerasExpanded((value) => !value)}
@@ -860,6 +891,8 @@ export function OfficePage() {
         raisedHandQueue={raisedHands.queue}
         youId={youId}
         remoteUserVolumes={remoteUserVolumes}
+        removableUserIds={roomOccupants.map((o) => o.userId)}
+        onRemoveFromRoom={roomModeration.canRemove ? roomModeration.remove : undefined}
         annotations={annotations}
         onAnnotateStateChange={setAnnotateState}
       />
@@ -889,6 +922,7 @@ export function OfficePage() {
           media={media}
           zoneName={zoneName}
           silenced={inSilenceZone}
+          removedFromRoomBy={roomModeration.removedFrom?.byName ?? null}
           micLocked={inSilenceZone}
           broadcast={broadcast}
           canBroadcast={canBroadcast}
@@ -1154,63 +1188,96 @@ export function OfficePage() {
         </div>
       )}
 
-      {ballAction.canKick && !kartAction.canInteract && !editing.state.active && !reminderPlacement && (
-        <div className="absolute bottom-28 left-1/2 z-40 flex -translate-x-1/2 items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
-          <Icon name="sports_soccer" className="text-[18px] text-primary" />
-          <button
-            type="button"
-            onClick={() => ballAction.kick('touch')}
-            className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest"
-          >
-            <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">Z</kbd>
-            tocar
-          </button>
-          <span className="text-on-surface-variant">·</span>
-          <button
-            type="button"
-            onClick={(event) => ballAction.kick('kick', event.shiftKey)}
-            className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest"
-          >
-            <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">X</kbd>
-            chutar
-          </button>
-          <span className="text-on-surface-variant">·</span>
-          <button
-            type="button"
-            onClick={(event) => ballAction.kick('lob', event.shiftKey)}
-            className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest"
-          >
-            <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">C</kbd>
-            por cima
-          </button>
-        </div>
-      )}
+      {/*
+        Avisos de ação ao alcance. Ficam TODOS numa coluna só, e não cada um
+        com o seu `bottom`: dois deles podem estar na tela ao mesmo tempo (dá
+        para andar armado até perto da bola), e afastar um do outro no olho
+        rende exatamente o que rendeu — a diferença de `bottom` menor que a
+        altura do chip, um por cima do outro. Aqui o `gap` resolve para
+        qualquer combinação, agora e quando entrar o próximo aviso.
+      */}
+      {!editing.state.active && !reminderPlacement && (
+        <div className="pointer-events-none absolute bottom-28 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-sm">
+          {/*
+            Só quem está ARMADO vê o aviso: o `Q` que pega o marcador mora no
+            painel de atalhos. Um chip permanente convidando o escritório
+            inteiro a atirar é ruído para quem só quer trabalhar.
+          */}
+          {paintball.armed && (
+            <div className="pointer-events-auto flex items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
+              <Icon name="colorize" className="text-[18px] text-primary" />
+              <button
+                type="button"
+                onClick={() => paintball.fire()}
+                disabled={!paintball.canFire}
+                className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest disabled:opacity-40"
+              >
+                <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">V</kbd>
+                atirar
+              </button>
+            </div>
+          )}
 
-      {kartAction.canInteract && !editing.state.active && !reminderPlacement && (
-        <div className="pointer-events-none absolute bottom-28 left-1/2 z-40 flex -translate-x-1/2 items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
-          <Icon name="sports_motorsports" className="text-[18px] text-primary" />
-          <span>
-            Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd>{' '}
-            para {kartAction.riding ? 'estacionar' : 'dirigir'}
-          </span>
-        </div>
-      )}
+          {ballAction.canKick && !kartAction.canInteract && (
+            <div className="pointer-events-auto flex items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
+              <Icon name="sports_soccer" className="text-[18px] text-primary" />
+              <button type="button" onClick={() => ballAction.kick('touch')} className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest">
+                <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">Z</kbd>
+                tocar
+              </button>
+              <span className="text-on-surface-variant">·</span>
+              <button
+                type="button"
+                onClick={(event) => ballAction.kick('kick', event.shiftKey)}
+                className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest"
+              >
+                <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">X</kbd>
+                chutar
+              </button>
+              <span className="text-on-surface-variant">·</span>
+              <button
+                type="button"
+                onClick={(event) => ballAction.kick('lob', event.shiftKey)}
+                className="flex items-center gap-1.5 rounded-full px-2 py-0.5 transition hover:bg-surface-container-highest"
+              >
+                <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">C</kbd>
+                por cima
+              </button>
+            </div>
+          )}
 
-      {nearbyDeskReminder && !editing.state.active && !kartAction.canInteract && !ballAction.canKick && !reminderPlacement && (
-        <div className="pointer-events-none absolute bottom-28 left-1/2 z-40 flex -translate-x-1/2 items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
-          <Icon name="redeem" className="text-[18px] text-primary" />
-          <span>
-            Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd> para abrir o lembrete
-          </span>
-        </div>
-      )}
+          {ballAction.charging && (
+            <div className="pointer-events-none flex justify-center">
+              <BallChargeBar charging={ballAction.charging} />
+            </div>
+          )}
 
-      {nearbyLink && !editing.state.active && !kartAction.canInteract && !ballAction.canKick && !nearbyDeskReminder && !reminderPlacement && (
-        <div className="pointer-events-none absolute bottom-28 left-1/2 z-40 flex -translate-x-1/2 items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
-          <Icon name="link" className="text-[18px] text-primary" />
-          <span>
-            Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd> para abrir “{nearbyLink.label}”
-          </span>
+          {kartAction.canInteract && (
+            <div className="flex items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
+              <Icon name="sports_motorsports" className="text-[18px] text-primary" />
+              <span>
+                Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd> para {kartAction.riding ? 'estacionar' : 'dirigir'}
+              </span>
+            </div>
+          )}
+
+          {nearbyDeskReminder && !kartAction.canInteract && !ballAction.canKick && (
+            <div className="flex items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
+              <Icon name="redeem" className="text-[18px] text-primary" />
+              <span>
+                Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd> para abrir o lembrete
+              </span>
+            </div>
+          )}
+
+          {nearbyLink && !kartAction.canInteract && !ballAction.canKick && !nearbyDeskReminder && (
+            <div className="flex items-center gap-sm rounded-full border border-outline-variant/40 bg-surface-container/95 px-lg py-sm font-label text-label-md text-on-surface shadow-lg backdrop-blur">
+              <Icon name="link" className="text-[18px] text-primary" />
+              <span>
+                Aperte <kbd className="rounded bg-surface-container-highest px-1.5 py-0.5 font-label text-label-sm">E</kbd> para abrir “{nearbyLink.label}”
+              </span>
+            </div>
+          )}
         </div>
       )}
 

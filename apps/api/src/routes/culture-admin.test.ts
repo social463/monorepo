@@ -730,3 +730,99 @@ describe('admin — material pessoal do kit', () => {
     await app.close()
   })
 })
+
+/**
+ * Os materiais da chegada: os MESMOS materiais pessoais, com a janela dos 90
+ * dias decidida no servidor. O que se testa aqui é a janela — a lista já é
+ * coberta acima.
+ */
+describe('materiais da chegada no perfil', () => {
+  async function comAdmissao(app: ReturnType<typeof buildApp>, diasAtras: number) {
+    const gg = await makeUser(app, 'SUBADMIN')
+    const dono = await makeUser(app, 'LEGEND', [])
+    await prisma.user.update({
+      where: { id: dono.user.id },
+      data: { joinedAt: new Date(Date.now() - diasAtras * 86_400_000) },
+    })
+    const key = `personal-assets/company-emr/${dono.user.id}/plano.pdf`
+    const enviado = await app.inject({
+      method: 'POST',
+      url: '/admin/culture/personal-assets',
+      headers: auth(gg.token),
+      payload: {
+        recipientId: dono.user.id,
+        title: 'Plano de 90 dias',
+        storageKey: key,
+        fileName: 'plano-90-dias.pdf',
+        kind: 'DOCUMENT',
+      },
+    })
+    expect(enviado.statusCode).toBe(201)
+    return { gg, dono }
+  }
+
+  it('quem chegou há 10 dias recebe o material e os dias que faltam', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { dono } = await comAdmissao(app, 10)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/culture/onboarding-kit',
+      headers: auth(dono.token),
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().active).toBe(true)
+    expect(res.json().daysLeft).toBe(80)
+    expect(res.json().assets.map((a: { title: string }) => a.title)).toEqual(['Plano de 90 dias'])
+
+    await app.close()
+  })
+
+  /**
+   * Passados os 90 dias a lista vem VAZIA, e não só `active: false`: material
+   * de uma pessoa não trafega para uma tela que não vai desenhá-lo. Ele
+   * continua em `/culture/personal-assets`, que é onde mora para sempre.
+   */
+  it('passados os 90 dias a janela fecha, e a lista nem é carregada', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { dono } = await comAdmissao(app, 91)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/culture/onboarding-kit',
+      headers: auth(dono.token),
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ active: false, endsAt: null, daysLeft: 0, assets: [] })
+
+    const naAba = await app.inject({
+      method: 'GET',
+      url: '/culture/personal-assets',
+      headers: auth(dono.token),
+    })
+    expect(naAba.json().assets).toHaveLength(1)
+
+    await app.close()
+  })
+
+  it('o recorte é o token: o kit de um colega não é alcançável', async () => {
+    const app = buildApp()
+    await app.ready()
+    const { dono } = await comAdmissao(app, 5)
+    const colega = await makeUser(app, 'LEGEND', [])
+
+    const res = await app.inject({
+      method: 'GET',
+      // Não há parâmetro de pessoa na rota — o que sobra é tentar por query,
+      // que é ignorada.
+      url: `/culture/onboarding-kit?userId=${dono.user.id}`,
+      headers: auth(colega.token),
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().assets).toHaveLength(0)
+
+    await app.close()
+  })
+})

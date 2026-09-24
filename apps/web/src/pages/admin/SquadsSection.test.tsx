@@ -53,6 +53,9 @@ function setupFetch() {
     if (path === '/admin/squads/sq1' && method === 'PATCH') {
       return Promise.resolve({ squad: { id: 'sq1', name: 'B2B', slug: 'b2b', active: true, leaderId: 'u2', leader: { id: 'u2', name: 'Emerson Marques' }, sectorId: 'sector-1', members: [{ id: 'u1', name: 'Arthur Pedro' }] } })
     }
+    if (path === '/admin/squads/sq1' && method === 'DELETE') {
+      return Promise.resolve(undefined)
+    }
     if (path === '/admin/squads/sq1/members' && method === 'POST') {
       return Promise.resolve({ squad: { id: 'sq1', name: 'B2B', slug: 'b2b', active: true, leaderId: null, leader: null, sectorId: 'sector-1', members: [{ id: 'u1', name: 'Arthur Pedro' }, { id: 'u2', name: 'Emerson Marques' }] } })
     }
@@ -149,6 +152,27 @@ describe('SquadsSection', () => {
         expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ sectorId: 'sector-1' }) }),
       ),
     )
+  })
+
+  it('exclui a squad depois de confirmar, avisando quantos integrantes saem', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderSection()
+    await expandPlataformaGroup()
+    fireEvent.click(screen.getByRole('button', { name: /^excluir$/i }))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('1 integrante sai dela.'))
+    await waitFor(() =>
+      expect(mockApiFetch).toHaveBeenCalledWith('/admin/squads/sq1', expect.objectContaining({ method: 'DELETE' })),
+    )
+    confirm.mockRestore()
+  })
+
+  it('não exclui quando a confirmação é recusada', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderSection()
+    await expandPlataformaGroup()
+    fireEvent.click(screen.getByRole('button', { name: /^excluir$/i }))
+    expect(mockApiFetch).not.toHaveBeenCalledWith('/admin/squads/sq1', expect.objectContaining({ method: 'DELETE' }))
+    confirm.mockRestore()
   })
 
   it('cria squad com o setor selecionado no formulário', async () => {

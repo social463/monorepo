@@ -52,8 +52,15 @@ const templateBodySchema = z.object({
   title: z.string().trim().min(1).max(CERTIFICATE_TEMPLATE_TITLE_MAX_LENGTH),
   backgroundUrl: z.string().trim().url().nullable().optional().or(z.literal('')),
   // Cor de destaque interpolada direto num atributo SVG pelo renderer — restrita a hex
-  // (o que um seletor de cor de admin produz), não texto livre.
-  accentColor: z.string().trim().regex(/^#[0-9a-f]{3,8}$/i, 'Informe uma cor em hexadecimal (ex.: #2f8b4d).'),
+  // (o que um seletor de cor de admin produz), não texto livre. Vazia, herda a
+  // cor institucional da empresa.
+  accentColor: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-f]{3,8}$/i, 'Informe uma cor em hexadecimal (ex.: #2f8b4d).')
+    .nullable()
+    .optional()
+    .or(z.literal('')),
   signatureName: z.string().trim().min(1).max(120),
   signatureRole: z.string().trim().min(1).max(120),
   signatureImageUrl: z.string().trim().url().nullable().optional().or(z.literal('')),

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { apiFetch, setAccessToken, getAccessToken } from './api'
+import { apiFetch, setAccessToken, getAccessToken, onSessionExpired } from './api'
 
 function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {}) {
   return {
@@ -82,6 +82,132 @@ describe('apiFetch', () => {
     await Promise.all([apiFetch('/a'), apiFetch('/b'), apiFetch('/c')])
     const refreshCalls = fetchMock.mock.calls.filter((c) => c[0] === '/api/auth/refresh')
     expect(refreshCalls).toHaveLength(1)
+  })
+
+  it('refresh que falhou por rede não zera o token nem derruba a sessão', async () => {
+    // O caso do envio de álbum: `/auth/refresh` é a única chamada do fluxo que
+    // bate no banco, então é ela que cai sozinha num blip. Zerar o token aqui
+    // fazia a requisição SEGUINTE sair sem Authorization e tomar 401 na hora —
+    // uma foto atrás da outra virava "Não autorizado" até a rede voltar.
+    vi.useFakeTimers()
+    setAccessToken('valido')
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/auth/refresh') return Promise.reject(new TypeError('Failed to fetch'))
+      return Promise.resolve(jsonResponse({}, { ok: false, status: 401 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const pendente = apiFetch('/uploads/event-photos/presign', { method: 'POST', body: '{}' })
+    const assercao = expect(pendente).rejects.toMatchObject({ status: 401 })
+    await vi.runAllTimersAsync()
+    await assercao
+
+    expect(getAccessToken()).toBe('valido')
+    vi.useRealTimers()
+  })
+
+  it('tenta o refresh duas vezes quando a primeira falha por rede', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn((url: string) => {
+      if (url !== '/api/auth/refresh') {
+        return Promise.resolve(
+          getAccessToken() ? jsonResponse({ ok: true }) : jsonResponse({}, { ok: false, status: 401 }),
+        )
+      }
+      const chamadas = fetchMock.mock.calls.filter((c) => c[0] === '/api/auth/refresh').length
+      return chamadas === 1
+        ? Promise.resolve(jsonResponse({}, { ok: false, status: 503 }))
+        : Promise.resolve(jsonResponse({ accessToken: 'novo' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const pendente = apiFetch('/profile')
+    await vi.runAllTimersAsync()
+    await pendente
+
+    expect(fetchMock.mock.calls.filter((c) => c[0] === '/api/auth/refresh')).toHaveLength(2)
+    expect(getAccessToken()).toBe('novo')
+    vi.useRealTimers()
+  })
+
+  it('refresh recusado com 401 zera o token e não insiste', async () => {
+    // Cookie que não vale mais: repetir só atrasaria a ida para o login.
+    vi.useFakeTimers()
+    setAccessToken('velho')
+    const fetchMock = vi.fn((_url: string) => Promise.resolve(jsonResponse({}, { ok: false, status: 401 })))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const pendente = apiFetch('/profile')
+    const assercao = expect(pendente).rejects.toMatchObject({ status: 401 })
+    await vi.runAllTimersAsync()
+    await assercao
+
+    expect(fetchMock.mock.calls.filter((c) => c[0] === '/api/auth/refresh')).toHaveLength(1)
+    expect(getAccessToken()).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('refresh recusado avisa que a sessão expirou (é o que leva ao login)', async () => {
+    // Sem o aviso, o token sumia da memória e a tela continuava de pé
+    // respondendo "Não autorizado" a cada ação, sem caminho de volta.
+    vi.useFakeTimers()
+    setAccessToken('velho')
+    const avisos = vi.fn()
+    const cancelar = onSessionExpired(avisos)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse({}, { ok: false, status: 401 }))))
+
+    const pendente = apiFetch('/profile')
+    const assercao = expect(pendente).rejects.toMatchObject({ status: 401 })
+    await vi.runAllTimersAsync()
+    await assercao
+
+    expect(avisos).toHaveBeenCalledTimes(1)
+    cancelar()
+    vi.useRealTimers()
+  })
+
+  it('não avisa quando não havia sessão nesta aba (bootstrap de visitante)', async () => {
+    // Quem nunca entrou cai aqui a cada carregamento: o `AuthProvider` já trata
+    // o bootstrap, e o aviso só seria ruído.
+    vi.useFakeTimers()
+    setAccessToken(null)
+    const avisos = vi.fn()
+    const cancelar = onSessionExpired(avisos)
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse({}, { ok: false, status: 401 }))))
+
+    const pendente = apiFetch('/profile')
+    const assercao = expect(pendente).rejects.toMatchObject({ status: 401 })
+    await vi.runAllTimersAsync()
+    await assercao
+
+    expect(avisos).not.toHaveBeenCalled()
+    cancelar()
+    vi.useRealTimers()
+  })
+
+  it('refresh que falhou por rede NÃO avisa sessão expirada', async () => {
+    vi.useFakeTimers()
+    setAccessToken('valido')
+    const avisos = vi.fn()
+    const cancelar = onSessionExpired(avisos)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        url === '/api/auth/refresh'
+          ? Promise.reject(new TypeError('Failed to fetch'))
+          : Promise.resolve(jsonResponse({}, { ok: false, status: 401 })),
+      ),
+    )
+
+    const pendente = apiFetch('/profile')
+    const assercao = expect(pendente).rejects.toMatchObject({ status: 401 })
+    await vi.runAllTimersAsync()
+    await assercao
+
+    expect(avisos).not.toHaveBeenCalled()
+    expect(getAccessToken()).toBe('valido')
+    cancelar()
+    vi.useRealTimers()
   })
 
   it('não leva mensagem de 5xx para a tela', async () => {

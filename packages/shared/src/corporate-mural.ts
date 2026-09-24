@@ -3,6 +3,7 @@ import type { ReactionSummary } from './feedback'
 import type { AttachedGif } from './gif'
 import type { AttachedImage } from './image'
 import { isFullAdmin } from './permissions'
+import { isLeaderRole } from './enums'
 import { richDocLineCount, type RichDoc } from './rich-text'
 import type { MentionDTO, ReactorRef } from './review'
 
@@ -43,12 +44,19 @@ export const CORPORATE_POST_REACTIONS = [
 ] as const
 export type CorporatePostReactionEmoji = (typeof CORPORATE_POST_REACTIONS)[number]
 
-/** Ciclo de vida do post. `PENDING` é o que a fila de aprovação enxerga. */
-export const CORPORATE_POST_STATUSES = ['PENDING', 'PUBLISHED', 'REJECTED'] as const
+/**
+ * Ciclo de vida do post. `PENDING` é o que a fila de aprovação enxerga.
+ *
+ * `SCHEDULED` (Documento 4, seção 12) é publicação marcada para depois: fica
+ * fora do feed até o scheduler virar para `PUBLISHED` — que é também quem
+ * dispara a notificação. Só quem publica direto agenda.
+ */
+export const CORPORATE_POST_STATUSES = ['PENDING', 'SCHEDULED', 'PUBLISHED', 'REJECTED'] as const
 export type CorporatePostStatus = (typeof CORPORATE_POST_STATUSES)[number]
 
 export const CORPORATE_POST_STATUS_LABELS: Record<CorporatePostStatus, string> = {
   PENDING: 'Aguardando aprovação',
+  SCHEDULED: 'Agendado',
   PUBLISHED: 'Publicado',
   REJECTED: 'Recusado',
 }
@@ -57,16 +65,102 @@ export const CORPORATE_POST_STATUS_LABELS: Record<CorporatePostStatus, string> =
  * Destino do comunicado. Escopo em coluna, e não "lista de setores vazia =
  * todos": o `ALL` explícito sobrevive a alguém apagar o último setor da lista.
  */
-export const CORPORATE_POST_AUDIENCES = ['ALL', 'SECTORS'] as const
+export const CORPORATE_POST_AUDIENCES = ['ALL', 'SECTORS', 'LEADERS'] as const
 export type CorporatePostAudience = (typeof CORPORATE_POST_AUDIENCES)[number]
 
 export const CORPORATE_POST_AUDIENCE_LABELS: Record<CorporatePostAudience, string> = {
   ALL: 'Toda a empresa',
   SECTORS: 'Setores específicos',
+  LEADERS: 'Liderança',
+}
+
+/**
+ * Escopos que NÃO têm setor — publicar neles não pede escolha de setor nenhuma.
+ *
+ * `LEADERS` é a liderança inteira da empresa, não a de um setor: cruzar papel e
+ * setor seria outra feature, e o composer não teria como expressá-la sem virar
+ * dois campos que se contradizem.
+ */
+export function audienceHasSectors(audience: CorporatePostAudience): boolean {
+  return audience === 'SECTORS'
 }
 
 export const CORPORATE_POST_ATTACHMENT_KINDS = ['IMAGE', 'VIDEO', 'DOCUMENT'] as const
 export type CorporatePostAttachmentKind = (typeof CORPORATE_POST_ATTACHMENT_KINDS)[number]
+
+// ----- Enquete (spec 2026-09-08) -----
+//
+// Os limites são os mesmos da enquete da Resenha, de propósito: é a mesma
+// pergunta feita em outro lugar, e divergir aqui só criaria duas regras para o
+// usuário decorar. Ver `review.ts`.
+
+export const CORPORATE_POST_POLL_QUESTION_MAX_LENGTH = 140
+export const CORPORATE_POST_POLL_OPTION_MAX_LENGTH = 80
+export const CORPORATE_POST_POLL_MIN_OPTIONS = 2
+export const CORPORATE_POST_POLL_MAX_OPTIONS = 10
+
+/**
+ * Este viewer está no PÚBLICO-ALVO do post?
+ *
+ * Não é a mesma pergunta que o recorte do feed responde: lá, quem modera
+ * enxerga qualquer post ignorando o alcance, para poder moderar. Votar é
+ * participar, e não moderar — numa enquete dirigida a um setor, o voto de quem
+ * está fora dele suja o resultado. Daí a checagem sem o atalho do moderador.
+ *
+ * Mora no contrato, e não no service, porque `serialize.ts` precisa dela como
+ * VALOR e não pode importar valor de um service: isso inverte a camada
+ * (lib → services) e fecha um ciclo que já quebrou o mock do teste de campanha.
+ */
+export function isInCorporatePostAudience(
+  post: { audienceScope: CorporatePostAudience; sectors: { sectorId: string }[] },
+  viewer: { sectorId: string; role: string },
+): boolean {
+  if (post.audienceScope === 'ALL') return true
+  if (post.audienceScope === 'LEADERS') return isLeaderRole(viewer.role)
+  return post.sectors.some((sector) => sector.sectorId === viewer.sectorId)
+}
+
+export interface CorporatePostPollOptionDTO {
+  id: string
+  text: string
+  /** `null` até o viewer votar — o servidor não manda o que ele não pode ver. */
+  voteCount: number | null
+  /** Inteiro de 0 a 100; `null` pelo mesmo motivo. */
+  percentage: number | null
+}
+
+export interface CorporatePostPollDTO {
+  id: string
+  question: string
+  hasVoted: boolean
+  selectedOptionId: string | null
+  totalVotes: number | null
+  /**
+   * Se ESTE viewer pode votar. Falso para quem está fora do público-alvo — o
+   * ADMIN moderando, tipicamente, que enxerga qualquer post ignorando o alcance.
+   * Sem este campo o front mostraria um botão Votar que a API recusa.
+   */
+  canVote: boolean
+  options: CorporatePostPollOptionDTO[]
+}
+
+export interface CorporatePostPollVotersOptionDTO {
+  optionId: string
+  text: string
+  voters: ReactorRef[]
+}
+
+export interface CorporatePostPollVotesResponse {
+  pollId: string
+  question: string
+  totalVotes: number
+  options: CorporatePostPollVotersOptionDTO[]
+}
+
+export interface CreateCorporatePostPollRequest {
+  question: string
+  options: string[]
+}
 
 /**
  * A partir de quantas linhas o corpo é cortado com "Ver conteúdo completo" —
@@ -162,6 +256,38 @@ export interface CorporatePostSectorRef {
   name: string
 }
 
+/**
+ * Tipo de comunicação do Feed — a "tag" da seção 13 do Documento 3.
+ * Catálogo por empresa, gerenciado pela G&G em Administração.
+ */
+export interface CorporatePostTagDTO {
+  id: string
+  name: string
+  slug: string
+  color: string
+  active: boolean
+  order: number
+}
+
+/**
+ * Catálogo inicial de uma empresa nova.
+ *
+ * É a lista **única** que a OBS da seção 13 pede: o documento cita dois
+ * conjuntos em lugares diferentes — Institucional, Endomarketing, Benefícios e
+ * Eventos EMR (na 4.8) e Avaliação, Benefício e Treinamento (na 13) —, e aqui
+ * eles viram seis, com "Benefício"/"Benefícios" fundidos no plural.
+ */
+export const CORPORATE_POST_TAG_SEED: ReadonlyArray<{ name: string; color: string }> = [
+  { name: 'Institucional', color: '#264641' },
+  { name: 'Endomarketing', color: '#6CE190' },
+  { name: 'Benefícios', color: '#50BCFF' },
+  { name: 'Eventos EMR', color: '#FF7013' },
+  { name: 'Avaliação', color: '#9500DB' },
+  { name: 'Treinamento', color: '#FFCB05' },
+]
+
+export const CORPORATE_POST_TAG_NAME_MAX_LENGTH = 40
+
 export interface CorporatePostDTO {
   id: string
   author: PublicUser
@@ -177,8 +303,16 @@ export interface CorporatePostDTO {
   gif: AttachedGif | null
   /** Imagem anexada, ou null. Posts novos usam `attachments`. */
   image: AttachedImage | null
+  /**
+   * Enquete do post, ou null. Não disputa vaga com anexo: "banner + enquete" é
+   * o formato normal de comunicação interna, e é justamente o caso que a regra
+   * de exclusividade da Resenha proibiria.
+   */
+  poll: CorporatePostPollDTO | null
   attachments: CorporatePostAttachmentDTO[]
   status: CorporatePostStatus
+  /** Instante marcado para a publicação; só em post `SCHEDULED`. */
+  publishAt: string | null
   audience: CorporatePostAudience
   /** Setores do público-alvo; vazio quando `audience` é `ALL`. */
   audienceSectors: CorporatePostSectorRef[]
@@ -195,6 +329,14 @@ export interface CorporatePostDTO {
   /** Total de usuários distintos que reagiram (pode ser > reactors.length). */
   reactorCount: number
   commentCount: number
+  /** Tipo de comunicação; null nos comunicados anteriores à seção 13. */
+  tag: CorporatePostTagDTO | null
+  /**
+   * Se quem está olhando já leu este comunicado (model `CorporatePostRead`).
+   * É o que sustenta a marcação "Novo" na prévia da Home: o selo aparece
+   * enquanto for `false`.
+   */
+  viewerRead: boolean
   mentions: MentionDTO[]
 }
 
@@ -247,9 +389,22 @@ export interface CreateCorporatePostRequest {
   mentionedUserIds?: string[]
   gif?: AttachedGif
   attachments?: CorporatePostAttachmentInput[]
+  /**
+   * Enquete. Na edição, só é aceita enquanto ninguém votou — depois do primeiro
+   * voto trocar a pergunta tornaria o resultado mentiroso.
+   */
+  poll?: CreateCorporatePostPollRequest | null
   audience?: CorporatePostAudience
   /** Ids dos setores; obrigatório (não vazio) quando `audience` é `SECTORS`. */
   audienceSectorIds?: string[]
+  /** Tipo de comunicação (seção 13); `null` limpa na edição. */
+  tagId?: string | null
+  /**
+   * Agendamento (Documento 4, seção 12): ISO com offset. Ausente ou `null`
+   * publica na hora. Instante no passado é recusado pelo servidor, e o campo é
+   * ignorado quando o autor cai na fila de aprovação.
+   */
+  publishAt?: string | null
 }
 
 export type UpdateCorporatePostRequest = Partial<CreateCorporatePostRequest>

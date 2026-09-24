@@ -10,9 +10,11 @@ import type {
   CorporatePostCommentsResponse,
   CorporatePostDTO,
   CorporatePostFeedResponse,
+  CorporatePostTagDTO,
   CorporatePostReachResponse,
   CorporatePostReactorsResponse,
   CorporatePostReactionEmoji,
+  CorporatePostPollVotesResponse,
   CreateCorporatePostCommentRequest,
   CreateCorporatePostRequest,
   GenerateCorporatePostRequest,
@@ -33,13 +35,31 @@ export const CORPORATE_PENDING_KEY = ['corporate-posts', 'pending'] as const
  */
 type FeedPage = CorporatePostFeedResponse & { canPublish: boolean; canPublishDirectly: boolean }
 
-export function useCorporateMuralFeed() {
+/**
+ * `tagId` entra na queryKey e na URL: o filtro por tipo de comunicação é do
+ * SERVIDOR (seção 13). O feed pagina por cursor, e filtrar no cliente esconderia
+ * o comunicado que está na página seguinte.
+ */
+export function useCorporateMuralFeed(tagId?: string) {
   return useInfiniteQuery({
-    queryKey: CORPORATE_FEED_KEY,
+    queryKey: [...CORPORATE_FEED_KEY, tagId ?? 'todas'],
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) =>
-      apiFetch<FeedPage>(`/corporate-posts?limit=20${pageParam ? `&cursor=${pageParam}` : ''}`),
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams({ limit: '20' })
+      if (pageParam) params.set('cursor', pageParam)
+      if (tagId) params.set('tagId', tagId)
+      return apiFetch<FeedPage>(`/corporate-posts?${params.toString()}`)
+    },
     getNextPageParam: (last) => last.nextCursor ?? undefined,
+  })
+}
+
+/** Tipos de comunicação ativos — as pílulas do filtro e o seletor do editor. */
+export function useCorporatePostTags() {
+  return useQuery({
+    queryKey: ['corporate-post-tags'],
+    queryFn: () => apiFetch<{ tags: CorporatePostTagDTO[] }>('/corporate-post-tags'),
+    staleTime: 5 * 60 * 1000,
   })
 }
 
@@ -126,6 +146,38 @@ export function useDeleteCorporatePost() {
   return useMutation({
     mutationFn: (id: string) => apiFetch<void>(`/corporate-posts/${id}`, { method: 'DELETE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: CORPORATE_FEED_KEY }),
+  })
+}
+
+/**
+ * Voto na enquete. Invalida o feed e a lista de votantes deste post — a
+ * segunda porque o voto novo muda quem aparece agrupado por opção.
+ *
+ * Sem update otimista, de propósito: o card usa `vote.data` para mostrar o
+ * resultado na hora, e o resultado só existe depois que o servidor responde
+ * (antes do voto ele não manda contagem nenhuma).
+ */
+export function useVoteCorporatePostPoll() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (vars: { postId: string; optionId: string }) =>
+      apiFetch<{ post: CorporatePostDTO }>(`/corporate-posts/${vars.postId}/poll/vote`, {
+        method: 'POST',
+        body: JSON.stringify({ optionId: vars.optionId }),
+      }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: CORPORATE_FEED_KEY })
+      qc.invalidateQueries({ queryKey: ['corporate-posts', 'poll-votes', vars.postId] })
+    },
+  })
+}
+
+/** Quem votou em quê. Só busca quando "Ver votos" está aberto e o viewer já votou. */
+export function useCorporatePostPollVotes(postId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['corporate-posts', 'poll-votes', postId],
+    queryFn: () => apiFetch<CorporatePostPollVotesResponse>(`/corporate-posts/${postId}/poll/votes`),
+    enabled,
   })
 }
 

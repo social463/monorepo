@@ -1511,6 +1511,192 @@ describe('admin routes', () => {
     await app.close()
   })
 
+  describe('sessão de quem muda de poder', () => {
+    async function makeLegend(email: string) {
+      const alvo = await prisma.user.create({
+        data: { name: 'Alvo', email, passwordHash: 'x', role: 'LEGEND' },
+      })
+      // Sessão aberta: uma família de refresh viva, como depois de um login.
+      await prisma.refreshToken.create({
+        data: {
+          userId: alvo.id,
+          familyId: `fam-${alvo.id}`,
+          tokenHash: `hash-${alvo.id}`,
+          expiresAt: new Date(Date.now() + 86_400_000),
+        },
+      })
+      return alvo
+    }
+
+    function sessoesVivas(userId: string) {
+      return prisma.refreshToken.count({ where: { userId, revokedAt: null } })
+    }
+
+    // O access token carrega `role` e `adminAccess` (lib/jwt.ts). Sem derrubar a
+    // sessão, quem acabou de ganhar o poder ficaria até 15 min com o token
+    // antigo — vendo o painel que o front libera pelo dado fresco do banco e
+    // tomando 403 em cada gravação.
+    it('conceder acesso administrativo derruba a sessão da pessoa', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-acesso@empresa.com')
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { adminAccess: true },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(0)
+      await app.close()
+    })
+
+    it('mudar o papel derruba a sessão da pessoa', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-papel@empresa.com')
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { role: 'LEAD' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(0)
+      await app.close()
+    })
+
+    // Mexer no cadastro não é mexer no poder: derrubar a sessão a cada correção
+    // de cargo transformaria edição de rotina em logout.
+    it('editar cargo não mexe na sessão', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-cargo@empresa.com')
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { position: 'Analista' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(1)
+      await app.close()
+    })
+
+    // Mudança de setor é rotina — a importação por planilha move gente às
+    // dezenas —, então revogar ali deslogaria meia empresa de uma vez. O setor
+    // no token se acerta sozinho no próximo refresh.
+    it('mudar de setor não derruba a sessão', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-setor@empresa.com')
+      const outro = await prisma.sector.create({
+        data: { name: 'Setor Sessao', slug: 'setor-sessao', enabledFeatures: [], roles: { create: [{ role: 'LEGEND' }] } },
+      })
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { sectorId: outro.id },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(1)
+      await app.close()
+    })
+
+    // Mesmo motivo do PATCH do super-admin: sem isto o refresh continuaria
+    // renovando a sessão aberta com a senha antiga.
+    it('redefinir a senha derruba a sessão da pessoa', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-senha@empresa.com')
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { password: 'novasenha123' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(0)
+      await app.close()
+    })
+
+    it('desativar a conta derruba a sessão da pessoa', async () => {
+      const app = buildApp()
+      await app.ready()
+      const token = await adminToken(app)
+      const alvo = await makeLegend('alvo-inativo@empresa.com')
+
+      const res = await app.inject({
+        method: 'PATCH', url: `/admin/users/${alvo.id}`,
+        headers: { authorization: `Bearer ${token}` }, payload: { active: false },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(await sessoesVivas(alvo.id)).toBe(0)
+      await app.close()
+    })
+  })
+
+  it('admin exclui a squad e o nome volta a ficar livre', async () => {
+    const app = buildApp()
+    await app.ready()
+    const token = await adminToken(app)
+
+    const created = await app.inject({
+      method: 'POST', url: '/admin/squads',
+      headers: { authorization: `Bearer ${token}` }, payload: { name: 'Receita' },
+    })
+    const squadId = created.json().squad.id
+
+    const del = await app.inject({
+      method: 'DELETE', url: `/admin/squads/${squadId}`,
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(del.statusCode).toBe(204)
+    expect(await prisma.squad.findUnique({ where: { id: squadId } })).toBeNull()
+
+    const again = await app.inject({
+      method: 'POST', url: '/admin/squads',
+      headers: { authorization: `Bearer ${token}` }, payload: { name: 'Receita' },
+    })
+    expect(again.statusCode).toBe(201)
+    await app.close()
+  })
+
+  it('subadmin só exclui squad do próprio setor (404 nas demais)', async () => {
+    const app = buildApp()
+    await app.ready()
+    const admin = await adminToken(app)
+    const outroSetor = await prisma.sector.create({
+      data: { name: 'Outro Setor Del Squad', slug: 'outro-setor-del-squad', enabledFeatures: [] },
+    })
+    const subadmin = await subadminToken(app, outroSetor.id)
+
+    const alheia = await app.inject({
+      method: 'POST', url: '/admin/squads',
+      headers: { authorization: `Bearer ${admin}` }, payload: { name: 'Squad Do Admin' },
+    })
+    const alheiaId = alheia.json().squad.id
+
+    const negado = await app.inject({
+      method: 'DELETE', url: `/admin/squads/${alheiaId}`,
+      headers: { authorization: `Bearer ${subadmin}` },
+    })
+    expect(negado.statusCode).toBe(404)
+    expect(await prisma.squad.findUnique({ where: { id: alheiaId } })).not.toBeNull()
+
+    const propria = await app.inject({
+      method: 'POST', url: '/admin/squads',
+      headers: { authorization: `Bearer ${subadmin}` }, payload: { name: 'Squad Do Subadmin' },
+    })
+    const ok = await app.inject({
+      method: 'DELETE', url: `/admin/squads/${propria.json().squad.id}`,
+      headers: { authorization: `Bearer ${subadmin}` },
+    })
+    expect(ok.statusCode).toBe(204)
+    await app.close()
+  })
+
   it('admin cria squad, adiciona membros com a regra DEV<=1, e desativa', async () => {
     const app = buildApp()
     await app.ready()

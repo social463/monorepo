@@ -127,8 +127,10 @@ const occupants: OfficeOccupant[] = [
   {
     userId: 'ana',
     name: 'Ana Silva',
-    x: 11,
-    y: 14,
+    // PIXEL — centro do tile (11,14). O occupant fala pixel desde o movimento
+    // livre; o kart e a bola ao lado também.
+    x: 368,
+    y: 464,
     dir: 'down',
     avatarSeed: null,
     avatarOptions: null,
@@ -136,8 +138,9 @@ const occupants: OfficeOccupant[] = [
   {
     userId: 'bruno',
     name: 'Bruno Costa',
-    x: 12,
-    y: 14,
+    // PIXEL — centro do tile (12,14), ao lado da Ana.
+    x: 400,
+    y: 464,
     dir: 'up',
     avatarSeed: null,
     avatarOptions: null,
@@ -300,6 +303,14 @@ function sessionValue(overrides: Partial<OfficeSessionValue> = {}): OfficeSessio
       toggle: vi.fn(),
       knocks: [],
       respond: vi.fn(),
+    },
+    roomModeration: {
+      managers: [],
+      currentManager: null,
+      // Como `canLock`: o fixture nasce fora de sala de reunião.
+      canRemove: false,
+      remove: vi.fn(),
+      removedFrom: null,
     },
     roomAudio: {
       track: null,
@@ -526,7 +537,7 @@ describe('OfficePage', () => {
     bridge.onClientMessage(onClientMessage)
     renderPage({
       bridge,
-      karts: [{ id: 'kart-1', x: 12, y: 14, dir: 'up' }],
+      karts: [{ id: 'kart-1', x: 400, y: 464, dir: 'up' }],
     })
 
     expect(screen.getByText(/para dirigir/)).toBeInTheDocument()
@@ -539,13 +550,14 @@ describe('OfficePage', () => {
     const onClientMessage = vi.fn()
     bridge.onClientMessage(onClientMessage)
     // Ana está em (11,14); a bola encostada nela.
-    renderPage({ bridge, balls: [{ id: 'ball-1', x: 12, y: 14 }] })
+    renderPage({ bridge, balls: [{ id: 'ball-1', x: 400, y: 464, vx: 0, vy: 0 }] })
 
     fireEvent.click(screen.getByRole('button', { name: /tocar/ }))
     expect(onClientMessage).toHaveBeenCalledWith({ type: 'kick-ball', power: 'touch' })
 
     fireEvent.keyDown(window, { key: 'x' })
-    expect(onClientMessage).toHaveBeenCalledWith({ type: 'kick-ball', power: 'kick' })
+    fireEvent.keyUp(window, { key: 'x' })
+    expect(onClientMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'kick-ball', power: 'kick' }))
 
     fireEvent.click(screen.getByRole('button', { name: /por cima/ }))
     expect(onClientMessage).toHaveBeenCalledWith({ type: 'kick-ball', power: 'lob' })
@@ -560,7 +572,7 @@ describe('OfficePage', () => {
     const applyMicEnabled = vi.fn(async () => {})
     renderPage({
       bridge,
-      balls: [{ id: 'ball-1', x: 12, y: 14 }],
+      balls: [{ id: 'ball-1', x: 400, y: 464, vx: 0, vy: 0 }],
       media: mediaState({ applyMicEnabled }),
     })
 

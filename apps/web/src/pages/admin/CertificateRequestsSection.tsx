@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  CERTIFICATE_REQUEST_ORIGIN_LABELS,
   CERTIFICATE_REQUEST_STATUSES,
   CERTIFICATE_REQUEST_STATUS_LABELS,
   type CertificateRequestDTO,
@@ -12,6 +13,11 @@ import { approveCertificateRequest, listCertificateRequests, rejectCertificateRe
 import { Panel, errorMessage, inputCls } from './shared'
 
 const QUERY_KEY = ['admin', 'certificate-requests']
+
+/** Centavos → "R$ 1.234,56". O valor é guardado inteiro para não arredondar. */
+function formatCents(cents: number): string {
+  return (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -64,7 +70,9 @@ function RequestRow({ request, onChanged }: { request: CertificateRequestDTO; on
       <div className="flex flex-wrap items-center justify-between gap-sm">
         <div className="min-w-0">
           <p className="truncate font-label text-label-lg text-on-surface">{request.userName}</p>
-          <p className="text-body-sm text-on-surface-variant">{request.courseTitle}</p>
+          <p className="text-body-sm text-on-surface-variant">
+            {request.courseTitle}
+          </p>
         </div>
         <span
           className={`shrink-0 rounded-full px-sm py-0.5 font-label text-label-sm ${statusBadgeCls(request.status)}`}

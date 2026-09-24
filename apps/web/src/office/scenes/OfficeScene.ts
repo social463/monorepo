@@ -1,5 +1,21 @@
 import Phaser from 'phaser'
+import { computeScreenPosition, type ScreenPosition } from '../../lib/screenPosition'
 import {
+  stepBodyAmongBlockers,
+  type BodyBlocker,
+  type BodyCollisionGrid,
+  stepBodyKart,
+  type BodyKartState,
+  stepBodyBall,
+  touchBodyBall,
+  MOVE_DIRECTION_DELTAS,
+  stepBody,
+  bodyCollisionGrid,
+  BODY_INPUT_HZ,
+  BODY_SPEED,
+  BODY_SPRINT_FACTOR,
+  type BodyInput,
+  type BodyState,
   CHARACTER_FRAME_SIZE,
   characterIdleFrame,
   characterWalkFrames,
@@ -10,6 +26,9 @@ import {
   isOfficeKartAssetId,
   mapBalls,
   isHighFiveAudible,
+  officeSoundLevel,
+  paintSplatPlacement,
+  PAINT_SPLAT_TTL_MS,
   OFFICE_NEARBY_MESSAGE_MAX_LENGTH,
   officeZoneDisplayName,
   type MapDocumentV1,
@@ -19,8 +38,10 @@ import {
   type MoveDirection,
   type TilePosition,
   type OfficeBall,
-  type OfficeBallKick,
+  type OfficeBallPower,
   type OfficeKart,
+  type BodyShot,
+  type PaintSplat,
   type Direction,
   type OfficeNearbyMessageKind,
   type OfficeOccupant,
@@ -30,18 +51,49 @@ import {
 import type { OfficeBridge } from '../OfficeBridge'
 import type { TileOrientation } from '../editing/decorationDoc'
 import type { ZoneLockKind } from '../lockedZones'
-import { MovementPredictor } from '../MovementPredictor'
+import { ArenaPredictor } from '../../arena/ArenaPredictor'
+import { ArenaInterpolator } from '../../arena/ArenaInterpolator'
 import { composeCharacterSheet } from '../../lib/character'
-import { occupantCharacterOptions, occupantTextureKey } from '../officeAvatar'
+import { occupantCharacterOptions, occupantExtraLayers, occupantTextureKey } from '../officeAvatar'
 import { officeMapTileFrame } from './officeMapTiles'
 import { playApplauseSound } from '../media/applause-sound'
+import {
+  CELEBRATION_DEPTH,
+  CONFETTI_BURST_COUNT,
+  CONFETTI_BURST_LIFESPAN,
+  CONFETTI_LAUNCH_LIFESPAN,
+  CONFETTI_TEXTURE,
+  confettiBurstConfig,
+  confettiLaunchConfig,
+  createConfettiTexture,
+} from './confettiSprites'
 import { playHighFiveSound } from '../media/high-five-sound'
 import { playKickSound } from '../media/kick-sound'
+import { playPaintballSound } from '../media/paintball-sound'
+import {
+  createKartSmokeTexture,
+  kartSmoke,
+  puffKartSmoke,
+  remoteKartSteer,
+  KART_SMOKE_INTERVAL_MS,
+} from './kartSmoke'
+import { createPaintTextures, PAINT_PELLET_TEXTURE, PAINT_SPLAT_TEXTURE } from './paintSprites'
+
+export { PAINT_PELLET_TEXTURE, PAINT_SPLAT_TEXTURE }
 import { OFFICE_DESK_REMINDER_GIFT_COLORS, OFFICE_DESK_REMINDER_GIFT_LABEL } from '../deskReminderPresentation'
 
 /** Duração do passo entre dois tiles. Casa com a cadência normal; o teto do servidor (20/s) cobre também a corrida. */
 const STEP_MS = 150
 /** Cadência do teclado com a tecla presa — não adianta mandar mais do que o servidor aceita. */
+/**
+ * Abaixo disto, o movimento interpolado de um remoto conta como "parado".
+ *
+ * Existe porque a interpolação nunca dá zero exato: com o mesmo valor nos dois
+ * lados da amostra, sobra ruído de ponto flutuante, e sem a folga o personagem
+ * ficaria com as pernas se mexendo de pé.
+ */
+const REMOTE_IDLE_EPSILON = 0.4
+
 const INPUT_COOLDOWN_MS = 160
 /** Correndo (Shift): metade da duração/cadência — casa com o rate limit dobrado do servidor. */
 const SPRINT_STEP_MS = STEP_MS / 2
@@ -67,19 +119,68 @@ const BALL_DISPLAY_SIZE = 24
  */
 const BALL_SPIN_PER_TILE = Math.PI
 /**
- * Até onde a batida é ouvida, em tiles. Sem o corte, um escritório grande com
- * uma bola no canto vira um "poc" constante no ouvido de todo mundo.
+ * Até onde a batida é ouvida, em tiles (Chebyshev, como todo alcance do
+ * escritório). Sem o corte, um escritório grande com uma bola no canto vira um
+ * "poc" constante no ouvido de todo mundo. A âncora é o alcance do próprio
+ * chute (`BALL_KICK_TILES`, 5): ouve-se o que poderia chegar até você, e mais
+ * um pouco — o resto é barulho de outra roda de conversa.
  */
-const BALL_EARSHOT_TILES = 10
+const BALL_EARSHOT_TILES = 8
 /**
  * Altura do arco do chute alto, em pixels: uma parte fixa (o "sobe" mínimo) e
  * uma proporcional à distância, para o chute curto não parecer um foguete.
  */
+/**
+ * Quanto a bola gira por pixel percorrido. Nada de física real: é a pista
+ * visual de que ela ESTÁ rolando, e não deslizando pelo chão.
+ */
+const BALL_SPIN_PER_PX = Math.PI / 32
+
 const BALL_LOB_LIFT_BASE = 14
 const BALL_LOB_LIFT_PER_TILE = 7
 const BALL_LOB_LIFT_MAX = 64
 /** No ar a bola passa por cima de tudo — inclusive de quem está no caminho. */
 const BALL_LOB_DEPTH = 9_000
+
+/**
+ * Retângulo do TORSO em coordenadas locais do container, onde as manchas
+ * caem. Medido no sprite, não chutado: o container fica no centro do tile e o
+ * personagem é ancorado pelos PÉS em `CHARACTER_BASE_Y`, então o tronco (linhas
+ * 32..47 do frame LPC de 64px, a 48/64 de escala) cai em y −8..+4 daqui. O
+ * frame é quase todo ar, e espalhar tinta pelo quadrado inteiro deixaria
+ * mancha boiando ao lado da pessoa — ou tapando o rosto dela.
+ */
+const PAINT_SPLAT_BOX = { x: 6, top: -6, bottom: 3 }
+/**
+ * Profundidade da mancha DENTRO do container do personagem. Quem de fato a põe
+ * sobre o corpo é a ordem de inserção (`container.add` acrescenta ao fim, e o
+ * sprite entra no índice 0); o depth acompanha o que o ícone de mão levantada
+ * já faz, para o dia em que o container passar a ordenar por ele.
+ */
+const PAINT_SPLAT_DEPTH_OFFSET = 1
+/** A tinta entra por alfa, nunca por escala: crescer reamostraria o desenho. */
+const PAINT_SPLAT_IN_MS = 90
+/** A mancha avisa que vai sumir: o último trecho da vida dela é o fade. */
+const PAINT_SPLAT_FADE_MS = 1_200
+/** Respingos que saltam do impacto, e por quanto tempo. */
+export const PAINT_BURST_DROPS = 5
+const PAINT_BURST_MS = 220
+const PAINT_BURST_REACH = 9
+/** No voo a bolinha passa por cima de mesa e gente, como a bola no chute alto. */
+const PAINT_PELLET_DEPTH = 9_100
+/**
+ * Até onde o tiro é ouvido, em tiles — mesma razão e mesma métrica do
+ * `BALL_EARSHOT_TILES`, ancorado no alcance do tiro (`PAINTBALL_RANGE`, 8).
+ */
+const PAINTBALL_EARSHOT_TILES = 10
+/**
+ * Altura da bolinha em relação ao centro do tile, que é onde o container do
+ * personagem fica. Medida nos dois lados que ela precisa casar: o estilingue
+ * ocupa y −6,5..+4,8 conforme a pose, e o tronco de quem leva ocupa −6..+3
+ * (`PAINT_SPLAT_BOX`). O centro comum é a linha do peito — a única altura em
+ * que o tiro sai da arma E chega no corpo do outro.
+ */
+export const PAINTBALL_MUZZLE_Y = -1
 
 /** Um slice da bola e o estado de CHÃO dele (para onde voltar depois do voo). */
 interface BallSlice {
@@ -107,6 +208,13 @@ const KART_HEAD_CROP_HEIGHT = 26
  * Rotação do kart por direção. A textura nasce apontando pra cima (o respingo
  * amarelo é o nariz), então `up` é a identidade e as outras giram a partir dela.
  */
+/**
+ * A textura do kart nasce apontando para CIMA (o respingo amarelo é o nariz), e
+ * o rumo mede a partir da direita — daí o quarto de volta de correção. O mesmo
+ * da corrida.
+ */
+const KART_TEXTURE_OFFSET = Math.PI / 2
+
 const KART_ROTATION_BY_DIR: Record<Direction, number> = {
   up: 0,
   right: Math.PI / 2,
@@ -296,6 +404,12 @@ export function zoneLabelText(
   return officeZoneDisplayName(document, desks, zone)
 }
 
+/** Os campos de que a composição do sprite depende — ver `CharacterView.avatar`. */
+type CharacterAvatar = Pick<
+  OfficeOccupant,
+  'userId' | 'avatarStyle' | 'avatarSeed' | 'avatarOptions' | 'paintMarker'
+>
+
 interface CharacterView {
   userId: string
   container: Phaser.GameObjects.Container
@@ -316,6 +430,12 @@ interface CharacterView {
    * tile a pessoa estava.
    */
   tile: TilePosition
+  /**
+   * Posição em PIXEL, contínua. É ela que manda no desenho desde o movimento
+   * livre; `tile` virou derivada dela, e sobrevive porque sala, mesa e alcance
+   * continuam sendo conceitos de tile.
+   */
+  pos: { x: number; y: number }
   bubble?: Phaser.GameObjects.Container
   bubbleTween?: Phaser.Tweens.BaseTween
   bubbleKind?: NearbyBubbleKind
@@ -328,6 +448,15 @@ interface CharacterView {
   handIcon?: Phaser.GameObjects.Text
   /** Kart sob o personagem enquanto ele está montado (#22253). */
   kart?: Phaser.GameObjects.Image
+  /**
+   * Bits do avatar com que a textura deste personagem foi composta — inclusive
+   * o marcador de paintball. A cena não guarda os occupants, e recompor o
+   * sprite (equipar a arma, `avatar-updated`) precisa dos OUTROS campos: sem
+   * isso, equipar o marcador apagaria o personagem escolhido pela pessoa.
+   */
+  avatar: CharacterAvatar
+  /** Manchas de tinta ativas, por id da marca. */
+  paintSplats?: Map<string, Phaser.GameObjects.Image>
 }
 
 /** Posiciona a cabeça recortada no cockpit conforme o kart gira. */
@@ -349,11 +478,11 @@ function tileCenter(document: MapDocumentV1, x: number, y: number): { px: number
   }
 }
 
-export interface ScreenPosition {
-  x: number
-  y: number
-  zoom: number
-}
+// Reexportados: a conversão mora em `lib/screenPosition` desde que a arena
+// passou a precisar dela (ver o comentário lá). Os ~10 pontos que importam
+// `ScreenPosition`/`computeScreenPosition` daqui continuam valendo.
+export type { ScreenPosition }
+export { computeScreenPosition }
 
 /**
  * Zoom que a câmera do Phaser recebe pra um dado zoom de UI (`cameraZoom`,
@@ -410,29 +539,16 @@ export function computeMinCameraZoom(
 }
 
 /**
- * Converte a posição MUNDO de um personagem (a posição atual do seu
- * Container, já animada/tweened) pra pixels de TELA, considerando o
- * scroll e o zoom atuais da câmera do Phaser. Retorna `null` se a posição
- * cair fora do viewport — quem está fora da tela não precisa de balão.
- */
-export function computeScreenPosition(
-  containerX: number,
-  containerY: number,
-  camera: { scrollX: number; scrollY: number; zoom: number },
-  viewport: { width: number; height: number },
-): ScreenPosition | null {
-  const x = (containerX - camera.scrollX) * camera.zoom
-  const y = (containerY - camera.scrollY) * camera.zoom
-  if (x < 0 || y < 0 || x > viewport.width || y > viewport.height) return null
-  return { x, y, zoom: camera.zoom }
-}
-
-/**
  * O som do high-five é do lugar onde ele acontece: quem está em outra sala ou
  * do outro lado do mapa não deve ouvir. A posição sai do snapshot do bridge —
  * pode estar um tile atrás da predição local, irrelevante para um raio de 3.
  * Sem dado suficiente (ainda sem `youId`, occupant desconhecido), toca: melhor
  * um som a mais do que emudecer o feedback por falta de snapshot.
+ *
+ * Os três occupants entram em PIXEL (movimento livre) e `isHighFiveAudible`
+ * cobra TILE — a conversão é aqui, e não no call site, porque `document` já
+ * está em mãos e é ele que traz a régua. Sem ela, o raio de 3 tiles virava um
+ * raio de 3 PIXELS: só quem batia a mão ouvia a própria palma.
  */
 export function highFiveWithinEarshot(
   document: MapDocumentV1,
@@ -444,70 +560,21 @@ export function highFiveWithinEarshot(
   const you = occupantAt(youId)
   const [a, b] = userIds.map(occupantAt)
   if (!you || !a || !b) return true
-  return isHighFiveAudible(document, you, a, b)
+  const toTile = (point: OfficeOccupant) => ({
+    x: Math.floor(point.x / document.map.tileWidth),
+    y: Math.floor(point.y / document.map.tileHeight),
+  })
+  return isHighFiveAudible(document, toTile(you), toTile(a), toTile(b))
 }
 
-/** Textura (4×4 branco) da partícula de confete; a cor real vem do `tint`. */
-export const CONFETTI_TEXTURE = 'office-confetti'
 export const KART_TEXTURE = 'office-kart'
-/** Paleta de confete — o emissor sorteia uma cor por partícula via `tint`. */
-export const CONFETTI_COLORS = [0xef476f, 0xffd166, 0x06d6a0, 0x118ab2, 0x8338ec, 0xff9f1c]
 /** Confete acima dos personagens (que usam depth ~ y do tile). */
 const CONFETTI_DEPTH = 10_000
 
 /**
- * Centro do cone de confete por direção (ângulo de Phaser: 0=direita,
- * 90=baixo, -90=cima, 180=esquerda — sistema y-para-baixo). Spread de ±30°
- * em torno do centro, igual ao leque original (que era fixo pra cima).
- */
-function confettiAngleForDirection(dir: Direction): { min: number; max: number } {
-  const center = { up: -90, down: 90, left: 180, right: 0 }[dir]
-  return { min: center - 30, max: center + 30 }
-}
-
-/** Vida de uma partícula do canhão de confete (não da chuva de comemoração). */
-const CONFETTI_LAUNCH_LIFESPAN = 900
-
-/** Config de LANÇAMENTO (canhão de festa saindo do personagem, na direção que ele está de frente), não chuva de cima. */
-export function confettiLaunchConfig(dir: Direction = 'up'): Phaser.Types.GameObjects.Particles.ParticleEmitterConfig {
-  return {
-    angle: confettiAngleForDirection(dir),
-    speed: { min: 120, max: 260 },
-    gravityY: 260,
-    lifespan: CONFETTI_LAUNCH_LIFESPAN,
-    quantity: 2,
-    frequency: 35,
-    scale: { start: 1, end: 0.3 },
-    rotate: { start: 0, end: 360 },
-    tint: CONFETTI_COLORS,
-  }
-}
-
-/** Comemoração acima de tudo (banner e burst fixos na câmera). */
-const CELEBRATION_DEPTH = 20_000
-const CONFETTI_BURST_COUNT = 140
-const CONFETTI_BURST_LIFESPAN = 2200
-
-/** Burst único de tela cheia: linha no topo da viewport, caindo pela largura. */
-export function confettiBurstConfig(width: number): Phaser.Types.GameObjects.Particles.ParticleEmitterConfig {
-  return {
-    x: { min: 0, max: width },
-    y: 0,
-    angle: { min: 60, max: 120 },
-    speed: { min: 160, max: 340 },
-    gravityY: 320,
-    lifespan: CONFETTI_BURST_LIFESPAN,
-    scale: { start: 1, end: 0.4 },
-    rotate: { start: 0, end: 360 },
-    tint: CONFETTI_COLORS,
-    emitting: false,
-  }
-}
-
-/**
  * O escritório. Recebe eventos do servidor pelo bridge e emite intenção de
  * movimento de volta. O servidor segue autoritativo — mas o passo do PRÓPRIO
- * personagem é previsto e animado na hora da intenção (`MovementPredictor`),
+ * personagem é previsto e animado na hora da intenção (`ArenaPredictor`),
  * e o eco `moved`/`sync` do servidor só confirma ou re-ancora. Sem isso, todo
  * passo esperaria um round-trip de WebSocket para aparecer na tela.
  */
@@ -545,7 +612,37 @@ export class OfficeScene extends Phaser.Scene {
    */
   private publishedObjectImages = new Map<string, Phaser.GameObjects.Image>()
   private youId: string | null = null
-  private readonly predictor: MovementPredictor
+  /**
+   * Predição e reconciliação do PRÓPRIO personagem — a mesma classe da arena.
+   *
+   * Substituiu o `MovementPredictor` de grade, que enfileirava passos de tile e
+   * os baixava quando o eco `moved` batia. No modelo contínuo o servidor manda
+   * posição autoritativa e `seq` processado, e reancorar + reexecutar os
+   * pendentes é o mecanismo geral — não um caso especial de recusa.
+   */
+  private bodyPredictor?: ArenaPredictor<BodyKartState>
+  /** Buffer de interpolação dos OUTROS — desenhados ~100ms no passado. */
+  private readonly bodyInterpolator = new ArenaInterpolator()
+  /** Acumulador da amostragem de input (ver `BODY_INPUT_HZ`). */
+  private sinceInput = 0
+  /** Direção que a caminhada automática pede — funciona como tecla presa. */
+  private autoMove: MoveDirection | null = null
+  /**
+   * Último quadro desenhado de cada remoto: base do "está andando?", do rumo do
+   * kart e da fumaça das rodas.
+   *
+   * O rumo é PEGAJOSO, como na corrida (`ArenaScene.remoteHeading`):
+   * `interpolator.at` só devolve rumo quando as DUAS amostras do intervalo o
+   * trazem, e sem guardar o último conhecido o kart saltaria para zero entre
+   * pacotes. O último conhecido sai daqui e nunca do `rotation` do sprite —
+   * aquele já tem o quarto de volta da textura somado.
+   */
+  private readonly lastRemoteDraw = new Map<
+    string,
+    { x: number; y: number; heading?: number; at: number }
+  >()
+  /** Quem está correndo agora, pelo snapshot — só a animação usa. */
+  private readonly remoteSprint = new Set<string>()
   private lastInputAt = 0
   private unsubscribe: (() => void) | null = null
   private keys: DirectionKeys | null = null
@@ -661,12 +758,21 @@ export class OfficeScene extends Phaser.Scene {
   /** Posição autoritativa de cada bola publicada — espelha o hub. */
   private ballStates = new Map<string, OfficeBall>()
   /**
+   * Quanto tempo de voo cada bola no ar teve NO CHUTE, e que altura ele merece.
+   *
+   * O estado da bola só carrega o tempo RESTANTE; para desenhar o arco é
+   * preciso saber de quanto ele partiu — sem o total não há progresso, e sem
+   * progresso não há meia-senóide.
+   */
+  private ballFlights = new Map<string, { totalMs: number; lift: number }>()
+  /** Quando cada roda soltou a última nuvem — a cadência é por RODA, não por kart. */
+  private lastSmokeAt = new Map<string, number>()
+  /**
    * Tweens de rolagem em andamento por bola — uma LISTA, um por slice. Guardar
    * só o último deixava os outros três da bola de pilates correndo soltos
    * quando um chute novo chegava: a peça se partia na tela, cada pedaço indo
    * para um lugar.
    */
-  private ballTweens = new Map<string, Phaser.Tweens.Tween[]>()
   /** Cache de `ballLayout()`, invalidado pela identidade de `document.objects`. */
   private ballLayoutObjects: MapDocumentV1['objects'] | null = null
   private ballLayoutCache: Map<string, BallLayout> | null = null
@@ -720,9 +826,6 @@ export class OfficeScene extends Phaser.Scene {
     // Getter, não cópia: a predição lê o estado autoritativo dos karts no
     // momento do passo, sem um ponto de sincronização que dá pra esquecer de
     // chamar quando o hub manda `kart-ride`/`karts-updated`.
-    this.predictor = new MovementPredictor(this.document, {
-      karts: () => [...this.kartStates.values()],
-    })
   }
 
   /**
@@ -1686,11 +1789,10 @@ export class OfficeScene extends Phaser.Scene {
     g.strokePath()
     g.generateTexture('char-loading', 24, 24)
 
-    // Partícula de confete: quadradinho branco 4×4 (a cor vem do tint por partícula).
-    g.clear()
-    g.fillStyle(0xffffff, 1)
-    g.fillRect(0, 0, 4, 4)
-    g.generateTexture(CONFETTI_TEXTURE, 4, 4)
+    createConfettiTexture(this, g)
+
+    createPaintTextures(this, g)
+    createKartSmokeTexture(this, g)
 
     g.destroy()
   }
@@ -1845,12 +1947,30 @@ export class OfficeScene extends Phaser.Scene {
   }
 
   /** Mantém os karts estacionados no mapa; durante a edição mostra a posição publicada. */
-  /** Se um tile do mapa está perto o bastante de você para a batida ser ouvida. */
-  private isWithinEarshot(tile: { x: number; y: number } | undefined): boolean {
-    if (!tile || !this.youId) return true
+  /**
+   * A que volume, de 0 a 1, um efeito que acontece num tile do mapa chega até
+   * você. Quem decide é `officeSoundLevel` (`@legends/shared`), a mesma regra
+   * da palma do high-five: sala de chamada e zona privada isolam nos DOIS
+   * sentidos — brincadeira no espaço aberto não vaza para dentro da reunião ao
+   * lado, nem o contrário —, e no aberto o som cai com a distância até sumir
+   * no raio.
+   *
+   * Sem posição sua ainda no bridge (cena recém-montada) o som sai inteiro: o
+   * gesto é seu, e calá-lo seria pior do que deixá-lo vazar por um instante.
+   *
+   * Quem OUVE também converte. O occupant do bridge fala PIXEL desde o
+   * movimento livre, e `officeSoundLevel` compara Chebyshev contra um raio em
+   * TILE: entregar o ouvinte cru fazia toda distância estourar o raio, e a
+   * batida da bola e o tiro de paintball ficavam mudos para todo mundo.
+   */
+  private earshotLevel(
+    tile: { x: number; y: number } | undefined,
+    tiles = BALL_EARSHOT_TILES,
+  ): number {
+    if (!tile || !this.youId) return 1
     const you = this.bridge.occupantSnapshot(this.youId)
-    if (!you) return true
-    return Math.abs(you.x - tile.x) + Math.abs(you.y - tile.y) <= BALL_EARSHOT_TILES
+    if (!you) return 1
+    return officeSoundLevel(this.document, this.tileAtPixel(you), tile, tiles)
   }
 
   /**
@@ -1903,24 +2023,31 @@ export class OfficeScene extends Phaser.Scene {
    * não entidade do jogo —, mesma regra do kart.
    */
   private refreshBallVisuals(): void {
-    const { tileWidth, tileHeight } = this.document.map
     for (const [ballId, layout] of this.ballLayout()) {
       const ball = this.ballStates.get(ballId)
-      if (this.editing) {
-        this.cancelBallTweens(ballId)
-      } else if (this.ballTweens.has(ballId)) {
-        // Rolagem em andamento manda na posição; o tween termina no mesmo tile.
-        continue
-      }
-      const dx = this.editing || !ball ? 0 : (ball.x - layout.originX) * tileWidth
-      const dy = this.editing || !ball ? 0 : (ball.y - layout.originY) * tileHeight
+      // Já em PIXEL nos dois lados: `mapBalls` devolve o centro publicado em
+      // pixel, e o estado da bola também. Antes os dois eram tile, e daí a
+      // multiplicação.
+      const dx = this.editing || !ball ? 0 : ball.x - layout.originX
+      const dy = this.editing || !ball ? 0 : ball.y - layout.originY
+      // Arco do chute alto. A bola já ATRAVESSA a mobília (é o `airborneMs` da
+      // física); o que faltava era ela PARECER que está no ar — meia-senóide,
+      // um tico maior no ápice (é o que lê como "veio na direção da câmera" num
+      // jogo sem eixo Z) e acima de tudo na profundidade.
+      const voo = ball?.airborneMs ? this.ballFlights.get(ballId) : undefined
+      const altura = voo ? Math.sin(Math.PI * (1 - (ball?.airborneMs ?? 0) / voo.totalMs)) : 0
+      const subida = voo ? voo.lift * altura : 0
+      const inflado = 1 + 0.3 * altura
+
       for (const slice of layout.slices) {
         const image = this.publishedObjectImages.get(slice.id)
         if (!image) continue
         image
-          .setPosition(slice.px + dx, slice.py + dy)
-          .setDepth(slice.depth)
-          .setScale(slice.scaleX, slice.scaleY)
+          .setPosition(slice.px + dx, slice.py + dy - subida)
+          .setDepth(subida > 0 ? BALL_LOB_DEPTH : slice.depth)
+          // A base é a escala de CHÃO do layout, nunca a escala viva: partir da
+          // inflada faria a bola crescer a cada chute, sem nunca voltar.
+          .setScale(slice.scaleX * inflado, slice.scaleY * inflado)
         if (this.editing) {
           image.setRotation(0).setVisible(!this.hiddenPublishedIds.has(slice.id))
         } else {
@@ -1930,105 +2057,228 @@ export class OfficeScene extends Phaser.Scene {
     }
   }
 
+
   /**
-   * Para a rolagem de uma bola e devolve os slices ao chão. Cancelar TODOS os
-   * tweens da peça (e não só um) é o que impede a bola de 2×2 de se partir
-   * quando um chute novo chega antes de o anterior terminar.
+   * O chute de alguém chegou.
+   *
+   * Não há trajetória a animar: o evento traz a VELOCIDADE, e a cena integra a
+   * mesma física do servidor (`stepBodyBall`) a cada quadro. O evento existe
+   * para o som e para a bola reagir NA HORA, sem esperar até 50ms pelo próximo
+   * snapshot — meio metro de bola, no chutão.
    */
-  private cancelBallTweens(ballId: string): void {
-    const tweens = this.ballTweens.get(ballId)
-    if (!tweens) return
-    for (const tween of tweens) tween.remove()
-    this.ballTweens.delete(ballId)
-    for (const slice of this.ballLayout().get(ballId)?.slices ?? []) {
-      this.publishedObjectImages.get(slice.id)?.setDepth(slice.depth).setScale(slice.scaleX, slice.scaleY)
+  private playBallKick(userId: string, ball: OfficeBall, power: OfficeBallPower): void {
+    const anterior = this.ballStates.get(ball.id)
+    this.ballStates.set(ball.id, { ...ball })
+    if (ball.airborneMs) {
+      // A altura acompanha a DISTÂNCIA do voo, como antes acompanhava o número
+      // de tiles do caminho: chute curto que sobe como um foguete não lê.
+      const tiles = ((Math.hypot(ball.vx, ball.vy) * ball.airborneMs) / 1000) / this.document.map.tileWidth
+      this.ballFlights.set(ball.id, {
+        totalMs: ball.airborneMs,
+        lift: Math.min(BALL_LOB_LIFT_MAX, BALL_LOB_LIFT_BASE + BALL_LOB_LIFT_PER_TILE * tiles),
+      })
+    }
+    // A batida sai mesmo quando a bola não anda (entalada): o gesto aconteceu.
+    const volume = this.earshotLevel(this.tileAtPixel(anterior ?? ball))
+    if (volume > 0) playKickSound({ power, grazed: false, volume })
+  }
+
+  /**
+   * O tile em que um ponto em pixel cai.
+   *
+   * O alcance SONORO continua raciocinando em tile — é a unidade do grafo de
+   * áudio do escritório —, então quem fala pixel converte aqui.
+   */
+  private tileAtPixel(ball: { x: number; y: number }): { x: number; y: number } {
+    return {
+      x: Math.floor(ball.x / this.document.map.tileWidth),
+      y: Math.floor(ball.y / this.document.map.tileHeight),
     }
   }
 
   /**
-   * Anima a rolagem de um chute. A trajetória já vem resolvida do servidor
-   * (`kickBall`, `@legends/shared`): aqui não há física nenhuma, só um tween
-   * por slice passando pelos tiles recebidos, com giro proporcional à
-   * distância.
+   * Roda as bolas no quadro, com a MESMA física do servidor.
+   *
+   * O cliente integra entre snapshots e corrige quando o próximo chega — sem
+   * isso a bola andaria a 20Hz, aos saltos, que é o que a rolagem por tween
+   * escondia enquanto a trajetória vinha resolvida.
    */
-  private playBallKick(kick: OfficeBallKick): void {
-    const landing = kick.path.at(-1)
-    const previous = this.ballStates.get(kick.ballId)
-    // A batida sai mesmo quando a bola não anda (entalada): o gesto aconteceu.
-    // Conduzir é a exceção — um "poc" por passo viraria metralhadora.
-    if (kick.power !== 'dribble' && this.isWithinEarshot(kick.path[0] ?? previous)) {
-      playKickSound({ power: kick.power, grazed: kick.grazed })
+  private updateBalls(dtMs: number): void {
+    if (this.ballStates.size === 0 || this.editing) return
+    const grid = bodyCollisionGrid(this.document)
+    const eu = this.bodyPredictor?.current()
+    const move = this.pressedMove() ?? this.autoMove
+    const passo = move ? MOVE_DIRECTION_DELTAS[move] : { x: 0, y: 0 }
+    let mexeu = false
+    for (const [id, ball] of this.ballStates) {
+      const antes = { x: ball.x, y: ball.y }
+      let depois: OfficeBall = { ...ball, ...stepBodyBall(ball, dtMs, grid) }
+      if (eu) {
+        // O próprio conduz na PREDIÇÃO, não no eco: encostar na bola tem de
+        // responder na hora, como o passo.
+        const toque = touchBodyBall(depois, {
+          x: eu.x,
+          y: eu.y,
+          dx: passo.x,
+          dy: passo.y,
+          sprint: this.shiftKey?.isDown ?? false,
+        })
+        if (toque) depois = { ...depois, ...toque }
+      }
+      this.ballStates.set(id, depois)
+      // Pousar TAMBÉM é mudança: a bola pode acabar o voo já parada, e sem
+      // redesenhar ela ficaria pendurada no ar para sempre.
+      if (depois.x !== antes.x || depois.y !== antes.y || depois.airborneMs !== ball.airborneMs) {
+        mexeu = true
+      }
+      // Gira na direção do movimento: rolar é o que separa uma bola de um disco.
+      // Só na peça de um slice — numa bola fatiada cada pedaço rodaria em torno
+      // do próprio centro e ela se desmontaria.
+      const percorrido = Math.hypot(depois.x - antes.x, depois.y - antes.y)
+      if (percorrido > 0 && (depois.memberIds?.length ?? 1) === 1) {
+        const image = this.publishedObjectImages.get(depois.memberIds?.[0] ?? id)
+        if (image) image.rotation += percorrido * BALL_SPIN_PER_PX
+      }
+      if (!depois.airborneMs) this.ballFlights.delete(id)
     }
-    if (landing && previous) {
-      this.ballStates.set(kick.ballId, { ...previous, x: landing.x, y: landing.y })
-    }
-    // Chute novo cancela o voo anterior E desfaz o que ele tinha mexido
-    // (profundidade e escala do voo) — sem isso, o chute seguinte tomaria a
-    // escala inflada como base e a bola cresceria sem volta.
-    this.cancelBallTweens(kick.ballId)
-    const layout = this.ballLayout().get(kick.ballId)
-    if (!layout || kick.path.length === 0) {
-      this.refreshBallVisuals()
-      return
-    }
+    if (mexeu) this.refreshBallVisuals()
+  }
 
-    const { tileWidth, tileHeight } = this.document.map
-    // Arco do chute alto: em vez de tweenar a altura numa propriedade separada
-    // (que brigaria com o `y` do trajeto), o `onUpdate` SUBTRAI a elevação
-    // depois de o tween já ter escrito o `y` do chão — é o mesmo `y`, com o
-    // salto somado por cima.
-    const lift =
-      kick.power === 'lob'
-        ? Math.min(BALL_LOB_LIFT_MAX, BALL_LOB_LIFT_BASE + BALL_LOB_LIFT_PER_TILE * kick.path.length)
-        : 0
-    const tweens: Phaser.Tweens.Tween[] = []
-    for (const slice of layout.slices) {
-      const image = this.publishedObjectImages.get(slice.id)
-      if (!image) continue
-      if (lift > 0) image.setDepth(BALL_LOB_DEPTH)
-      const tween = this.tweens.add({
-        targets: image,
-        // Um alvo por tile: a bola percorre o caminho inteiro, inclusive as
-        // quinas de uma rebatida, em vez de cortar reto até onde ela para.
-        x: kick.path.map((tile) => slice.px + (tile.x - layout.originX) * tileWidth),
-        y: kick.path.map((tile) => slice.py + (tile.y - layout.originY) * tileHeight),
-        // Girar só faz sentido na bola de um tile: numa peça fatiada, cada
-        // slice rodaria em torno do próprio centro e a bola se desmontaria.
-        ...(layout.slices.length === 1
-          ? { rotation: image.rotation + BALL_SPIN_PER_TILE * kick.path.length }
-          : {}),
-        duration: Math.max(1, kick.durationMs),
-        // Rasteira desacelera até parar (perde energia no chão); no ar e na
-        // condução a bola atravessa o tile em velocidade constante — na
-        // condução é o que a mantém colada ao passo de quem leva.
-        ease: lift > 0 || kick.power === 'dribble' ? 'Linear' : 'Quad.easeOut',
-        ...(lift > 0
-          ? {
-              onUpdate: (tween: Phaser.Tweens.Tween) => {
-                // Meia senóide: sai do chão, ápice no meio, aterrissa.
-                const height = Math.sin(Math.PI * tween.progress)
-                image.y -= lift * height
-                // Um tico maior no alto: é o que lê como "veio na direção da
-                // câmera" num jogo sem eixo Z. A base é a escala de CHÃO do
-                // layout, nunca a escala viva — ver `cancelBallTweens`.
-                image.setScale(slice.scaleX * (1 + 0.3 * height), slice.scaleY * (1 + 0.3 * height))
-              },
-            }
-          : {}),
-      })
-      tweens.push(tween)
-    }
-    if (tweens.length === 0) {
-      this.refreshBallVisuals()
-      return
-    }
-    // O último a terminar limpa: todos têm a mesma duração, então qualquer um
-    // serve — e `refreshBallVisuals` devolve profundidade e escala do chão.
-    tweens[tweens.length - 1].on('complete', () => {
-      this.ballTweens.delete(kick.ballId)
-      this.refreshBallVisuals()
+
+  /**
+   * Anima um tiro. Como no chute, a trajetória já vem resolvida do servidor
+   * (`firePaintball`, `@legends/shared`): aqui não há mira, colisão nem
+   * detecção de acerto — só uma bolinha atravessando os tiles recebidos e o
+   * estouro no fim.
+   *
+   * A bolinha voa por CIMA de tudo (`PAINT_PELLET_DEPTH`), inclusive de quem
+   * está no caminho: ela é pequena demais para some atrás de uma mesa e ainda
+   * ser lida como tiro.
+   */
+  private playPaintballShot(shot: BodyShot): void {
+    // O disparo já vem resolvido em PIXEL: de onde saiu, até onde estourou.
+    // Antes vinha como lista de tiles, e a cena convertia cada um em centro —
+    // com posição contínua isso deixaria o tiro sair do lugar errado.
+    const shotVolume = this.earshotLevel(this.tileAtPixel(shot.from), PAINTBALL_EARSHOT_TILES)
+    if (shotVolume > 0) playPaintballSound({ hit: false, volume: shotVolume })
+    // Marca antes da animação: se a cena não desenhar o voo (tiro contra a
+    // parede colada, personagem ainda compondo), a tinta não pode se perder.
+    if (shot.splat) this.applyPaintSplat(shot.splat)
+    // Tiro que não anda (parede colada) não ganha projétil: uma bolinha com voo
+    // de zero pixel é um sprite nascendo e morrendo no mesmo quadro. O disparo
+    // continua soando — o gesto aconteceu.
+    if (shot.to.x === shot.from.x && shot.to.y === shot.from.y) return
+
+    const pellet = this.add.image(shot.from.x, shot.from.y + PAINTBALL_MUZZLE_Y, PAINT_PELLET_TEXTURE)
+    pellet.setTint(shot.color)
+    pellet.setDepth(PAINT_PELLET_DEPTH)
+
+    this.tweens.add({
+      targets: pellet,
+      x: shot.to.x,
+      y: shot.to.y + PAINTBALL_MUZZLE_Y,
+      duration: Math.max(1, shot.durationMs),
+      ease: 'Linear',
+      onComplete: () => {
+        pellet.destroy()
+        this.burstPaint(shot.to.x, shot.to.y + PAINTBALL_MUZZLE_Y, shot.color)
+        const hitVolume = this.earshotLevel(this.tileAtPixel(shot.to), PAINTBALL_EARSHOT_TILES)
+        if (shot.splat && hitVolume > 0) playPaintballSound({ hit: true, volume: hitVolume })
+      },
     })
-    this.ballTweens.set(kick.ballId, tweens)
+  }
+
+  /**
+   * O impacto: respingos saltando do ponto onde a bolinha estourou.
+   *
+   * Antes isto era UM borrão que crescia e desbotava — e a versão crescida
+   * lia como fumaça, não como tinta: escalar reamostra o desenho (`pixelArt`)
+   * e, no meio do fade sobre o piso claro, o que sobrava era um cinza sem
+   * forma. Vários pontinhos em tamanho real, saindo rápido, dizem "estourou"
+   * sem esticar pixel nenhum.
+   */
+  private burstPaint(px: number, py: number, color: number): void {
+    for (let i = 0; i < PAINT_BURST_DROPS; i += 1) {
+      // Leque determinístico em torno do ponto: sem sorteio, como o resto do
+      // tiro — e um passo ímpar de volta inteira evita respingo simétrico.
+      const angle = (i / PAINT_BURST_DROPS) * Math.PI * 2 + i * 0.7
+      const drop = this.add.image(px, py, PAINT_PELLET_TEXTURE)
+      drop.setTint(color)
+      drop.setDepth(PAINT_PELLET_DEPTH)
+      this.tweens.add({
+        targets: drop,
+        x: px + Math.cos(angle) * PAINT_BURST_REACH,
+        y: py + Math.sin(angle) * PAINT_BURST_REACH,
+        alpha: 0,
+        duration: PAINT_BURST_MS,
+        ease: 'Quad.easeOut',
+        onComplete: () => drop.destroy(),
+      })
+    }
+  }
+
+  /**
+   * Gruda uma mancha no personagem de quem levou. Onde ela cai, de que
+   * tamanho e girada quanto sai de `paintSplatPlacement(id)` — derivado do id,
+   * e não sorteado aqui: o id é o mesmo em todos os clientes, então todo mundo
+   * vê a mancha no mesmo lugar sem que o servidor mande coordenada nenhuma.
+   *
+   * A marca vence sozinha, pelo `ttlMs` que veio no payload: é ele que já
+   * chega descontado do tempo decorrido para quem entrou no meio da vida dela.
+   */
+  private applyPaintSplat(splat: PaintSplat): void {
+    const view = this.characters.get(splat.userId)
+    if (!view) return
+    const splats = (view.paintSplats ??= new Map())
+    // Reentrada (welcome sintético do bridge depois de um remount) traz marcas
+    // que já estão na tela: repor a mesma imagem duplicaria a tinta e o timer.
+    if (splats.has(splat.id)) return
+
+    const { ox, oy, variant } = paintSplatPlacement(splat.id)
+    const image = this.add.image(
+      ox * PAINT_SPLAT_BOX.x,
+      PAINT_SPLAT_BOX.top + ((oy + 1) / 2) * (PAINT_SPLAT_BOX.bottom - PAINT_SPLAT_BOX.top),
+      `${PAINT_SPLAT_TEXTURE}-${variant}`,
+    )
+    image.setTint(splat.color)
+    image.setDepth(PAINT_SPLAT_DEPTH_OFFSET)
+    // Sem `setDisplaySize` e sem giro: a máscara já é do tamanho de desenho, e
+    // qualquer transformação aqui reamostraria a arte (ver `PAINT_SPLAT_MASKS`).
+    view.container.add(image)
+    splats.set(splat.id, image)
+
+    // Entra por alfa. O "pique" de escala que havia aqui antes era exatamente o
+    // tipo de transformação que o `pixelArt` não perdoa.
+    image.setAlpha(0)
+    this.tweens.add({ targets: image, alpha: 1, duration: PAINT_SPLAT_IN_MS })
+
+    const ttl = Math.max(0, Math.min(splat.ttlMs, PAINT_SPLAT_TTL_MS))
+    const fade = Math.min(PAINT_SPLAT_FADE_MS, ttl)
+    this.time.delayedCall(Math.max(0, ttl - fade), () => {
+      if (!image.scene) return
+      this.tweens.add({
+        targets: image,
+        alpha: 0,
+        duration: fade,
+        onComplete: () => {
+          splats.delete(splat.id)
+          image.destroy()
+        },
+      })
+    })
+  }
+
+  /**
+   * Equipa ou guarda o marcador: recompõe o sprite com (ou sem) as camadas do
+   * estilingue. Passa pelo MESMO caminho de `avatar-updated` — a arma é uma
+   * camada da textura do personagem, não um objeto solto por cima, e é isso
+   * que a mantém alinhada em cada quadro da caminhada sem sincronizar nada.
+   */
+  private setPaintMarker(userId: string, active: boolean): void {
+    const view = this.characters.get(userId)
+    if (!view || (view.avatar.paintMarker ?? false) === active) return
+    view.avatar = { ...view.avatar, ...(active ? { paintMarker: true } : { paintMarker: undefined }) }
+    this.loadCharacterSprite(view.avatar, view)
   }
 
   private refreshKartVisuals(): void {
@@ -2056,9 +2306,10 @@ export class OfficeScene extends Phaser.Scene {
         image.setVisible(true)
         continue
       }
-      const { px, py } = tileCenter(this.document, kart.x, kart.y)
+      // Já em PIXEL: `mapKarts` devolve o centro do tile publicado, e o kart
+      // montado acompanha o piloto. Antes era tile, e daí o `tileCenter`.
       image
-        .setPosition(px, py)
+        .setPosition(Math.round(kart.x), Math.round(kart.y))
         .setRotation(KART_ROTATION_BY_DIR[kart.dir])
         .setVisible(!kart.riderUserId)
     }
@@ -2073,7 +2324,6 @@ export class OfficeScene extends Phaser.Scene {
   async applyMap(document: MapDocumentV1, assets: readonly OfficeMapAssetDTO[]): Promise<void> {
     this.document = document
     this.assets = assets
-    this.predictor.setDocument(document)
     await this.ensureAssetsLoaded(assets)
     // A publicação suave não encerra a sessão de edição (ver docstring da classe),
     // então a seleção ativa da ferramenta de rotação precisa sobreviver ao
@@ -2204,10 +2454,11 @@ export class OfficeScene extends Phaser.Scene {
       if (message.kind === 'reaction' && this.floatingReactionsActive) return
       this.showNearbyBubble(message.userId, message.text, message.kind ?? 'speech')
     })
-    // Passos do Seguir (FollowController) saem por emitClientMessage, não pelo
-    // canal do teclado — a predição precisa ouvir os dois para animar na hora.
-    const unsubscribeClient = this.bridge.onClientMessage((message) => {
-      if (message.type === 'move') this.applyLocalIntent(message.dir, message.sprint === true)
+    // O Seguir não manda mais passo: ele "segura a tecla" e a amostragem de
+    // input do quadro faz o resto — um caminho só até o servidor, e ele passa
+    // pela predição (ver `OfficeBridge.onAutoWalk`).
+    const unsubscribeClient = this.bridge.onAutoWalk((dir) => {
+      this.autoMove = dir
     })
     // 100% local a este navegador — nunca passou pelo servidor (ver
     // `OfficeBridge.emitSpeakingChanged`).
@@ -2244,8 +2495,6 @@ export class OfficeScene extends Phaser.Scene {
       this.ridingUserIds.clear()
       this.kartStates.clear()
       this.ballStates.clear()
-      this.ballTweens.forEach((tweens) => tweens.forEach((tween) => tween.remove()))
-      this.ballTweens.clear()
       this.input.off('pointerdown', this.handleEditPointerDown, this)
       this.input.off('pointermove', this.handleEditPointerMove, this)
       this.input.off('pointerup', this.handleEditPointerUp, this)
@@ -2280,84 +2529,278 @@ export class OfficeScene extends Phaser.Scene {
     }
   }
 
-  update(time: number): void {
-    // ANTES de qualquer early return: um passo previsto que nunca voltou (o
-    // hub descarta em silêncio o que estoura o rate limit) tem que ser
-    // desfeito mesmo com a entrada travada — senão a tela fica adiantada em
-    // relação à posição autoritativa e o erro só cresce.
-    this.reanchorStalePrediction()
-    if (this.inputLocked || this.bridge.isMovementLocked()) return
+  update(time: number, delta: number): void {
+    // O tempo do QUADRO, não do relógio de parede: `stepBody` recebe `dtMs` por
+    // parâmetro justamente para ser reexecutável na reconciliação.
+    const dtMs = delta
+
+    // Os outros são desenhados sempre — inclusive com a entrada travada (chat
+    // em foco, edição): quem está de fora continua andando na tela de quem
+    // parou.
+    this.drawRemoteBodies(time)
+    this.updateBalls(dtMs)
+
+    if (!this.bodyPredictor || this.inputLocked || this.bridge.isMovementLocked()) {
+      this.sinceInput = 0
+      return
+    }
+
     const sprint = this.shiftKey?.isDown ?? false
-    const move = this.pressedMove()
-    if (!move) return
-    // A diagonal cobre √2 tiles: sem esticar a cadência na mesma proporção,
-    // andar torto ficaria 41% mais rápido que andar reto.
-    const cooldown =
-      (this.isRiding(this.youId)
-        ? KART_INPUT_COOLDOWN_MS
-        : sprint
-          ? SPRINT_INPUT_COOLDOWN_MS
-          : INPUT_COOLDOWN_MS) * (isDiagonalMove(move) ? DIAGONAL_STEP_FACTOR : 1)
-    if (time - this.lastInputAt < cooldown) return
-    this.lastInputAt = time
-    // Mesma sequência na predição e no que vai ao servidor: é ela que faz um
-    // `sync` de recusa desfazer exatamente ESTE passo (ver MovementPredictor).
-    const seq = this.bridge.nextMoveSeq()
-    this.applyLocalIntent(move, sprint, seq)
-    this.bridge.emitMoveIntent({ dir: move, sprint, seq })
+    // O teclado ganha da caminhada automática: quem toca uma tecla assume o
+    // controle na hora (e o Seguir é cancelado por quem ouve `onInput`).
+    const humano = this.pressedMove()
+    const move = humano ?? this.autoMove
+    const passo = move ? MOVE_DIRECTION_DELTAS[move] : { x: 0, y: 0 }
+
+    // Input AMOSTRADO a taxa fixa, e o MESMO pacote aplicado localmente e
+    // mandado. Prever a cada quadro e mandar a cada N faria o cliente simular um
+    // tempo que o servidor nunca recebe — e a reconciliação puxaria o
+    // personagem para trás sem parar.
+    this.sinceInput += dtMs
+    if (this.sinceInput < 1000 / BODY_INPUT_HZ) {
+      this.drawOwnBody()
+      return
+    }
+    const input = this.bodyPredictor.predict(passo.x, passo.y, this.sinceInput, sprint)
+    this.sinceInput = 0
+    // `null` = a fila de não confirmados estourou; o personagem para até o
+    // servidor voltar a responder, em vez de andar em falso.
+    // Mandar SEMPRE, inclusive parado: é o input parado que confirma ao servidor
+    // que a pessoa soltou a tecla, e é o `seq` dele que mantém a reconciliação
+    // andando. Silêncio deixaria o último passo pendurado.
+    // A procedência viaja junto: sem ela, quem cancela o Seguir ao ver alguém
+    // assumir o controle cancelaria o input que o PRÓPRIO Seguir gerou — o
+    // personagem daria um passo e pararia (ver `OfficeInputSource`).
+    if (input) this.bridge.emitInput(input, humano ? 'keyboard' : 'auto')
+    // A caminhada automática esterça por ESTA posição, não pelo snapshot: é a
+    // que o corpo está desenhando agora (ver `OfficeBridge.onSelfBody`). Sai
+    // depois do `predict` de propósito — antes dele, seria a posição do quadro
+    // anterior, e o esterço andaria um passo atrás.
+    const body = this.bodyPredictor.current()
+    this.bridge.emitSelfBody({ x: body.x, y: body.y })
+    this.drawOwnBody()
   }
 
   /**
-   * Predição local: anima o passo do próprio personagem NA HORA da intenção
-   * (tecla ou Seguir), sem esperar o round-trip — o eco `moved` do servidor é
-   * reconciliado em `handle`. Parede vira só o "encarar" imediato (o mesmo
-   * resultado que o `sync` do servidor produziria depois). Desconectado não
-   * prevê: nada será enviado, e andar "no vácuo" viraria um teleporte de
-   * volta no welcome da reconexão.
+   * O passo que a predição roda — o MESMO que o servidor aplica.
+   *
+   * A escolha é feita A CADA input, e não uma vez na criação do preditor,
+   * porque montar e desmontar acontece no meio da sessão. De kart, é
+   * literalmente o passo da corrida: rumo contínuo, inércia e esterço que só
+   * morde andando. Duas implementações de pilotagem divergiriam, e a pessoa
+   * sentiria a diferença entre dirigir aqui e dirigir lá.
    */
-  private applyLocalIntent(move: MoveDirection, sprint: boolean, seq?: number): void {
-    if (!this.youId || !this.bridge.isConnected()) return
-    // O sprite tem quatro poses; a diagonal encara para os lados
-    // (`facingForMove`), exatamente como o servidor faz no eco.
-    const dir = facingForMove(move)
-    const action = this.predictor.predict(move, seq)
-    if (action.kind === 'step') {
-      this.step(this.youId, action.x, action.y, dir, sprint)
-    } else if (action.kind === 'face') {
-      const view = this.characters.get(this.youId)
-      this.updateConfettiDirection(this.youId, dir)
-      if (view) this.face(view, dir)
+  private stepFn(): (state: BodyKartState, input: BodyInput, grid: BodyCollisionGrid) => BodyKartState {
+    return (state, input, grid) => {
+      if (this.isRiding(this.youId)) return stepBodyKart(state, input, grid)
+      // A pé, com os karts ESTACIONADOS como bloqueio — a mesma função e a
+      // mesma lista que o servidor usa. Prever sem eles faria o cliente andar
+      // por cima de um kart e ser puxado de volta a cada snapshot, que é o
+      // "anda e volta" que a predição existe para não ter.
+      return {
+        ...state,
+        ...stepBodyAmongBlockers(state, input, grid, this.parkedKartBlockers()),
+      }
     }
   }
 
   /**
-   * Corta a animação em curso e planta o próprio personagem no tile que o
-   * servidor diz ser o certo. Devolve a view (ou `null` se ela ainda não
-   * existe) para quem chamou completar a correção.
+   * Solta fumaça das rodas quando o kart está rápido e fazendo curva.
+   *
+   * Serve aos dois: o próprio piloto entra com o esterço do teclado, e os
+   * outros com o esterço MEDIDO no rumo interpolado (`emitRemoteKartSmoke`). A
+   * regra de quando fumaçar é uma só (`kartSmoke`) — o que muda é de onde vem
+   * o esterço, e o rateio por roda (`lastSmokeAt`) já é por usuário.
    */
-  private snapSelfTo(x: number, y: number): CharacterView | null {
-    if (!this.youId) return null
-    const view = this.characters.get(this.youId)
-    if (!view) return null
-    view.tween?.stop()
-    view.tile = { x, y }
-    const { px, py } = tileCenter(this.document, x, y)
-    view.container.setPosition(px, py)
-    return view
+  private emitKartSmoke(userId: string, estado: BodyKartState, steer: number, handbrake: boolean): void {
+    const fumaca = kartSmoke(estado, steer, handbrake)
+    if (!fumaca) return
+    const agora = this.time.now
+    fumaca.wheels.forEach((roda, indice) => {
+      const chave = `${userId}:${indice}`
+      if (agora - (this.lastSmokeAt.get(chave) ?? 0) < KART_SMOKE_INTERVAL_MS) return
+      this.lastSmokeAt.set(chave, agora)
+      // Abaixo do personagem: a nuvem sai de baixo do veículo, não por cima dele.
+      puffKartSmoke(this, roda, fumaca.intensity, CHARACTER_DEPTH_BASE - 1)
+    })
   }
 
   /**
-   * Passo previsto que nunca recebeu eco (nem `moved`, nem `sync`) — o hub
-   * descarta em silêncio o que passa do rate limit, e um pacote pode se
-   * perder. Sem esta rede, a tela fica adiantada para sempre e cada passo
-   * seguinte aumenta a distância até o eco divergente re-ancorar tudo de uma
-   * vez; corrigir cedo troca o teleporte por um ajuste de um tile.
+   * Karts estacionados, como caixas que bloqueiam o passo.
+   *
+   * Só os ESTACIONADOS: um kart com piloto anda junto de alguém, e bloquear
+   * nele bloquearia o próprio piloto. Espelha `OfficeHub.kartBlockers` —
+   * divergir aqui é divergir da autoridade, e o sintoma é o personagem
+   * atravessando o kart e voltando de teleporte.
    */
-  private reanchorStalePrediction(): void {
-    const anchor = this.predictor.pruneStale()
-    if (!anchor) return
-    const view = this.snapSelfTo(anchor.x, anchor.y)
-    if (view) this.face(view, view.lastDir)
+  private parkedKartBlockers(): BodyBlocker[] {
+    const { tileWidth, tileHeight } = this.document.map
+    return [...this.kartStates.values()]
+      .filter((kart) => !kart.riderUserId)
+      .map((kart) => ({
+        x: kart.x,
+        y: kart.y,
+        halfWidth: tileWidth / 2,
+        halfHeight: tileHeight / 2,
+      }))
+  }
+
+  /** Põe o próprio personagem onde a predição diz que ele está. */
+  private drawOwnBody(): void {
+    if (!this.youId || !this.bodyPredictor) return
+    const view = this.characters.get(this.youId)
+    if (!view) return
+    const estado = this.bodyPredictor.current()
+    const andando = this.pressedMove() !== null || this.autoMove !== null
+    const saiuDoLugar = view.pos.x !== estado.x || view.pos.y !== estado.y
+    if (this.isRiding(this.youId)) {
+      const move = this.pressedMove() ?? this.autoMove
+      this.emitKartSmoke(this.youId, estado, move ? MOVE_DIRECTION_DELTAS[move].x : 0, this.shiftKey?.isDown ?? false)
+    }
+    this.placeBody(
+      view,
+      estado.x,
+      estado.y,
+      estado.dir,
+      andando,
+      this.shiftKey?.isDown ?? false,
+      this.isRiding(this.youId) ? estado.heading : undefined,
+    )
+    if (saiuDoLugar) this.reattachCameraIfDetached()
+  }
+
+  /**
+   * Devolve o acompanhamento da câmera depois de um arraste ou um zoom.
+   *
+   * Arrastar e dar zoom SOLTAM a câmera de propósito (`CAMERA_DETACHED`), para
+   * a pessoa poder olhar o escritório sem ser puxada de volta. Ela volta
+   * sozinha, com uma transição suave, quando o personagem focado ANDA — e é
+   * andar, não estar de pé, senão o arraste seria desfeito no quadro seguinte e
+   * olhar em volta ficaria impossível.
+   *
+   * Isto morava no `step()` do modelo de grade. Com ele aposentado, a câmera
+   * ficava solta para sempre depois do primeiro zoom.
+   */
+  private reattachCameraIfDetached(): void {
+    if (this.panGesture) return
+    if (this.focusedCameraUserId !== OfficeScene.CAMERA_DETACHED) return
+    const targetId = this.focusUserId ?? this.youId
+    if (this.youId !== targetId) return
+    this.applyCameraFocus(false)
+  }
+
+  /** Desenha os outros a partir do buffer de interpolação. */
+  private drawRemoteBodies(now: number): void {
+    for (const [userId, view] of this.characters) {
+      if (userId === this.youId) continue
+      const at = this.bodyInterpolator.at(userId, now)
+      if (!at) continue
+      const anterior = this.lastRemoteDraw.get(userId)
+      // "Está andando?" sai do movimento INTERPOLADO, não de um campo no
+      // pacote: é o que a pessoa vê na tela, então é o que a animação deve
+      // acompanhar — e economiza um bit por jogador no snapshot.
+      const andando =
+        anterior !== undefined && Math.hypot(at.x - anterior.x, at.y - anterior.y) > REMOTE_IDLE_EPSILON
+      // O RUMO do kart dos outros. Ele vem no snapshot (`h`) e o interpolador
+      // já o gira pelo arco curto — o que faltava era ENTREGÁ-LO ao desenho:
+      // sem isto o kart do colega ficava apontado para onde nasceu enquanto
+      // deslizava para qualquer lado, e a diagonal não batia com a que ele
+      // mesmo vê. Só de quem está montado, senão um rumo velho sobreviveria à
+      // desmontagem e giraria o kart seguinte.
+      const heading = this.isRiding(userId) ? at.heading ?? anterior?.heading : undefined
+      if (heading !== undefined) this.emitRemoteKartSmoke(userId, at, heading, anterior, now)
+      this.lastRemoteDraw.set(userId, { x: at.x, y: at.y, heading, at: now })
+      this.placeBody(view, at.x, at.y, at.dir, andando, this.remoteSprint.has(userId), heading)
+    }
+  }
+
+  /**
+   * Fumaça das rodas do kart dos OUTROS.
+   *
+   * Antes só o próprio piloto fumaçava, porque a intenção de esterço é a única
+   * coisa do controle que o cliente tem. Mas ela não é a única coisa
+   * OBSERVÁVEL: o rumo viaja no snapshot e chega interpolado, e a taxa com que
+   * ele gira é medida — ver `remoteKartSteer`. A velocidade sai do movimento
+   * interpolado pelo mesmo motivo do "está andando?": é a que aparece na tela.
+   *
+   * O freio de mão é o `sprint` do snapshot, que no kart é o mesmo gesto (a
+   * mesma tecla que derrapa é a que corre a pé) — esse, sim, viaja.
+   */
+  private emitRemoteKartSmoke(
+    userId: string,
+    at: { x: number; y: number; dir: Direction },
+    heading: number,
+    anterior: { x: number; y: number; heading?: number; at: number } | undefined,
+    now: number,
+  ): void {
+    if (!anterior || anterior.heading === undefined) return
+    const dtMs = now - anterior.at
+    if (dtMs <= 0) return
+    const speed = Math.hypot(at.x - anterior.x, at.y - anterior.y) / (dtMs / 1000)
+    this.emitKartSmoke(
+      userId,
+      { x: at.x, y: at.y, dir: at.dir, heading, speed },
+      remoteKartSteer(anterior.heading, heading, dtMs),
+      this.remoteSprint.has(userId),
+    )
+  }
+
+  /**
+   * Posiciona um personagem em PIXEL e acerta a animação.
+   *
+   * Substituiu o `step()` de tween entre centros de tile. Não há mais tween: a
+   * posição é contínua e escrita a cada quadro — que é, no fim, a diferença
+   * inteira entre teleportar de célula em célula e deslizar.
+   */
+  private placeBody(
+    view: CharacterView,
+    x: number,
+    y: number,
+    dir: Direction,
+    moving: boolean,
+    sprint: boolean,
+    heading?: number,
+  ): void {
+    view.pos = { x, y }
+    // Simula em float, DESENHA em inteiro: posição fracionária faz o sprite cair
+    // entre texels e a arte tremer a cada quadro.
+    view.container.setPosition(Math.round(x), Math.round(y))
+    const tileY = Math.floor(y / this.document.map.tileHeight)
+    view.tile = { x: Math.floor(x / this.document.map.tileWidth), y: tileY }
+    // Ordem de profundidade pelo TILE, não pelo pixel: é a mesma escala que a
+    // mobília usa, e é o que faz quem está mais ao sul aparecer na frente.
+    // Sem isto o personagem para de reordenar ao andar — passa a ficar sempre
+    // atrás (ou sempre na frente) de quem estava lá quando ele nasceu.
+    if (view.container.depth !== CHARACTER_DEPTH_BASE + tileY) {
+      view.container.setDepth(CHARACTER_DEPTH_BASE + tileY)
+    }
+    if (view.lastDir !== dir) this.face(view, dir)
+    // Andar apaga o pensamento na hora, sem esperar o `thought-cleared` do
+    // servidor: quem se mexe é o primeiro a olhar o próprio balão, e a volta
+    // pela rede deixaria o pensamento sobrando por um punhado de quadros.
+    if (moving && view.bubbleKind === 'thought') this.clearBubble(view)
+    this.updateConfettiDirection(view.userId, dir)
+    // O veículo gira pelo RUMO, e não pelas quatro poses: é o que separa
+    // "dirigir" de "andar rápido", e é o mesmo desenho da corrida. A pose do
+    // LPC continua discreta — quem gira de verdade é a textura do kart.
+    if (view.kart && heading !== undefined) {
+      view.kart.setRotation(heading + KART_TEXTURE_OFFSET)
+      positionKartRider(view)
+    }
+
+    if (!view.textureKey || !('play' in view.body)) return
+    const sprite = view.body as Phaser.GameObjects.Sprite
+    const animKey = `${view.textureKey}-walk-${dir}`
+    if (moving) {
+      if (!sprite.anims.isPlaying || sprite.anims.currentAnim?.key !== animKey) {
+        sprite.play(animKey, true)
+      }
+      // Pernas mais rápidas na corrida, senão o personagem parece deslizar.
+      sprite.anims.timeScale = sprint ? SPRINT_ANIM_TIME_SCALE : 1
+    } else if (sprite.anims.isPlaying) {
+      sprite.anims.stop()
+      sprite.setFrame(characterIdleFrame(dir))
+    }
   }
 
   /**
@@ -2416,6 +2859,9 @@ export class OfficeScene extends Phaser.Scene {
         for (const userId of message.confettiUserIds ?? []) this.setConfetti(userId, true)
         // Mesma ideia para quem já está com a mão levantada no snapshot.
         for (const userId of message.handRaisedUserIds ?? []) this.setHandRaised(userId, true)
+        // …e a tinta ainda viva, com o prazo já descontado pelo servidor: quem
+        // reconecta no meio de uma partida volta pintado do jeito que estava.
+        for (const splat of message.paintSplats ?? []) this.applyPaintSplat(splat)
         // …e para quem já estava de kart: o estado vem no próprio occupant.
         this.ridingUserIds.clear()
         for (const occupant of message.occupants) {
@@ -2425,7 +2871,20 @@ export class OfficeScene extends Phaser.Scene {
         }
         this.refreshKartVisuals()
         const you = message.occupants.find((o) => o.userId === message.youId)
-        this.predictor.reset(you ? { x: you.x, y: you.y } : null)
+        if (you) {
+          // A posição de nascimento é do SERVIDOR. Daqui em diante quem responde
+          // "onde estou" é a predição, reconciliada a cada snapshot.
+          this.bodyPredictor = new ArenaPredictor<BodyKartState>(
+            { x: you.x, y: you.y, dir: you.dir, heading: 0, speed: 0 },
+            bodyCollisionGrid(this.document),
+            { speed: BODY_SPEED },
+            this.stepFn(),
+          )
+          // A presença do escritório sobrevive a uma queda: retomar a numeração
+          // de onde o servidor parou é o que impede a reconexão de congelar o
+          // personagem (ver `welcome.seq`).
+          this.bodyPredictor.resumeAt(message.seq ?? 0)
+        }
         this.applyCameraFocus(true)
         break
       }
@@ -2443,24 +2902,39 @@ export class OfficeScene extends Phaser.Scene {
         this.ridingUserIds.delete(message.userId)
         this.destroyCharacter(message.userId)
         break
-      case 'moved':
-        this.syncRiddenKartState(message.userId, message.x, message.y, message.dir)
-        // Passo do próprio já animado pela predição: o eco só confirma.
-        if (message.userId === this.youId && this.predictor.confirmMove(message.x, message.y)) break
-        this.step(message.userId, message.x, message.y, message.dir, message.sprint === true)
-        break
-      case 'sync': {
-        if (!this.youId) break
-        // Eco de uma parede já prevista: nada a corrigir — o snap desfaria um
-        // passo previsto ainda em voo (andar rente à parede "voltaria" um tile).
-        // Com `seq`, uma recusa DO passo previsto (kart que apareceu no tile,
-        // sala trancada) cai no caso contrário e re-ancora na hora, em vez de
-        // deixar a predição pendurada divergindo do servidor.
-        if (this.predictor.confirmSync(message.x, message.y, message.seq) === 'ignore') break
-        const view = this.snapSelfTo(message.x, message.y)
-        if (!view) break
-        this.updateConfettiDirection(this.youId, message.dir)
-        this.face(view, message.dir)
+      case 'snapshot': {
+        const agora = this.time.now
+        // Os OUTROS entram no buffer de interpolação; o próprio não passa por
+        // ele — quem precisa de resposta imediata é quem está com a mão no
+        // teclado, e esse é reconciliado (ver `ArenaPredictor`).
+        this.bodyInterpolator.push(
+          message.players.filter((player) => player.userId !== this.youId),
+          agora,
+        )
+        for (const player of message.players) {
+          if (player.sprint) this.remoteSprint.add(player.userId)
+          else this.remoteSprint.delete(player.userId)
+          this.syncRiddenKartState(player.userId, player.x, player.y, player.dir)
+          this.recoverMissingView(player.userId)
+        }
+        // A bola autoritativa. O cliente integra a MESMA física entre
+        // snapshots, mas sem esta correção ele integraria para sempre a partir
+        // do último chute — e a bola iria divergindo do servidor até parar num
+        // lugar que só existe nesta tela.
+        if (message.balls) {
+          for (const ball of message.balls) this.ballStates.set(ball.id, { ...ball })
+          this.refreshBallVisuals()
+        }
+        const you = message.players.find((player) => player.userId === this.youId)
+        if (you && this.bodyPredictor) {
+          // Rumo e velocidade fazem parte do estado autoritativo de quem está
+          // de kart: reancorar sem eles reexecutaria os pendentes a partir de um
+          // veículo apontado para outro lado, e a correção viria como um tranco.
+          this.bodyPredictor.reconcile(
+            { x: you.x, y: you.y, dir: you.dir, heading: you.h ?? 0, speed: you.v ?? 0 },
+            you.seq,
+          )
+        }
         break
       }
       case 'faced': {
@@ -2478,13 +2952,21 @@ export class OfficeScene extends Phaser.Scene {
           this.showNearbyBubble(message.userId, message.text, message.kind ?? 'speech')
         }
         break
+      case 'thought-cleared':
+        this.clearThoughtBubble(message.userId)
+        break
       case 'avatar-updated': {
         const view = this.characters.get(message.userId)
         if (view) {
-          this.loadCharacterSprite(
-            { userId: message.userId, avatarSeed: message.avatarSeed, avatarOptions: message.avatarOptions } as OfficeOccupant,
-            view,
-          )
+          // Parte do avatar, e não o avatar inteiro: o marcador de paintball
+          // é estado de jogo e não vem neste payload — recompor a partir do
+          // zero desarmaria quem trocou de roupa no meio da partida.
+          view.avatar = {
+            ...view.avatar,
+            avatarSeed: message.avatarSeed,
+            avatarOptions: message.avatarOptions,
+          }
+          this.loadCharacterSprite(view.avatar, view)
         }
         break
       }
@@ -2508,7 +2990,13 @@ export class OfficeScene extends Phaser.Scene {
         this.refreshKartVisuals()
         break
       case 'ball-kicked':
-        this.playBallKick(message.kick)
+        this.playBallKick(message.userId, message.ball, message.power)
+        break
+      case 'paint-marker':
+        this.setPaintMarker(message.userId, message.active)
+        break
+      case 'paintball-shot':
+        this.playPaintballShot(message.shot)
         break
       case 'balls-updated':
         this.ballStates = new Map(message.balls.map((ball) => [ball.id, ball]))
@@ -2781,6 +3269,10 @@ export class OfficeScene extends Phaser.Scene {
     }
     view.container.destroy()
     this.characters.delete(userId)
+    // O último quadro dele não sobrevive à saída: quem volta depois entraria
+    // com um `dt` de minutos e um salto de mapa inteiro — velocidade e "está
+    // andando?" saem os dois desse delta.
+    this.lastRemoteDraw.delete(userId)
   }
 
   private spawn(occupant: OfficeOccupant): void {
@@ -2812,16 +3304,26 @@ export class OfficeScene extends Phaser.Scene {
       this.bridge.emitCharacterClick(userId)
     })
 
-    container.setDepth(CHARACTER_DEPTH_BASE + occupant.y)
+    // Em TILE, como no `placeBody` — `occupant.y` virou pixel, e somar pixel
+    // aqui poria todo personagem à frente da mobília.
+    container.setDepth(CHARACTER_DEPTH_BASE + Math.floor(occupant.y / this.document.map.tileHeight))
 
     const view: CharacterView = {
       userId: occupant.userId,
       container,
       body,
+      pos: { x: occupant.x, y: occupant.y },
       bodyBaseY: 0,
       hasAvatar: false,
       lastDir: occupant.dir,
       tile: { x: occupant.x, y: occupant.y },
+      avatar: {
+        userId: occupant.userId,
+        avatarStyle: occupant.avatarStyle,
+        avatarSeed: occupant.avatarSeed,
+        avatarOptions: occupant.avatarOptions,
+        paintMarker: occupant.paintMarker,
+      },
     }
     view.spinTween = this.tweens.add({
       targets: body,
@@ -2830,7 +3332,7 @@ export class OfficeScene extends Phaser.Scene {
       repeat: -1,
     })
     this.characters.set(occupant.userId, view)
-    this.loadCharacterSprite(occupant, view)
+    this.loadCharacterSprite(view.avatar, view)
     if (occupant.thoughtText) this.showNearbyBubble(occupant.userId, occupant.thoughtText, 'thought')
     const targetId = this.focusUserId ?? this.youId
     if (occupant.userId === targetId) this.applyCameraFocus(this.focusedCameraUserId === null)
@@ -2841,14 +3343,14 @@ export class OfficeScene extends Phaser.Scene {
    * o personagem quando pronto. Composição é local e rápida (~centenas de ms);
    * em falha (404 de camada) o spinner fica — sem rede não há o que mostrar.
    */
-  private loadCharacterSprite(occupant: OfficeOccupant, view: CharacterView): void {
+  private loadCharacterSprite(occupant: CharacterAvatar, view: CharacterView): void {
     const textureKey = occupantTextureKey(occupant)
     if (this.textures.exists(textureKey)) {
       this.applyCharacterSprite(view, textureKey)
       return
     }
     const options = occupantCharacterOptions(occupant)
-    void composeCharacterSheet(options)
+    void composeCharacterSheet(options, undefined, occupantExtraLayers(occupant))
       .then((sheet) => {
         // O occupant pode ter saído (ou a cena morrido) durante a composição —
         // nesses casos o view registrado já não é este e nada deve acontecer.
@@ -2923,7 +3425,21 @@ export class OfficeScene extends Phaser.Scene {
       const currentTargetId = this.focusUserId ?? this.youId
       const currentView = currentTargetId ? this.characters.get(currentTargetId) : null
       if (!currentTargetId || !currentView) return
-      camera.startFollow(currentView.container, true, 0.1, 0.1)
+      // COLADA, sem lerp — a mesma escolha da arena, e pelo mesmo motivo.
+      //
+      // Com lerp a câmera persegue o personagem, e o scroll cai em valores
+      // fracionários; com `roundPixels`, esses valores arredondam num ritmo
+      // diferente do da posição do personagem (que também é arredondada), e o
+      // resultado é o personagem TREMENDO contra o cenário.
+      //
+      // No modelo de grade isso não aparecia: o passo era um tween de 150ms
+      // entre centros de tile, longo e uniforme o bastante para a câmera
+      // arrastar junto sem bater. Com posição contínua amostrada a 30Hz, o
+      // descompasso vira tremor.
+      //
+      // A transição ao trocar de foco NÃO depende do lerp: quem a faz é o
+      // `camera.pan` logo abaixo.
+      camera.startFollow(currentView.container, true)
       this.focusedCameraUserId = currentTargetId
     }
 
@@ -3198,6 +3714,17 @@ export class OfficeScene extends Phaser.Scene {
     })
   }
 
+  /**
+   * Tira do ar o balão de PENSAMENTO de alguém (fala e reação somem sozinhas,
+   * por tween). É o que o `step()` do modelo de grade fazia a cada passo; com
+   * o movimento livre, quem decide é o servidor (`thought-cleared`) e a
+   * predição do próprio corpo (ver `placeBody`).
+   */
+  private clearThoughtBubble(userId: string): void {
+    const view = this.characters.get(userId)
+    if (view?.bubbleKind === 'thought') this.clearBubble(view)
+  }
+
   private clearBubble(view: CharacterView): void {
     view.bubbleTween?.stop()
     view.bubbleTween = undefined
@@ -3206,115 +3733,28 @@ export class OfficeScene extends Phaser.Scene {
     view.bubbleKind = undefined
   }
 
-  private step(userId: string, x: number, y: number, dir: Direction, sprint: boolean): void {
-    let view = this.characters.get(userId)
-    if (!view) {
-      // Não deveria acontecer — welcome/joined sempre criam a view antes de
-      // qualquer moved. Mas se acontecer (ex.: mensagem fora de ordem), sem
-      // isto a pessoa ficaria "presa" pra sempre NESTE cliente específico,
-      // já que nada mais resincroniza `characters` fora de welcome/joined.
-      // O bridge já tem o snapshot completo do occupant — a mesma mutação
-      // deste 'moved' já rodou nele antes de notificar a cena (ver
-      // `OfficeBridge.emitServerMessage`) — então dá pra recriar a view na
-      // hora, sem round-trip com o servidor.
-      const occupant = this.bridge.occupantSnapshot(userId)
-      if (!occupant) {
-        console.warn(`[OfficeScene] moved para userId sem view e sem occupant conhecido: ${userId}`)
-        return
-      }
-      console.warn(`[OfficeScene] moved para userId sem CharacterView — recriando a partir do snapshot: ${userId}`)
-      this.spawn(occupant)
-      view = this.characters.get(userId)
-      if (!view) return
-    }
-
-    // Retoma o acompanhamento de câmera (solto por um arraste manual, ver
-    // `handlePanPointerDown`) assim que o personagem focado anda de novo —
-    // `applyCameraFocus(false)` faz um pan animado (não um salto) até ele,
-    // já que `focusedCameraUserId` está em `CAMERA_DETACHED` (nem `null` nem
-    // o próprio targetId), condição que a torna escolhe a transição suave.
-    if (!this.panGesture) {
-      const targetId = this.focusUserId ?? this.youId
-      if (userId === targetId && this.focusedCameraUserId === OfficeScene.CAMERA_DETACHED) {
-        this.applyCameraFocus(false)
-      }
-    }
-
-    // O kart ganha do sprint: quem está montado anda na velocidade do veículo
-    // mesmo sem segurar Shift.
-    const riding = this.ridingUserIds.has(userId)
-    const target = tileCenter(this.document, x, y)
-    // Passo diagonal (os dois eixos mudam) cobre √2 tiles e dura na mesma
-    // proporção — é o que mantém a velocidade igual em qualquer direção.
-    const diagonal = view.tile.x !== x && view.tile.y !== y
-    view.tile = { x, y }
-    const duration =
-      (riding ? KART_STEP_MS : sprint ? SPRINT_STEP_MS : STEP_MS) *
-      (diagonal ? DIAGONAL_STEP_FACTOR : 1)
-
-    view.tween?.stop()
-    view.bobTween?.stop()
-    if (view.bubbleKind === 'thought') this.clearBubble(view)
-    this.updateConfettiDirection(userId, dir)
-    this.face(view, dir)
-    const { px, py } = target
-
-    // Personagem LPC composto: toca o walk cycle da direção e para no frame
-    // parado (idle) da última direção ao chegar no tile. Correndo, as pernas
-    // animam mais rápido (timeScale) — senão o personagem parece deslizar.
-    if (view.textureKey && 'play' in view.body) {
-      const sprite = view.body as Phaser.GameObjects.Sprite
-      sprite.play(`${view.textureKey}-walk-${dir}`, true)
-      // De kart as pernas ficam paradas — quem anda é o veículo.
-      sprite.anims.timeScale = riding ? 0 : sprint ? SPRINT_ANIM_TIME_SCALE : 1
-      view.tween = this.tweens.add({
-        targets: view.container,
-        x: px,
-        y: py,
-        duration,
-        ease: 'Linear',
-        onComplete: () => {
-          view.container.setDepth(CHARACTER_DEPTH_BASE + y)
-          // Um avatar-updated no meio do passo troca o body: o sprite capturado
-          // aqui já foi destruído (anims nulo) — parar/posar só o body atual.
-          if (view.body !== sprite) return
-          sprite.stop()
-          sprite.setFrame(characterIdleFrame(view.lastDir))
-        },
-      })
+  /**
+   * Recria a `CharacterView` de quem aparece no snapshot sem ter uma.
+   *
+   * Não deveria acontecer — `welcome`/`joined` sempre criam a view antes. Mas se
+   * acontecer (mensagem fora de ordem, por exemplo), sem isto a pessoa fica
+   * INVISÍVEL para sempre NESTE cliente: `drawRemoteBodies` pula quem não tem
+   * view, e nada mais ressincroniza `characters` fora de welcome/joined.
+   *
+   * O bridge já tem o snapshot completo do occupant (ele processa a mensagem
+   * antes de notificar a cena), então dá para recriar na hora, sem round-trip.
+   */
+  private recoverMissingView(userId: string): void {
+    if (this.characters.has(userId)) return
+    const occupant = this.bridge.occupantSnapshot(userId)
+    if (!occupant) {
+      console.warn(`[OfficeScene] snapshot com userId sem view e sem occupant conhecido: ${userId}`)
       return
     }
-
-    // Spinner ainda de pé (composição em voo): tween de posição + bob antigos.
-    view.tween = this.tweens.add({
-      targets: view.container,
-      x: px,
-      y: py,
-      duration,
-      ease: 'Linear',
-      onComplete: () => {
-        view.container.setDepth(y)
-      },
-    })
-
-    // "Walk cycle" do placeholder: um bob vertical enquanto o passo acontece.
-    // Rastreado em `view.bobTween` e parado a cada passo novo — o servidor
-    // permite mais passos/s do que a duração do bob, então passos em
-    // sequência sobrepunham dois tweens escrevendo em `body.y` ao mesmo tempo.
-    view.bobTween = this.tweens.add({
-      targets: view.body,
-      y: view.bodyBaseY - 2,
-      duration: duration / 2,
-      yoyo: true,
-      ease: 'Sine.easeInOut',
-      onComplete: () => view.body.setY(view.bodyBaseY),
-    })
+    console.warn(`[OfficeScene] snapshot com userId sem CharacterView — recriando: ${userId}`)
+    this.spawn(occupant)
   }
 
-  /**
-   * Direção: personagem LPC troca de frame/animação (walk enquanto anda, frame
-   * parado da direção quando parado); o spinner de loading não tem direção.
-   */
   private face(view: CharacterView, dir: Direction): void {
     view.lastDir = dir
     // Antes do early return abaixo: o kart precisa virar mesmo em personagem

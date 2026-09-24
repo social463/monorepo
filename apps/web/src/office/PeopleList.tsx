@@ -13,18 +13,33 @@ export interface PeopleListProps {
   onCall: (userId: string) => void
   onFollow: (userId: string) => void
   onViewProfile: (userId: string) => void
+  /** Quem manda na sala em que VOCÊ está — ganha o selo na lista. */
+  roomManagerId?: string | null
+  /** Quem está na mesma sala que você agora: só esses podem ser removidos. */
+  removableUserIds?: readonly string[]
+  /** Ausente quando você não modera a sala: a ação nem aparece. */
+  onRemoveFromRoom?: (userId: string) => void
 }
 
-export type PersonAction = 'call' | 'follow' | 'view-profile'
+export type PersonAction = 'call' | 'follow' | 'view-profile' | 'remove-from-room'
 
 /**
  * Ações disponíveis no menu de uma pessoa. Chamar/seguir só fazem sentido para
  * OUTRA pessoa PRESENTE; a sua própria linha e qualquer offline só têm perfil.
+ *
+ * `canRemove` só chega true para quem modera a sala e para alguém que está
+ * nela — por isso a remoção entra depois das demais, e nunca na própria linha.
  */
-export function menuActionsFor(args: { isSelf: boolean; isOnline: boolean; isGuest?: boolean }): PersonAction[] {
-  if (args.isGuest) return args.isSelf ? [] : ['call', 'follow']
+export function menuActionsFor(args: {
+  isSelf: boolean
+  isOnline: boolean
+  isGuest?: boolean
+  canRemove?: boolean
+}): PersonAction[] {
+  const remove: PersonAction[] = args.canRemove && !args.isSelf ? ['remove-from-room'] : []
+  if (args.isGuest) return args.isSelf ? [] : ['call', 'follow', ...remove]
   if (args.isSelf) return ['view-profile']
-  if (args.isOnline) return ['call', 'follow', 'view-profile']
+  if (args.isOnline) return ['call', 'follow', 'view-profile', ...remove]
   return ['view-profile']
 }
 
@@ -32,11 +47,13 @@ const ACTION_LABEL: Record<PersonAction, string> = {
   call: 'Chamar',
   follow: 'Seguir',
   'view-profile': 'Ver perfil',
+  'remove-from-room': 'Remover da reunião',
 }
 const ACTION_ICON: Record<PersonAction, string> = {
   call: 'call',
   follow: 'directions_walk',
   'view-profile': 'account_circle',
+  'remove-from-room': 'person_remove',
 }
 
 /**
@@ -62,7 +79,17 @@ interface Person extends AvatarSource {
   status?: OfficeUserStatus
 }
 
-export function PeopleList({ occupants, youId, searchTerm = '', onCall, onFollow, onViewProfile }: PeopleListProps) {
+export function PeopleList({
+  occupants,
+  youId,
+  searchTerm = '',
+  onCall,
+  onFollow,
+  onViewProfile,
+  roomManagerId = null,
+  removableUserIds,
+  onRemoveFromRoom,
+}: PeopleListProps) {
   const [openMenuUserId, setOpenMenuUserId] = useState<string | null>(null)
   const [expanded, setExpanded] = useState({ online: true, offline: false })
 
@@ -128,15 +155,23 @@ export function PeopleList({ occupants, youId, searchTerm = '', onCall, onFollow
     if (!stillThere) setOpenMenuUserId(null)
   }, [online, offline, openMenuUserId])
 
+  const removable = new Set(removableUserIds ?? [])
+
   const runAction = (action: PersonAction, userId: string) => {
     if (action === 'call') onCall(userId)
     else if (action === 'follow') onFollow(userId)
+    else if (action === 'remove-from-room') onRemoveFromRoom?.(userId)
     else onViewProfile(userId)
     setOpenMenuUserId(null)
   }
 
   const renderRow = (person: Person) => {
-    const actions = menuActionsFor({ isSelf: person.isSelf, isOnline: person.isOnline, isGuest: person.isGuest })
+    const actions = menuActionsFor({
+      isSelf: person.isSelf,
+      isOnline: person.isOnline,
+      isGuest: person.isGuest,
+      canRemove: !!onRemoveFromRoom && removable.has(person.userId),
+    })
     const menuOpen = openMenuUserId === person.userId
     return (
       <li key={person.userId} className="flex items-center gap-sm">
@@ -156,6 +191,15 @@ export function PeopleList({ occupants, youId, searchTerm = '', onCall, onFollow
             {person.name}
             {person.isSelf ? ' (você)' : ''}
             {person.isGuest ? ' (Convidado)' : ''}
+            {person.userId === roomManagerId && (
+              <span
+                title="Responsável pela sala"
+                aria-label="Responsável pela sala"
+                className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-primary align-middle font-label text-[10px] leading-none text-on-primary"
+              >
+                M
+              </span>
+            )}
           </p>
           <p
             className={`font-body text-body-sm ${

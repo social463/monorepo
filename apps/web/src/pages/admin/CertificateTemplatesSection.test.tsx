@@ -3,6 +3,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { vi, type Mock } from 'vitest'
 import { CertificateTemplatesSection } from './CertificateTemplatesSection'
 import { ApiError } from '../../lib/api'
+import * as api from '../../lib/api'
+import * as upload from '../../lib/upload'
 import * as learningApi from '../../lib/learning-api'
 
 vi.mock('../../lib/learning-api', async (importOriginal) => {
@@ -16,6 +18,19 @@ vi.mock('../../lib/learning-api', async (importOriginal) => {
   }
 })
 
+// O campo de upload pergunta ao servidor se há armazenamento configurado antes
+// de oferecer o botão; sem isto ele mostraria "não está configurado".
+vi.mock('../../lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/api')>()
+  return { ...actual, apiFetch: vi.fn() }
+})
+vi.mock('../../lib/upload', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/upload')>()
+  return { ...actual, uploadImage: vi.fn() }
+})
+
+const mockApiFetch = api.apiFetch as unknown as Mock
+const mockUploadImage = upload.uploadImage as unknown as Mock
 const mockList = learningApi.listCertificateTemplates as unknown as Mock
 const mockCreate = learningApi.createCertificateTemplate as unknown as Mock
 const mockUpdate = learningApi.updateCertificateTemplate as unknown as Mock
@@ -49,6 +64,7 @@ function renderSection() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockApiFetch.mockResolvedValue({ enabled: true, allowedContentTypes: ['image/png'], maxBytes: 5_000_000 })
 })
 
 describe('CertificateTemplatesSection — listagem', () => {
@@ -72,7 +88,7 @@ describe('CertificateTemplatesSection — listagem', () => {
 })
 
 describe('CertificateTemplatesSection — criação', () => {
-  it('cria um modelo novo com os campos preenchidos', async () => {
+  it('cria um modelo novo herdando a identidade visual da empresa', async () => {
     mockList.mockResolvedValue({ templates: [] })
     mockCreate.mockResolvedValue({ template: buildTemplate() })
     renderSection()
@@ -82,7 +98,6 @@ describe('CertificateTemplatesSection — criação', () => {
     fireEvent.change(screen.getByLabelText('Título exibido no certificado'), {
       target: { value: 'Certificado de Conclusão' },
     })
-    fireEvent.change(screen.getByLabelText('Cor de destaque (hex)'), { target: { value: '#2f8b4d' } })
     fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
     fireEvent.change(screen.getByLabelText('Cargo de quem assina'), {
       target: { value: 'Diretora de Gente e Gestão' },
@@ -94,7 +109,9 @@ describe('CertificateTemplatesSection — criação', () => {
         name: 'Modelo padrão',
         title: 'Certificado de Conclusão',
         backgroundUrl: null,
-        accentColor: '#2f8b4d',
+        // Nulo é a escolha, não um campo esquecido: a marca da empresa é o
+        // padrão e o modelo só sobrescreve quem pedir.
+        accentColor: null,
         signatureName: 'Maria Silva',
         signatureRole: 'Diretora de Gente e Gestão',
         signatureImageUrl: null,
@@ -102,6 +119,29 @@ describe('CertificateTemplatesSection — criação', () => {
         isDefault: false,
       }),
     )
+  })
+
+  /**
+   * A cor própria continua existindo, como exceção — quem desmarca a herança
+   * ganha o campo de volta e ele é que manda.
+   */
+  it('desmarcar a herança revela a cor de destaque e ela vai no lugar da marca', async () => {
+    mockList.mockResolvedValue({ templates: [] })
+    mockCreate.mockResolvedValue({ template: buildTemplate() })
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '+ Novo modelo' }))
+    expect(screen.queryByLabelText('Cor de destaque (hex)')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Usar a cor cadastrada da empresa'))
+    fireEvent.change(screen.getByLabelText('Nome do modelo'), { target: { value: 'Modelo padrão' } })
+    fireEvent.change(screen.getByLabelText('Título exibido no certificado'), { target: { value: 'Certificado' } })
+    fireEvent.change(screen.getByLabelText('Cor de destaque (hex)'), { target: { value: '#1a2b3c' } })
+    fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
+    fireEvent.change(screen.getByLabelText('Cargo de quem assina'), { target: { value: 'Diretora' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Criar modelo' }))
+
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ accentColor: '#1a2b3c' })))
   })
 
   it('marca isDefault quando o checkbox de modelo padrão é ativado', async () => {
@@ -114,7 +154,6 @@ describe('CertificateTemplatesSection — criação', () => {
     fireEvent.change(screen.getByLabelText('Título exibido no certificado'), {
       target: { value: 'Certificado de Conclusão' },
     })
-    fireEvent.change(screen.getByLabelText('Cor de destaque (hex)'), { target: { value: '#2f8b4d' } })
     fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
     fireEvent.change(screen.getByLabelText('Cargo de quem assina'), { target: { value: 'Diretora' } })
     fireEvent.click(screen.getByLabelText('Modelo padrão da empresa'))
@@ -144,7 +183,6 @@ describe('CertificateTemplatesSection — criação', () => {
     fireEvent.click(await screen.findByRole('button', { name: '+ Novo modelo' }))
     fireEvent.change(screen.getByLabelText('Nome do modelo'), { target: { value: 'Modelo padrão' } })
     fireEvent.change(screen.getByLabelText('Título exibido no certificado'), { target: { value: 'Certificado' } })
-    fireEvent.change(screen.getByLabelText('Cor de destaque (hex)'), { target: { value: '#2f8b4d' } })
     fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
     fireEvent.change(screen.getByLabelText('Cargo de quem assina'), { target: { value: 'Diretora' } })
     fireEvent.click(screen.getByRole('button', { name: 'Criar modelo' }))
@@ -163,7 +201,6 @@ describe('CertificateTemplatesSection — criação', () => {
     fireEvent.click(await screen.findByRole('button', { name: '+ Novo modelo' }))
     fireEvent.change(screen.getByLabelText('Nome do modelo'), { target: { value: 'Modelo padrão' } })
     fireEvent.change(screen.getByLabelText('Título exibido no certificado'), { target: { value: 'Certificado' } })
-    fireEvent.change(screen.getByLabelText('Cor de destaque (hex)'), { target: { value: '#2f8b4d' } })
     fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
     fireEvent.change(screen.getByLabelText('Cargo de quem assina'), { target: { value: 'Diretora' } })
 
@@ -187,6 +224,19 @@ describe('CertificateTemplatesSection — edição', () => {
     expect(screen.getByLabelText('Título exibido no certificado')).toHaveValue('Certificado de Conclusão')
     expect(screen.getByLabelText('Nome de quem assina')).toHaveValue('Maria Silva')
     expect(screen.getByRole('button', { name: 'Salvar modelo' })).toBeInTheDocument()
+    // Modelo com cor própria abre com a herança desmarcada — senão salvar sem
+    // mexer em nada trocaria a cor dele pela da empresa, em silêncio.
+    expect(screen.getByLabelText('Usar a cor cadastrada da empresa')).not.toBeChecked()
+    expect(screen.getByLabelText('Cor de destaque (hex)')).toHaveValue('#2f8b4d')
+  })
+
+  it('modelo que já herda a marca abre com a herança marcada', async () => {
+    mockList.mockResolvedValue({ templates: [buildTemplate({ accentColor: null })] })
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Editar modelo Modelo padrão' }))
+    expect(screen.getByLabelText('Usar a cor cadastrada da empresa')).toBeChecked()
+    expect(screen.queryByLabelText('Cor de destaque (hex)')).not.toBeInTheDocument()
   })
 
   it('salva a edição chamando updateCertificateTemplate com o id do modelo', async () => {
@@ -239,5 +289,50 @@ describe('CertificateTemplatesSection — exclusão', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Excluir modelo Modelo padrão' }))
 
     expect(await screen.findByText('Modelo de certificado não encontrado.')).toBeInTheDocument()
+  })
+})
+
+/**
+ * O pedido da G&G: personalizar o design **sem colar URL**. Antes os três
+ * campos eram caixas de texto esperando um endereço que alguém teria de
+ * hospedar por fora.
+ */
+describe('CertificateTemplatesSection — imagens por upload', () => {
+  it('oferece enviar fundo, logo e assinatura em vez de pedir URL', async () => {
+    mockList.mockResolvedValue({ templates: [] })
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '+ Novo modelo' }))
+    expect(await screen.findByRole('button', { name: 'Enviar arte de fundo' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Enviar logo' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Enviar assinatura' })).toBeInTheDocument()
+    expect(screen.queryByLabelText(/URL do plano de fundo/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/URL do logo/i)).not.toBeInTheDocument()
+  })
+
+  it('o arquivo enviado vira a URL gravada no modelo', async () => {
+    mockList.mockResolvedValue({ templates: [] })
+    mockCreate.mockResolvedValue({ template: buildTemplate() })
+    mockUploadImage.mockResolvedValue({ url: 'https://cdn.exemplo.com/fundos/papel.png' })
+    renderSection()
+
+    fireEvent.click(await screen.findByRole('button', { name: '+ Novo modelo' }))
+    await screen.findByRole('button', { name: 'Enviar arte de fundo' })
+    fireEvent.change(screen.getByLabelText('Plano de fundo'), {
+      target: { files: [new File(['x'], 'papel.png', { type: 'image/png' })] },
+    })
+    await waitFor(() => expect(mockUploadImage).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByLabelText('Nome do modelo'), { target: { value: 'Modelo' } })
+    fireEvent.change(screen.getByLabelText('Título exibido no certificado'), { target: { value: 'Certificado' } })
+    fireEvent.change(screen.getByLabelText('Nome de quem assina'), { target: { value: 'Maria Silva' } })
+    fireEvent.change(screen.getByLabelText('Cargo de quem assina'), { target: { value: 'Diretora' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Criar modelo' }))
+
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ backgroundUrl: 'https://cdn.exemplo.com/fundos/papel.png' }),
+      ),
+    )
   })
 })

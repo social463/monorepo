@@ -72,7 +72,7 @@ describe('CoinIndicator', () => {
     expect(panel).toBeInTheDocument()
     // O último lançamento aparece; a lista de regras não, ela mora no manual.
     expect(await screen.findByText('Registrar o humor do dia')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /como ganhar emr coins/i })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /como ganhar e usar suas emr coins/i })).toHaveAttribute(
       'href',
       '/manual-game',
     )

@@ -49,7 +49,7 @@ describe('GET /admin/mood/overview', () => {
     await app.close()
   })
 
-  it('a resposta não contém userId em nenhum campo, incluindo os comentários', async () => {
+  it('os comentários vêm com autor; os agregados seguem anônimos', async () => {
     const app = buildApp()
     await app.ready()
     const token = await tokenFor(app, 'admin-anon@empresa.com', 'ADMIN')
@@ -61,15 +61,24 @@ describe('GET /admin/mood/overview', () => {
       headers: { authorization: `Bearer ${token}` },
     })
 
-    const raw = res.payload
     expect(res.statusCode).toBe(200)
-    expect(res.json().overview.comments.length).toBe(MOOD_ANONYMITY_MIN)
-    expect(raw).not.toContain('userId')
-    const users = await prisma.user.findMany({ select: { id: true, name: true, email: true } })
-    for (const user of users) {
-      expect(raw).not.toContain(user.id)
-      expect(raw).not.toContain(user.email)
+    const overview = res.json().overview
+    expect(overview.comments.length).toBe(MOOD_ANONYMITY_MIN)
+    // A G&G pediu identificação para conseguir agir sobre o que lê (Documento 3,
+    // seção 4.6) — e a copy do colaborador deixou de prometer confidencialidade
+    // junto com esta mudança. Este teste afirmava o contrário até então.
+    for (const comment of overview.comments) {
+      expect(comment.author.id).toBeTruthy()
+      expect(comment.author.name).toBeTruthy()
     }
+    // O que NÃO mudou: agregado nenhum carrega pessoa. Média, tendência e
+    // distribuição continuam sendo do recorte, não de quem respondeu.
+    for (const point of overview.trend) expect(point).not.toHaveProperty('userId')
+    for (const slice of overview.todayDistribution) expect(slice).not.toHaveProperty('userId')
+    // O autor é um `PublicUser` inteiro, e-mail incluído — é o mesmo DTO que o
+    // feed, o perfil e o ranking já entregam a qualquer pessoa logada, então
+    // identificar o comentário não abre nada que o produto já não mostrasse. O
+    // que restringe aqui é a porta: o painel é do bloco de Gente e Gestão.
     await app.close()
   })
 

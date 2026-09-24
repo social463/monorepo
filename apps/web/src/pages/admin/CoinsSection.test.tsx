@@ -28,6 +28,7 @@ function setupFetch(overrides: Record<string, unknown> = {}) {
     const method = options?.method
     if (path === '/admin/coins/rules' && !method) return Promise.resolve({ rules: [RULE] })
     if (path === '/admin/coins/rules' && method === 'POST') return Promise.resolve({ rule: RULE })
+    if (path.startsWith('/admin/coins/rules/') && method === 'PATCH') return Promise.resolve({ rule: RULE })
     if (path === '/admin/users' && !method) {
       return Promise.resolve({ users: [{ id: 'u1', name: 'Ana', email: 'ana@x.com' }] })
     }
@@ -97,6 +98,49 @@ describe('CoinsSection', () => {
         body: JSON.stringify({ event: 'FEEDBACK_PUBLISHED', amount: 20, capWindow: 'NONE', capAmount: null }),
       }),
     )
+  })
+
+  it('edita valor e teto de uma regra existente (Documento 3, seção 5)', async () => {
+    renderSection()
+    await userEvent.click(await screen.findByRole('button', { name: 'Editar' }))
+
+    const amount = screen.getByLabelText('Coins por ação')
+    await userEvent.clear(amount)
+    await userEvent.type(amount, '75')
+    await userEvent.click(screen.getByRole('combobox', { name: 'Janela do teto' }))
+    await userEvent.click(await screen.findByRole('option', { name: /semana/i }))
+    const teto = screen.getByLabelText('Teto da janela')
+    await userEvent.type(teto, '100')
+    await userEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+
+    await waitFor(() =>
+      expect(mockApiFetch).toHaveBeenCalledWith('/admin/coins/rules/r1', {
+        method: 'PATCH',
+        body: JSON.stringify({ amount: 75, capWindow: 'WEEK', capAmount: 100 }),
+      }),
+    )
+  })
+
+  it('o evento não é editável — ele é a identidade da regra', async () => {
+    renderSection()
+    await userEvent.click(await screen.findByRole('button', { name: 'Editar' }))
+
+    // O formulário de edição não oferece o seletor de evento; trocá-lo seria
+    // apagar uma regra e criar outra por baixo, com o extrato apontando errado.
+    expect(screen.queryByRole('combobox', { name: /^evento$/i })).not.toBeInTheDocument()
+  })
+
+  it('cancelar a edição não grava nada', async () => {
+    renderSection()
+    await userEvent.click(await screen.findByRole('button', { name: 'Editar' }))
+    const amount = screen.getByLabelText('Coins por ação')
+    await userEvent.clear(amount)
+    await userEvent.type(amount, '999')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+
+    expect(screen.getByRole('button', { name: 'Editar' })).toBeInTheDocument()
+    expect(mockApiFetch).not.toHaveBeenCalledWith('/admin/coins/rules/r1', expect.anything())
   })
 
   it('esconde do seletor os eventos que já têm regra', async () => {

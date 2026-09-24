@@ -103,10 +103,14 @@ describe('useOfficeSocket', () => {
     await waitFor(() => expect(result.current.occupants).toHaveLength(2))
 
     act(() => {
-      ws.serverSends({ type: 'moved', userId: 'bruno', x: 12, y: 13, dir: 'up' })
+      // Posição agora chega por SNAPSHOT, em pixel — não por um evento por passo.
+      ws.serverSends({
+        type: 'snapshot',
+        players: [{ userId: 'bruno', x: 384, y: 416, dir: 'up', seq: 7 }],
+      })
     })
     await waitFor(() =>
-      expect(result.current.occupants.find((o) => o.userId === 'bruno')).toMatchObject({ x: 12, y: 13, dir: 'up' }),
+      expect(result.current.occupants.find((o) => o.userId === 'bruno')).toMatchObject({ x: 384, y: 416, dir: 'up' }),
     )
 
     act(() => {
@@ -153,21 +157,25 @@ describe('useOfficeSocket', () => {
     const ws = FakeWebSocket.instances[0]
     act(() => ws.onopen?.())
 
-    act(() => bridge.emitMoveIntent({ dir: 'right', sprint: false }))
+    const input = { seq: 1, dx: 1, dy: 0, dtMs: 33 }
+    act(() => bridge.emitInput(input))
 
-    expect(ws.sent).toContain(JSON.stringify({ type: 'move', dir: 'right' }))
+    expect(ws.sent).toContain(JSON.stringify({ type: 'input', input }))
   })
 
-  it('envia sprint:true quando a intenção de movimento vem correndo', async () => {
+  it('a corrida viaja DENTRO do input, não como campo separado', async () => {
+    // `sprint` é parte da simulação: se o cliente corresse e o servidor não, a
+    // reconciliação puxaria o personagem para trás a cada snapshot.
     const bridge = new OfficeBridge()
     renderHook(() => useOfficeSocket(bridge))
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
     const ws = FakeWebSocket.instances[0]
     act(() => ws.onopen?.())
 
-    act(() => bridge.emitMoveIntent({ dir: 'right', sprint: true }))
+    const input = { seq: 1, dx: 1, dy: 0, dtMs: 33, sprint: true }
+    act(() => bridge.emitInput(input))
 
-    expect(ws.sent).toContain(JSON.stringify({ type: 'move', dir: 'right', sprint: true }))
+    expect(ws.sent).toContain(JSON.stringify({ type: 'input', input }))
   })
 
   it('envia pelo WS o que for emitido em emitClientMessage', async () => {

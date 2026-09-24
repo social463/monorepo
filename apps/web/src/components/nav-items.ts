@@ -1,4 +1,10 @@
-import { isLeaderRole, type FeatureKey, type UserRole } from "@legends/shared";
+import {
+  APPRENTICE_POSITION_CATEGORY,
+  isFullAdmin,
+  isLeaderRole,
+  type FeatureKey,
+  type UserRole,
+} from "@legends/shared";
 import { effectiveFeatures } from "../lib/features";
 
 export interface NavItem {
@@ -33,10 +39,20 @@ export interface NavItem {
    */
   leadershipOnly?: boolean;
   /**
+   * Só para o programa Jovem Aprendiz: quem tem o CARGO, mais quem facilita
+   * (ADMIN, ou o bloco de Gente e Gestão).
+   *
+   * Como `leadershipOnly`, não dá para expressar com `feature`: o que abre a
+   * área é `positionCategory`, que não é feature de setor nenhuma.
+   */
+  apprenticeOnly?: boolean;
+  /**
    * Destaca o item com a cor terciária da marca, em vez da primária dos demais.
    * Hoje só a Liderança usa: ela precisa saltar aos olhos de quem tem acesso.
    */
   accent?: boolean;
+  /** Some para terceirizado: conteúdo interno da empresa (a API também recusa). */
+  internalOnly?: boolean;
   /**
    * Sinônimos para a busca global encontrar o destino por palavra que não está
    * no rótulo ("férias" acha "Férias do Mês", mas "descanso" e "recesso" também).
@@ -70,8 +86,10 @@ export interface BuildNavArgs {
   sectorFeatures?: FeatureKey[];
   /** URL do ImpulseUP configurada para a empresa; sem ela, o item não aparece. */
   impulseUpUrl?: string | null;
-  /** URL da Comunidade INOVA configurada para a empresa; sem ela, o item não aparece. */
-  inovaCommunityUrl?: string | null;
+  /** Módulo INOVA ativado para a empresa; sem ativar, o item não aparece. */
+  inovaModuleEnabled?: boolean;
+  /** Categoria do cargo — é ela que abre a área Eu Aprendiz. */
+  positionCategory?: string | null;
 }
 
 // A navegação é agrupada por ASSUNTO — Cultura, Comunicação, Engajamento,
@@ -92,8 +110,16 @@ export interface BuildNavArgs {
 // Admins gerenciam a plataforma: não votam nem têm perfil próprio.
 // Para eles, Admin é a ação principal e vem antes de tudo.
 export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
-  const { isAdmin, adminAccess, role, enabledFeatures, sectorFeatures, impulseUpUrl, inovaCommunityUrl } =
-    args;
+  const {
+    isAdmin,
+    adminAccess,
+    role,
+    enabledFeatures,
+    sectorFeatures,
+    impulseUpUrl,
+    inovaModuleEnabled,
+    positionCategory,
+  } = args;
   // "Avaliações e Pesquisas" é ferramenta externa (ImpulseUP): não tem feature
   // própria e cada empresa tem a sua URL — sem URL configurada, some do menu.
   const impulseUpItem: NavItem[] = impulseUpUrl
@@ -108,20 +134,39 @@ export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
       ]
     : [];
 
-  // Comunidade INOVA: mesma mecânica do ImpulseUP — link de fora, configurado
-  // por empresa em Administração › Desenvolvimento. Empresa sem URL cadastrada
-  // não vê o item, que é como um destino de um cliente não vaza para os outros.
-  const inovaCommunityItem: NavItem[] = inovaCommunityUrl
+  // Comunidade INOVA: grupo PRÓPRIO, logo depois de Desenvolvimento
+  // (Documento 4, seção 8). Era um link externo no meio daquele grupo, e é
+  // justamente esse enterro que a G&G disse não ser encontrado — a iniciativa
+  // é o braço de IA e inovação da empresa.
+  //
+  // O item agora é INTERNO: leva à página que apresenta a comunidade e explica
+  // o acesso; o link de fora é o botão "Começar agora" de lá. O acesso é
+  // controlado por um booleano (Administração › Desenvolvimento › Módulo INOVA),
+  // e sem ativar nem o item nem a página aparecem — é a dupla trava que impede
+  // o destino de um cliente de vazar para os outros (ver spec de inovaCommunidade).
+  const inovaCommunityGroups: NavGroup[] = inovaModuleEnabled
     ? [
         {
-          to: inovaCommunityUrl,
-          label: 'Comunidade INOVA',
-          icon: 'hub',
-          external: true,
-          keywords: ['inova', 'comunidade', 'inovação', 'ideias'],
+          items: [
+            {
+              to: '/comunidade-inova',
+              label: 'Comunidade INOVA',
+              icon: 'hub',
+              keywords: ['inova', 'comunidade', 'inovação', 'ideias'],
+            },
+          ],
         },
       ]
     : [];
+
+  const apprenticeItem: NavItem = {
+    to: '/eu-aprendiz',
+    label: 'Eu Aprendiz',
+    icon: 'school',
+    apprenticeOnly: true,
+    accent: true,
+    keywords: ['aprendiz', 'jovem aprendiz', 'trilha', 'encontro', 'programa'],
+  };
 
   const leadershipItem: NavItem = {
     to: '/lideranca',
@@ -133,8 +178,8 @@ export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
   };
 
   // Acesso administrativo delegado: a pessoa segue com o menu de colaborador, e
-  // o Admin entra no mesmo grupo solto da Liderança — ao lado dela para quem
-  // lidera, sozinho para quem não. Destacado como a Liderança: é o outro item
+  // o Admin entra no mesmo grupo solto da Liderança, ao lado dela — quem tem o
+  // acesso delegado vê as duas. Destacado como a Liderança: é o outro item
   // que só uma parte do time enxerga, e perdido entre os demais ele não seria
   // encontrado.
   const delegatedAdminItem: NavItem[] = adminAccess
@@ -190,12 +235,14 @@ export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
           label: 'Desenvolvimento',
           items: [
             { to: '/aprendizado', label: 'Aprendizado', icon: 'school', keywords: ['curso', 'trilha', 'certificado'] },
+            { to: '/treinamentos', label: 'Meus Treinamentos', icon: 'workspace_premium', keywords: ['curso externo', 'certificado', 'capacitação', 'carga horária'] },
+            { to: '/metas', label: 'Metas', icon: 'track_changes', internalOnly: true, keywords: ['okr', 'objetivo', 'key result', 'kr', 'check-in', 'indicador'] },
             { to: '/quinta-desenvolvimento', label: 'Quinta de Dev', icon: 'groups', keywords: ['apresentação'] },
-            ...inovaCommunityItem,
             ...impulseUpItem,
           ],
         },
-        { items: [leadershipItem] },
+        ...inovaCommunityGroups,
+        { items: [leadershipItem, apprenticeItem] },
       ]
     : [
         {
@@ -266,22 +313,47 @@ export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
           label: 'Desenvolvimento',
           items: [
             { to: '/aprendizado', label: 'Aprendizado', icon: 'school', feature: 'aprendizado', keywords: ['curso', 'trilha', 'certificado'] },
+            // SEM feature: registrar o próprio desenvolvimento vale para todo
+            // mundo, inclusive para quem não consome o catálogo interno. Sucede
+            // "Envie seu Certificado", que vivia dentro de /aprendizado.
+            { to: '/treinamentos', label: 'Meus Treinamentos', icon: 'workspace_premium', keywords: ['curso externo', 'certificado', 'capacitação', 'carga horária'] },
+            { to: '/metas', label: 'Metas', icon: 'track_changes', feature: 'metas', internalOnly: true, keywords: ['okr', 'objetivo', 'key result', 'kr', 'check-in', 'indicador'] },
             { to: '/pdi', label: 'Meu PDI', icon: 'flag', feature: 'pdi', keywords: ['plano', 'carreira', 'meta'] },
             { to: '/1-1', label: '1:1', icon: 'record_voice_over', feature: 'um-a-um', keywords: ['conversa', 'gestor'] },
             { to: '/quinta-desenvolvimento', label: 'Quinta de Dev', icon: 'groups', feature: 'quinta-desenvolvimento', keywords: ['apresentação'] },
             { to: '/retrospectivas', label: 'Retrospectivas', icon: 'dashboard', feature: 'retrospectivas', keywords: ['retro', 'sprint'] },
-            ...inovaCommunityItem,
             ...impulseUpItem,
           ],
         },
-        { items: [...delegatedAdminItem, leadershipItem] },
+        ...inovaCommunityGroups,
+        { items: [...delegatedAdminItem, leadershipItem, apprenticeItem] },
       ];
 
   const enabled = effectiveFeatures({ role, enabledFeatures, sectorFeatures });
-  // Liderança: papel de líder OU o bloco de Gente e Gestão. ADMIN entra pelo
-  // primeiro braço da mesma forma que entra em todo o resto do console.
+  // Liderança: papel de líder, ADMIN pleno — inclusive o acesso delegado
+  // (`adminAccess`) — ou SUBADMIN com o bloco de Gente e Gestão. É a mesma
+  // regra de `LeadershipOnly`, que guarda a rota: quem administra abre
+  // `/lideranca` pela URL de qualquer jeito, e esconder o item só fazia o
+  // acesso delegado ter de adivinhar o caminho. Não liderar ninguém não tira a
+  // aba — a API devolve o time vazio, que é o que a tela mostra.
+  //
+  // O bloco de G&G é feature do SETOR e chega a todo mundo lotado lá: contado
+  // sem o papel, dava a aba ao colaborador comum de G&G (inclusive ao Jovem
+  // Aprendiz). Por isso ele só vale no SUBADMIN, e por isso `isAdmin` não serve
+  // aqui: ele vale para todo SUBADMIN, até o de outro setor.
   const canLead =
-    isAdmin || isLeaderRole(role) || (sectorFeatures ?? []).includes('gente-gestao' as FeatureKey);
+    isFullAdmin({ role, adminAccess }) ||
+    isLeaderRole(role) ||
+    (role === 'SUBADMIN' && (sectorFeatures ?? []).includes('gente-gestao' as FeatureKey));
+  // Eu Aprendiz: o cargo abre para o aprendiz, e a facilitação abre para quem
+  // conduz a trilha — a mesma regra de `ApprenticeOnly` e da API. Não use
+  // `isAdmin` aqui: ele vale para todo SUBADMIN, e o de outro setor via o item
+  // e era mandado de volta pela rota. Pelo mesmo motivo o bloco de G&G só conta
+  // no SUBADMIN, e não no colaborador que calha de estar no setor.
+  const canApprentice =
+    positionCategory === APPRENTICE_POSITION_CATEGORY ||
+    isFullAdmin({ role, adminAccess }) ||
+    (role === 'SUBADMIN' && (sectorFeatures ?? []).includes('gente-gestao' as FeatureKey));
 
   return groups
     .map((group) => ({
@@ -290,7 +362,9 @@ export function buildNavGroups(args: BuildNavArgs): NavGroup[] {
         (item) =>
           (!item.feature || enabled.has(item.feature)) &&
           (!item.anyOfFeatures || item.anyOfFeatures.some((feature) => enabled.has(feature))) &&
-          (!item.leadershipOnly || canLead),
+          (!item.leadershipOnly || canLead) &&
+          (!item.apprenticeOnly || canApprentice) &&
+          (!item.internalOnly || role !== 'THIRD_PARTY'),
       ),
     }))
     // Grupo que ficou sem item nenhum (features desligadas) não vira cabeçalho vazio.

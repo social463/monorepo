@@ -104,6 +104,46 @@ export async function updateSquad(
   }
 }
 
+/**
+ * Excluir de vez, ao lado de desativar. Desativar é o certo para squad que teve
+ * vida; para squad criada por engano — ou morta numa reorganização — desativar
+ * é lixo permanente ocupando nome e slug (`@@unique([companyId, name])`), e
+ * ainda barra a importação, que recusa citar squad desativada.
+ *
+ * `SquadMember` cascateia: sair da squad não apaga nada de ninguém. O que trava
+ * a exclusão é retrospectiva ligada (`RetroRoomSquad`), aí o histórico é real.
+ */
+export async function deleteSquad(id: string, actorId: string, companyId: string): Promise<void> {
+  const squad = await scopedPrisma(companyId).squad.findUnique({ where: { id } })
+  if (!squad) throw new SquadError('Squad não encontrada.', 404)
+
+  const rooms = await prisma.retroRoomSquad.count({ where: { squadId: id } })
+  if (rooms > 0) {
+    throw new SquadError(
+      'Esta squad tem retrospectivas ligadas a ela e não pode ser excluída. Desative-a em vez de excluir.',
+      409,
+    )
+  }
+
+  try {
+    await prisma.squad.delete({ where: { id } })
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      if (err.code === 'P2025') throw new SquadError('Squad não encontrada.', 404)
+      // Rede de segurança: relação nova apontando para Squad sem cascade.
+      if (err.code === 'P2003') {
+        throw new SquadError(
+          'Esta squad tem registros ligados a ela e não pode ser excluída. Desative-a em vez de excluir.',
+          409,
+        )
+      }
+    }
+    throw err
+  }
+
+  await recordAuditLog({ actorId, entityType: 'Squad', entityId: id, action: 'DELETE', before: squad, companyId })
+}
+
 export async function addMember(squadId: string, userId: string, actorId: string, companyId: string): Promise<SquadWithMembers> {
   const squad = await scopedPrisma(companyId).squad.findUnique({ where: { id: squadId } })
   if (!squad) throw new SquadError('Squad não encontrada.', 404)

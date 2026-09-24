@@ -3,8 +3,13 @@ import { contrastRatio, hexToOklch, isValidHex, oklchToHex, parseHex, toRgbChann
 import {
   BRAND_COLOR_TOKENS,
   BRAND_PRESETS,
+  brandFontHref,
+  brandFontStack,
   brandingFromPreset,
   checkBrandContrast,
+  isValidBrandFontFamily,
+  PRODUCT_FONTS,
+  resolveBrandFonts,
   deriveBrandPalette,
   LEGENDS_PALETTE,
   parseBrandOverrides,
@@ -150,9 +155,10 @@ describe('preset da EMR', () => {
     expect(checkBrandContrast(emr.schemes.dark)).toEqual([])
   })
 
-  it('claro tem fundo branco; escuro ancora no Neutral/800 do DS', () => {
+  it('claro tem fundo branco; escuro ancora no ink-2 do brandbook', () => {
     expect(emr.schemes.light.surface).toBe('#ffffff')
-    expect(emr.schemes.dark.surface).toBe('#1d2224')
+    // `ink-2`: "superfície escura mais profunda que o Green", no brandbook 2026.
+    expect(emr.schemes.dark.surface).toBe('#1b322e')
   })
 
   it('a escada escura sobe de forma monotônica, do fundo ao card mais elevado', () => {
@@ -165,8 +171,9 @@ describe('preset da EMR', () => {
       'surface-container-highest',
     ] as const
     const claridades = passos.map((p) => hexToOklch(emr.schemes.dark[p]).l)
-    // Card só "existe" se for mais claro que o que está embaixo. Ancorar no
-    // Neutral/700 quebrava isso: a sidebar ficava mais escura que a página.
+    // Card só "existe" se for mais claro que o que está embaixo. Ancorar num
+    // degrau intermediário quebrava isso: a sidebar ficava mais escura que a
+    // página.
     for (let i = 1; i < claridades.length; i += 1) {
       expect(claridades[i], passos[i]).toBeGreaterThan(claridades[i - 1])
     }
@@ -184,37 +191,66 @@ describe('preset da EMR', () => {
     expect(contrastRatio(emr.schemes.dark.outline, emr.schemes.dark.surface)).toBeGreaterThanOrEqual(3)
   })
 
-  it('preserva o verde institucional (Brand/400) em surface-tint nos dois modos', () => {
-    expect(emr.schemes.light['surface-tint']).toBe('#35bd78')
-    expect(emr.schemes.dark['surface-tint']).toBe('#35bd78')
+  it('preserva o Residente Approved cru em surface-tint nos dois modos', () => {
+    // A cor de marca exata vive aqui, para preenchimento e decoração — nunca em
+    // `primary`, que precisa ser legível como texto.
+    expect(emr.schemes.light['surface-tint']).toBe('#6ce190')
+    expect(emr.schemes.dark['surface-tint']).toBe('#6ce190')
   })
 
-  it('afasta-se do DS onde ele reprova em AA, e só aí', () => {
-    // O DS manda #35bd78 no botão principal e no link: 2.41:1 sobre o branco
-    // que ele mesmo define. `primary` usa o degrau seguinte.
-    expect(contrastRatio('#35bd78', '#ffffff')).toBeLessThan(3)
-    expect(emr.schemes.light.primary).toBe('#007344')
+  it('primary é o green-deep, porque o Approved cru reprova como texto', () => {
+    // O Approved rende 1.6:1 sobre branco — invisível como texto e como link.
+    expect(contrastRatio('#6ce190', '#ffffff')).toBeLessThan(2)
+    // `green-deep`, o derivado que o próprio brandbook criou para "texto/ícone
+    // verde com contraste AA sobre claro".
+    expect(emr.schemes.light.primary).toBe('#16603c')
     expect(contrastRatio(emr.schemes.light.primary, emr.schemes.light.surface)).toBeGreaterThanOrEqual(4.5)
-    // Mesma história no vermelho de status: #e64444 dá 3.98:1.
-    expect(contrastRatio('#e64444', '#ffffff')).toBeLessThan(4.5)
-    expect(emr.schemes.light.error).toBe('#b23535')
   })
 
-  it('no escuro sobe para Brand/300, porque o 400 fica na linha do mínimo', () => {
-    expect(contrastRatio('#35bd78', '#363e46')).toBeLessThan(4.6)
-    expect(emr.schemes.dark.primary).toBe('#25de88')
+  it('no escuro o Approved já é o tom legível, sem precisar do green-deep', () => {
+    expect(emr.schemes.dark.primary).toBe('#6ce190')
     expect(contrastRatio(emr.schemes.dark.primary, emr.schemes.dark.surface)).toBeGreaterThan(6)
+    // O green-deep, aqui, seria escuro demais: ele vira o inverso.
+    expect(emr.schemes.dark['inverse-primary']).toBe('#16603c')
   })
 
-  it('usa Neutral/500 em outline — o 400 reprova até como borda', () => {
-    expect(emr.schemes.light.outline).toBe('#606a71')
-    expect(contrastRatio('#9ba5ab', '#ffffff')).toBeLessThan(3)
-    expect(contrastRatio(emr.schemes.light.outline, emr.schemes.light.surface)).toBeGreaterThanOrEqual(3)
+  it('o Lime é acento, não primary: como texto sobre claro ele não existe', () => {
+    // O brandbook o declara acento e avisa que usá-lo como fundo de seção
+    // grande contraria a hierarquia. Como `primary` é texto E botão, ele
+    // falharia no primeiro papel.
+    expect(contrastRatio('#b4f900', '#ffffff')).toBeLessThan(2)
+    expect(emr.schemes.light.primary).not.toBe('#b4f900')
+    // Onde ele entra: grifo e chip, com a tinta `lime-t` por trás.
+    expect(emr.schemes.light['secondary-container']).toBe('#f0fdcc')
+    // No escuro ele pode ser usado puro — é onde brilha.
+    expect(emr.schemes.dark.secondary).toBe('#b4f900')
   })
 
-  it('aproveita as outras duas famílias do DS em secondary e tertiary', () => {
-    expect(emr.schemes.light.secondary).toBe('#087d75') // teal
-    expect(emr.schemes.light.tertiary).toBe('#23509b') // azul
+  it('o Orange chega pelo warn, que é a derivação AA do próprio brandbook', () => {
+    // Branco sobre o Orange cru dá 3.1:1 — o brandbook diz que só passa em
+    // texto grande. `warn` é o Orange escurecido, e é por ele que a cor entra.
+    expect(contrastRatio('#ffffff', '#ff7013')).toBeLessThan(4.5)
+    expect(emr.schemes.light.error).toBe('#c4381b')
+    expect(contrastRatio(emr.schemes.light['on-error'], emr.schemes.light.error)).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('o texto secundário é um fio mais escuro que o ink-soft, por causa da escada', () => {
+    // `ink-soft` (#5a736b) é AA sobre o Off White, como o brandbook afirma —
+    // mas cai para 4.03:1 no degrau mais claro da escada, que é do produto e o
+    // brandbook não trata.
+    expect(contrastRatio('#5a736b', emr.schemes.light['surface-container-highest'])).toBeLessThan(4.5)
+    expect(
+      contrastRatio(emr.schemes.light['on-surface-variant'], emr.schemes.light['surface-container-highest']),
+    ).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('secondary e tertiary vêm do Lime e da complementar azul', () => {
+    expect(emr.schemes.light.secondary).toBe('#4a6b00') // família do Lime
+    expect(emr.schemes.light.tertiary).toBe('#14618c') // complementar azul
+  })
+
+  it('a tipografia da EMR é Outfit nos dois papéis', () => {
+    expect(emr.fonts).toEqual({ headline: 'Outfit', body: 'Outfit' })
   })
 })
 
@@ -280,5 +316,47 @@ describe('parseBrandOverrides', () => {
     expect(r.applied).toEqual({ light: 35, dark: 35 })
     expect(r.unknownTokens).toEqual([])
     expect(r.invalidColors).toEqual([])
+  })
+})
+
+describe('tipografia como token de marca', () => {
+  it('empresa sem fonte cadastrada herda a do produto', () => {
+    expect(resolveBrandFonts(undefined)).toEqual(PRODUCT_FONTS)
+    expect(resolveBrandFonts(null)).toEqual(PRODUCT_FONTS)
+    // Registro gravado antes desta versão não tem o campo — e a ausência dele
+    // significa "a fonte do produto", não erro.
+    expect(brandingFromPreset(BRAND_PRESETS.legends).fonts).toEqual(PRODUCT_FONTS)
+  })
+
+  it('recusa nome que sairia do lado de dentro da folha de estilo', () => {
+    // O nome entra numa URL do Google Fonts E numa declaração `font-family`:
+    // aspas, ponto e vírgula ou parêntese deixariam o cadastro escrever CSS.
+    for (const veneno of ['Outfit"; background: url(x)', "Outfit'", 'Outfit;', 'Outfit)', '']) {
+      expect(isValidBrandFontFamily(veneno), veneno).toBe(false)
+    }
+    expect(isValidBrandFontFamily('Outfit')).toBe(true)
+    expect(isValidBrandFontFamily('Noto Sans')).toBe(true)
+  })
+
+  it('família inválida cai no produto em vez de quebrar a tela', () => {
+    expect(resolveBrandFonts({ headline: 'Outfit";}', body: 'Outfit' })).toEqual({
+      headline: PRODUCT_FONTS.headline,
+      body: 'Outfit',
+    })
+  })
+
+  it('a pilha CSS leva o fallback do produto atrás do nome da marca', () => {
+    expect(brandFontStack('Outfit', 'headline')).toBe("'Outfit', system-ui, sans-serif")
+    expect(brandFontStack('nome; inválido', 'body')).toBe("'Inter', system-ui, sans-serif")
+  })
+
+  it('só carrega arquivo quem tem fonte própria, e uma vez por família', () => {
+    // Quem usa a do produto não baixa nada a mais: ela já vem no index.html.
+    expect(brandFontHref(PRODUCT_FONTS)).toBeNull()
+    const href = brandFontHref({ headline: 'Outfit', body: 'Outfit' })!
+    // Mesma família nos dois papéis = uma `family=` só, não duas.
+    expect(href.match(/family=/g)).toHaveLength(1)
+    expect(href).toContain('family=Outfit')
+    expect(brandFontHref({ headline: 'Outfit', body: 'Noto Sans' })!.match(/family=/g)).toHaveLength(2)
   })
 })

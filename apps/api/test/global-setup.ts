@@ -1,7 +1,9 @@
 import { execSync } from 'node:child_process'
 import { Client } from 'pg'
 
-const TEST_DB = 'legends_test'
+// Mesmo nome que o `vitest.config.ts` constrói — sufixo incluído, para
+// worktrees paralelos não brigarem pelo mesmo banco (ver o comentário lá).
+const TEST_DB = `legends_test${(process.env.LEGENDS_TEST_DB_SUFFIX ?? '').replace(/[^a-z0-9_]/g, '')}`
 // Porta do host configurável (mesma variável do docker-compose.yml), para quem
 // tem outro Postgres ocupando a 5432. Host/credenciais/banco seguem fixos: o
 // alvo é sempre o Postgres LOCAL do projeto e o banco `legends_test`, que o

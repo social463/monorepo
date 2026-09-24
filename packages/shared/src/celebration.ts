@@ -30,6 +30,12 @@ interface UpcomingOccurrence {
   daysUntil: number
   /** Data observada da ocorrência (YYYY-MM-DD), já aplicando a regra de 29/02. */
   observedDate: string
+  /**
+   * Assinaturas que o mural desta ocorrência já tem. Serve o card da Home
+   * ("3 já assinaram"), e por isso é contado só para quem comemora HOJE —
+   * nas demais datas vem 0, e não vale como "ninguém assinou".
+   */
+  greetingCount: number
 }
 
 export interface UpcomingBirthdayDTO extends BirthdayDTO, UpcomingOccurrence {}

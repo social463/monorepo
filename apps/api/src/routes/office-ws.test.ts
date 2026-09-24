@@ -72,13 +72,23 @@ describe('office websocket', () => {
     expect(welcome).toMatchObject({ type: 'welcome', youId: bruno.id })
     expect(anaMsgs.some((m) => m.type === 'joined' && m.occupant.userId === bruno.id)).toBe(true)
 
-    // Ana anda numa direção que sabemos ser livre a partir do spawn dela
+    // Ana anda numa direção que sabemos ser livre a partir do spawn dela. O
+    // movimento agora é intenção contínua (`input`), e o que chega em Bruno é o
+    // snapshot autoritativo — não um evento por passo.
     const spawn = officeHub.occupants().find((o) => o.userId === ana.id)!
-    const dir = isWalkable(spawn.x, spawn.y - 1) ? 'up' : 'down'
-    anaWs.send(JSON.stringify({ type: 'move', dir }))
-    await delay(150)
+    const tile = { x: Math.floor(spawn.x / 32), y: Math.floor(spawn.y / 32) }
+    const dy = isWalkable(tile.x, tile.y - 1) ? -1 : 1
+    for (let seq = 1; seq <= 6; seq += 1) {
+      anaWs.send(JSON.stringify({ type: 'input', input: { seq, dx: 0, dy, dtMs: 33 } }))
+    }
+    await delay(300)
 
-    expect(brunoMsgs.some((m) => m.type === 'moved' && m.userId === ana.id && m.dir === dir)).toBe(true)
+    const andou = brunoMsgs.some(
+      (m) =>
+        m.type === 'snapshot' &&
+        m.players.some((p) => p.userId === ana.id && Math.abs(p.y - spawn.y) > 1),
+    )
+    expect(andou).toBe(true)
 
     // Período de graça de reconexão (RECONNECT_GRACE_MS, 45s): fechar a última
     // aba não emite 'left' na hora — só depois do período sem reconectar (ver
@@ -397,10 +407,15 @@ describe('office websocket', () => {
     const carlosWelcome = carlosMsgs.find((m) => m.type === 'welcome')
     expect(carlosWelcome?.occupants.find((o) => o.userId === ana.id)?.thoughtText).toBe('pensando')
 
+    // Andar limpa o pensamento — só que "andar" agora é intenção contínua, e
+    // quem a aplica é o tick.
     const anaPosition = officeHub.occupantOf(ana.id)!
-    const dir = isWalkable(anaPosition.x, anaPosition.y - 1) ? 'up' : 'down'
-    anaWs.send(JSON.stringify({ type: 'move', dir }))
-    await delay(150)
+    const tile = { x: Math.floor(anaPosition.x / 32), y: Math.floor(anaPosition.y / 32) }
+    const dy = isWalkable(tile.x, tile.y - 1) ? -1 : 1
+    for (let seq = 1; seq <= 6; seq += 1) {
+      anaWs.send(JSON.stringify({ type: 'input', input: { seq, dx: 0, dy, dtMs: 33 } }))
+    }
+    await delay(300)
     expect(officeHub.occupantOf(ana.id)?.thoughtText).toBeUndefined()
 
     anaWs.close()
@@ -775,10 +790,17 @@ describe('office websocket', () => {
 
     // movimento de uma empresa não propaga pra outra
     const spawn = otherHub.occupantOf(outraUser.id)!
-    const dir = isWalkable(spawn.x, spawn.y - 1) ? 'up' : 'down'
-    outraWs.send(JSON.stringify({ type: 'move', dir }))
-    await delay(150)
-    expect(anaMsgs.some((m) => m.type === 'moved' && m.userId === outraUser.id)).toBe(false)
+    const tile = { x: Math.floor(spawn.x / 32), y: Math.floor(spawn.y / 32) }
+    const dy = isWalkable(tile.x, tile.y - 1) ? -1 : 1
+    for (let seq = 1; seq <= 6; seq += 1) {
+      outraWs.send(JSON.stringify({ type: 'input', input: { seq, dx: 0, dy, dtMs: 33 } }))
+    }
+    await delay(300)
+    expect(
+      anaMsgs.some(
+        (m) => m.type === 'snapshot' && m.players.some((p) => p.userId === outraUser.id),
+      ),
+    ).toBe(false)
 
     anaWs.close()
     outraWs.close()

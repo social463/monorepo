@@ -44,7 +44,6 @@ async function makeCourse(sectorId: string | null) {
     data: {
       slug: `curso-quiz-${Math.random().toString(36).slice(2)}`,
       title: 'Curso de teste',
-      category: 'Liderança',
       sectorId,
     },
   })
@@ -53,7 +52,7 @@ async function makeCourse(sectorId: string | null) {
 async function makeLesson(courseId: string) {
   const courseModule = await prisma.courseModule.create({ data: { courseId, title: 'Módulo 1', sortOrder: 0 } })
   return prisma.courseLesson.create({
-    data: { courseId, moduleId: courseModule.id, title: 'Aula 1', type: 'TEXT', sortOrder: 0 },
+    data: { courseId, moduleId: courseModule.id, title: 'Aula 1', sortOrder: 0 },
   })
 }
 
@@ -63,9 +62,8 @@ async function makePublishedCourse(sectorId: string | null) {
     data: {
       slug: `curso-resp-${Math.random().toString(36).slice(2)}`,
       title: 'Curso respondível',
-      category: 'Liderança',
       sectorId,
-      published: true,
+      status: 'PUBLISHED',
       publishedAt: new Date(),
     },
   })

@@ -5,7 +5,7 @@ import { vi, type Mock } from 'vitest'
 import { EVENT_PHOTO_MAX_BATCH } from '@legends/shared'
 import { EventAlbumsSection } from './EventAlbumsSection'
 import { apiFetch, ApiError } from '../../lib/api'
-import { uploadEventPhoto } from '../../lib/upload'
+import { uploadEventPhoto, UploadError } from '../../lib/upload'
 
 vi.mock('../../lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/api')>()
@@ -191,6 +191,77 @@ describe('EventAlbumsSection', () => {
       ),
     )
   })
+
+  it('401 no meio do lote ganha uma segunda tentativa e a foto entra', async () => {
+    // O access token dura 15 min e um álbum de confra passa disso: o 401 do
+    // meio do lote é a sessão se renovando, não a foto sendo recusada.
+    mockUpload
+      .mockRejectedValueOnce(new ApiError(401, 'Não autorizado'))
+      .mockResolvedValueOnce({ storageKey: 'k1.jpg', width: 100, height: 100 })
+
+    renderSection()
+    fireEvent.click(await screen.findByRole('button', { name: /gerenciar fotos de confra 2026/i }))
+    const input = await screen.findByLabelText(/adicionar fotos/i)
+    fireEvent.change(input, { target: { files: [new File(['1'], 'foto1.jpg', { type: 'image/jpeg' })] } })
+
+    // A segunda tentativa espera `PHOTO_RETRY_DELAY_MS`, acima do 1s padrão do
+    // findBy — daí o timeout explícito.
+    await waitFor(() => expect(screen.getByText(/foto1\.jpg —/)).toHaveTextContent('enviada'), {
+      timeout: 4000,
+    })
+    expect(mockUpload).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/não autorizado/i)).not.toBeInTheDocument()
+  }, 10_000)
+
+  it('formato recusado não ganha segunda tentativa nem botão de reenviar', async () => {
+    // Insistir no mesmo arquivo não muda nada e só atrasaria a fila.
+    mockUpload.mockRejectedValue(
+      new UploadError('Formato não suportado. Use JPEG, PNG, WebP ou GIF.'),
+    )
+
+    renderSection()
+    fireEvent.click(await screen.findByRole('button', { name: /gerenciar fotos de confra 2026/i }))
+    const input = await screen.findByLabelText(/adicionar fotos/i)
+    fireEvent.change(input, { target: { files: [new File(['1'], 'foto1.pdf', { type: 'application/pdf' })] } })
+
+    expect(await screen.findByText(/formato não suportado/i)).toBeInTheDocument()
+    expect(mockUpload).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: /reenviar/i })).not.toBeInTheDocument()
+  })
+
+  it('reenvia só as fotos que falharam, sem repetir as que já entraram', async () => {
+    // A chave no S3 nasce de um UUID novo a cada envio: reselecionar a pasta
+    // inteira duplicaria no álbum tudo que já tinha entrado.
+    mockUpload.mockImplementation((file: File) =>
+      file.name === 'foto2.jpg'
+        ? Promise.reject(new ApiError(503, 'Serviço indisponível.'))
+        : Promise.resolve({ storageKey: `${file.name}.jpg`, width: 100, height: 100 }),
+    )
+
+    renderSection()
+    fireEvent.click(await screen.findByRole('button', { name: /gerenciar fotos de confra 2026/i }))
+    const input = await screen.findByLabelText(/adicionar fotos/i)
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File(['1'], 'foto1.jpg', { type: 'image/jpeg' }),
+          new File(['2'], 'foto2.jpg', { type: 'image/jpeg' }),
+        ],
+      },
+    })
+
+    const reenviar = await screen.findByRole('button', { name: /reenviar a foto que falhou/i })
+
+    mockUpload.mockClear()
+    mockUpload.mockResolvedValue({ storageKey: 'foto2.jpg', width: 100, height: 100 })
+    fireEvent.click(reenviar)
+
+    await waitFor(() => expect(mockUpload).toHaveBeenCalledTimes(1))
+    expect((mockUpload.mock.calls[0][0] as File).name).toBe('foto2.jpg')
+    await waitFor(() => expect(screen.getByText(/foto2\.jpg —/)).toHaveTextContent('enviada'), {
+      timeout: 4000,
+    })
+  }, 10_000)
 
   it('mostra erro quando a exclusão do álbum falha', async () => {
     mockApiFetch.mockImplementation((path: string, options?: RequestInit) => {

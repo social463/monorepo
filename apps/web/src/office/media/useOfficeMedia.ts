@@ -9,10 +9,13 @@ import type {
   Room,
 } from 'livekit-client'
 import {
+  TILE_SIZE,
+  tileOfPixel,
   officeOpenRoom,
-  officeRoomForMapPosition,
+  officeRoomForTile,
   isInSilenceZone,
-  isWithinProximity,
+  isWithinProximityTiles,
+  isOfficeAudioIsolated,
   type MapDocumentV1,
   type OfficeOccupant,
   type OfficeMediaTokenResponse,
@@ -209,6 +212,12 @@ export function useOfficeMedia(
   youIdRef.current = youId
   const audioInputDeviceIdRef = useRef(audioInputDeviceId)
   audioInputDeviceIdRef.current = audioInputDeviceId
+  // A régua de pixel→tile do mapa ATIVO. Em ref, e não nas deps de
+  // `applyProximity`, porque a assinatura não pode ser refeita a cada
+  // publicação de decoração. `TILE_SIZE` só cobre o intervalo em que ainda não
+  // há mapa — e sem mapa também não há sala, então ninguém está assinado.
+  const tileSizeRef = useRef(TILE_SIZE)
+  tileSizeRef.current = document?.map.tileWidth ?? TILE_SIZE
   const videoInputDeviceIdRef = useRef(videoInputDeviceId)
   videoInputDeviceIdRef.current = videoInputDeviceId
 
@@ -216,9 +225,15 @@ export function useOfficeMedia(
   // Sala de silêncio: nenhuma sala de voz. Em vez de silenciar o alto-falante,
   // não entra — assim também não publica o mic, e o silêncio vale nos dois
   // sentidos. "Sem sala" já é um estado suportado (desconecta e vai pra `off`).
-  const desiredRoom = connected && you && document && mapId && !isInSilenceZone(document, you)
-    ? officeRoomForMapPosition(mapId, document, you.x, you.y)
-    : null
+  // A sala de ÁUDIO sai do TILE, e o occupant fala PIXEL desde o movimento
+  // livre. `TilePosition` não protege: ela é estrutural, e um `{x, y}` em pixel
+  // entra sem erro — o sintoma é todo mundo cair na sala aberta e as conversas
+  // de sala deixarem de isolar.
+  const youTile = you && document ? tileOfPixel(you, document.map.tileWidth) : null
+  const desiredRoom =
+    connected && youTile && document && mapId && !isInSilenceZone(document, youTile)
+      ? officeRoomForTile(mapId, document, youTile.x, youTile.y)
+      : null
   const openRoom = mapId ? officeOpenRoom(mapId) : null
 
   // Só aplica a troca depois de ROOM_STABILITY_MS com a mesma sala desejada.
@@ -303,19 +318,38 @@ export function useOfficeMedia(
    */
   const applyProximity = useCallback(() => {
     const room = roomRef.current
-    if (!room || targetRoomRef.current !== openRoom) return
+    if (!room) return
     const me = occupantsRef.current.find((o) => o.userId === youIdRef.current)
     if (!me) return
+    const iAmIsolated = isOfficeAudioIsolated(me.status)
+    const byProximity = targetRoomRef.current === openRoom
     const meOnline = (me.status ?? 'online') === 'online'
     for (const participant of room.remoteParticipants.values()) {
       const occupant = occupantsRef.current.find((o) => o.userId === participant.identity)
-      const within =
-        meOnline &&
-        !!occupant &&
-        (occupant.status ?? 'online') === 'online' &&
-        isWithinProximity(me.x, me.y, occupant.x, occupant.y)
+      let subscribed: boolean
+      if (iAmIsolated || isOfficeAudioIsolated(occupant?.status)) {
+        // Ocupado é surdo e mudo, em qualquer sala. O mudo vem do mic parado
+        // (ver o efeito de isolamento); o surdo é isto.
+        subscribed = false
+      } else if (byProximity) {
+        const meuTile = tileOfPixel(me, tileSizeRef.current)
+        const deleTile = occupant ? tileOfPixel(occupant, tileSizeRef.current) : null
+        subscribed =
+          meOnline &&
+          !!occupant &&
+          !!deleTile &&
+          (occupant.status ?? 'online') === 'online' &&
+          isWithinProximityTiles(meuTile.x, meuTile.y, deleTile.x, deleTile.y)
+      } else {
+        // Zona: o `autoSubscribe` já assinaria tudo, e reafirmar é no-op pelo
+        // teste de igualdade abaixo. Mas é preciso reafirmar: quando alguém
+        // sai de "Ocupado", as publicações que cortamos à mão não voltam
+        // sozinhas — `autoSubscribe` só vale para tracks NOVAS, e sem isto a
+        // pessoa ficaria surda até alguém republicar.
+        subscribed = true
+      }
       for (const pub of participant.trackPublications.values()) {
-        if (pub.isSubscribed !== within) pub.setSubscribed(within)
+        if (pub.isSubscribed !== subscribed) pub.setSubscribed(subscribed)
       }
     }
   }, [openRoom])
@@ -383,6 +417,29 @@ export function useOfficeMedia(
           .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
             commitSpeaking(new Set(speakers.map((p) => p.identity)))
           })
+          // O LiveKit reconecta sozinho no nível de rede (ICE/WebRTC) sem
+          // que esta invocação de `connectTo` seja refeita — nenhum dos
+          // handlers acima dispara sozinho para o que mudou DURANTE a queda
+          // (participante que entrou, track que foi publicada). Sem isto,
+          // `remotes` fica preso no estado de antes da queda até algum
+          // evento de track não relacionado acontecer por acaso: alguém
+          // ouve os outros mas não os vê no grid até dar refresh.
+          .on(RoomEvent.Reconnected, () => {
+            applyProximity()
+            syncRemotes()
+          })
+          // A recuperação automática do LiveKit pode desistir de vez (rede
+          // caiu por tempo demais) — sem isto, o hook ficava com
+          // `status: 'connected'` para sempre, sem tentar de novo, e só um
+          // refresh manual resolvia. `roomRef.current === room` distingue
+          // isto de uma desconexão NOSSA (troca de sala, teardown): nesses
+          // casos `connectTo`/o efeito de "sem sala" já trocaram
+          // `roomRef.current` antes deste evento tardio chegar.
+          .on(RoomEvent.Disconnected, () => {
+            if (roomRef.current !== room) return
+            roomRef.current = null
+            void connectTo(target)
+          })
           .on(RoomEvent.LocalTrackPublished, (pub) => {
             if (pub.source === Track.Source.ScreenShare) {
               setScreenShareEnabled(true)
@@ -441,6 +498,15 @@ export function useOfficeMedia(
             void room.disconnect()
             return
           }
+          // Mutar sem parar a MediaStreamTrack mantém o microfone capturando:
+          // no macOS o indicador do sistema fica aceso e as pessoas acham que
+          // continuam sendo ouvidas. Com isto o LiveKit para a track no mute e
+          // reaquire no unmute (respeitando o deviceId das constraints).
+          //
+          // Marcado aqui, e não via `stopMicTrackOnMute` nas opções de
+          // publicação, porque o `mute()` abaixo acontece ANTES de publicar —
+          // e é justamente o caso do spawn, que entra sempre mutado.
+          track.stopOnMute = true
           if (!preferMicEnabled) await track.mute()
           await room.localParticipant.publishTrack(track)
           if (generationRef.current !== gen) {
@@ -568,7 +634,10 @@ export function useOfficeMedia(
       // Permissão negada antes — tentar de novo é o "tentar novamente" da barra.
       try {
         const { createLocalAudioTrack } = await loadLiveKit()
-        const fresh = await createLocalAudioTrack()
+        const fresh = await createLocalAudioTrack({
+          deviceId: audioInputDeviceIdRef.current ?? undefined,
+        })
+        fresh.stopOnMute = true
         await room.localParticipant.publishTrack(fresh)
         micTrackRef.current = fresh
         setMicError(false)
@@ -580,8 +649,19 @@ export function useOfficeMedia(
       return
     }
     if (track.isMuted) {
-      await track.unmute()
+      // Com `stopOnMute`, desmutar reabre o dispositivo — leva alguns
+      // instantes e pode falhar (mic ocupado por outro app, permissão
+      // revogada). Sem tratamento, a promise rejeitava sozinha e o botão
+      // ficava dizendo que o mic estava aberto.
+      try {
+        await track.unmute()
+      } catch {
+        setMicEnabled(false)
+        setMicError(true)
+        return
+      }
       setMicEnabled(true)
+      setMicError(false)
       writeMicPreference(true)
     } else {
       await track.mute()
@@ -637,13 +717,38 @@ export function useOfficeMedia(
     const track = micTrackRef.current
     if (!track) return
     if (enabled && track.isMuted) {
-      await track.unmute()
+      // Mesma reaquisição de dispositivo do `toggleMic` — ver o porquê lá.
+      try {
+        await track.unmute()
+      } catch {
+        setMicEnabled(false)
+        setMicError(true)
+        return
+      }
       setMicEnabled(true)
+      setMicError(false)
     } else if (!enabled && !track.isMuted) {
       await track.mute()
       setMicEnabled(false)
     }
   }, [])
+
+  /**
+   * "Ocupado" é o lado MUDO do isolamento (o surdo está em `applyProximity`):
+   * o mic é parado enquanto durar e volta à preferência do usuário ao sair.
+   *
+   * Guardado por `isolatedRef` para agir só na TRANSIÇÃO: `occupants` é um
+   * array novo a cada render, e mexer no mic em toda passagem brigaria com o
+   * alto-falante — que mexe no mesmo estado por `applyMicEnabled`.
+   */
+  const isolatedRef = useRef(false)
+  useEffect(() => {
+    const me = occupants.find((o) => o.userId === youId)
+    const isolated = isOfficeAudioIsolated(me?.status)
+    if (isolated === isolatedRef.current) return
+    isolatedRef.current = isolated
+    void applyMicEnabled(isolated ? false : readMicPreference())
+  }, [occupants, youId, applyMicEnabled])
 
   /**
    * Troca o microfone em uso. Persiste sempre; só chama `switchActiveDevice`

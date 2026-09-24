@@ -1,6 +1,12 @@
 import type { Course, CourseLesson, CourseModule, Prisma } from '@prisma/client'
 import {
+  isPositionCategory,
+  isPublishedStatus,
+  MAX_COURSE_AUDIENCE_SECTORS,
+  MAX_COURSE_COMPETENCIES,
+  MAX_COURSE_INSTRUCTORS,
   MAX_LESSON_DURATION_MINUTES,
+  parseCourseLessonBlocks,
   type AdminCourseDTO,
   type AdminCourseListItemDTO,
   type CreateCourseLessonRequest,
@@ -13,7 +19,9 @@ import {
 import { scopedPrisma } from '../lib/tenant-scope'
 import { slugify } from '../lib/slug'
 import { toStringArray } from '../lib/serialize-learning'
+import { INSTRUCTOR_REF_SELECT, toInstructorRef } from './learning-service'
 import { recordAuditLog } from './audit-log-service'
+import { runAutoEnrollmentForCourse } from './course-auto-enrollment-service'
 
 export class CourseAdminError extends Error {
   constructor(
@@ -39,9 +47,16 @@ export interface CourseActor {
 
 const COURSE_INCLUDE = {
   modules: { orderBy: { sortOrder: 'asc' as const }, include: { lessons: { orderBy: { sortOrder: 'asc' as const } } } },
+  courseCategory: { select: { name: true } },
+  competencyLinks: { select: { competencyId: true } },
+  instructorLinks: {
+    orderBy: { sortOrder: 'asc' as const },
+    select: { instructor: { select: INSTRUCTOR_REF_SELECT } },
+  },
+  audienceSectors: { select: { sectorId: true } },
 } satisfies Prisma.CourseInclude
 
-type CourseWithContent = Course & { modules: (CourseModule & { lessons: CourseLesson[] })[] }
+type CourseWithContent = Prisma.CourseGetPayload<{ include: typeof COURSE_INCLUDE }>
 
 /**
  * Recorte de LEITURA: SUBADMIN alcança curso do próprio setor **e** curso sem
@@ -83,16 +98,27 @@ function toAdminCourseDTO(course: CourseWithContent, enrolledCount: number): Adm
     shortDescription: course.shortDescription,
     description: course.description,
     coverUrl: course.coverUrl,
-    category: course.category,
+    categoryId: course.categoryId,
+    categoryName: course.courseCategory?.name ?? null,
     level: course.level,
-    competencies: toStringArray(course.competencies),
+    competencyIds: course.competencyLinks.map((link) => link.competencyId),
     objectives: toStringArray(course.objectives),
     prerequisites: course.prerequisites,
-    instructorName: course.instructorName,
-    instructorBio: course.instructorBio,
+    instructors: course.instructorLinks.map((link) => toInstructorRef(link.instructor)),
     mandatory: course.mandatory,
+    audienceSectorIds: course.audienceSectors.map((link) => link.sectorId),
+    audiencePositionCategories: course.audiencePositionCategories,
+    recommendedFor: course.recommendedFor,
+    autoEnroll: course.autoEnroll,
     certificateEnabled: course.certificateEnabled,
-    published: course.published,
+    status: course.status,
+    rewardPoints: course.rewardPoints,
+    rewardCoins: course.rewardCoins,
+    bannerUrl: course.bannerUrl,
+    introVideoUrl: course.introVideoUrl,
+    icon: course.icon,
+    primaryColor: course.primaryColor,
+    published: isPublishedStatus(course.status),
     publishedAt: course.publishedAt?.toISOString() ?? null,
     durationMinutes: lessons.reduce((sum, lesson) => sum + lesson.durationMinutes, 0),
     totalLessons: lessons.length,
@@ -107,9 +133,7 @@ function toAdminCourseDTO(course: CourseWithContent, enrolledCount: number): Adm
         moduleId: lesson.moduleId,
         title: lesson.title,
         description: lesson.description,
-        type: lesson.type,
-        videoUrl: lesson.videoUrl,
-        contentHtml: lesson.contentHtml,
+        blocks: parseCourseLessonBlocks(lesson.contentBlocks),
         durationMinutes: lesson.durationMinutes,
         sortOrder: lesson.sortOrder,
       })),
@@ -172,9 +196,10 @@ export async function listCoursesForAdmin(actor: CourseActor): Promise<AdminCour
     return {
       id: course.id,
       title: course.title,
-      category: course.category,
+      category: course.courseCategory?.name ?? null,
       level: course.level,
-      published: course.published,
+      status: course.status,
+      published: isPublishedStatus(course.status),
       mandatory: course.mandatory,
       durationMinutes: lessons.reduce((sum, lesson) => sum + lesson.durationMinutes, 0),
       totalLessons: lessons.length,
@@ -236,11 +261,104 @@ async function assertCertificateTemplateExists(companyId: string, templateId: st
   if (!template) throw new CourseAdminError('Modelo de certificado não encontrado.', 404)
 }
 
+/**
+ * Categoria vem do catálogo (Documento 4, seção 9.6), então o id é conferido
+ * antes de gravar: um id de outra empresa viraria FK inválida, e um id
+ * inventado gravaria um vínculo que nenhuma tela resolve. Nulo é permitido — a
+ * categoria deixou de ser obrigatória junto com o texto livre.
+ */
+async function resolveCategoryId(companyId: string, categoryId: string | null): Promise<string | null> {
+  if (!categoryId) return null
+  const categoria = await scopedPrisma(companyId).courseCategory.findFirst({ where: { id: categoryId } })
+  if (!categoria) throw new CourseAdminError('Categoria não encontrada.', 404)
+  return categoria.id
+}
+
+/**
+ * Regrava os vínculos N:N do curso com o catálogo (competências e instrutores).
+ *
+ * Apaga e recria em vez de calcular o delta: a lista chega inteira do
+ * formulário, as tabelas de ligação não têm dado próprio a preservar (só a
+ * ordem, que vem junto), e um delta acertado a mão é onde a duplicata mora.
+ *
+ * Ids são conferidos contra o catálogo DA EMPRESA. Sem isso, um id de outro
+ * tenant viraria vínculo válido no banco e vazaria nome de outra empresa na
+ * tela do curso.
+ */
+/**
+ * Só os valores da lista fechada entram. Um valor de fora viraria segmentação
+ * que nunca casa com ninguém — e sem erro visível, porque o curso simplesmente
+ * sumiria de todo mundo.
+ */
+/** `normalizeList` devolve `InputJsonValue` (é para coluna Json); aqui a coluna
+ *  é `String[]` nativo, então a lista sai como array mesmo. */
+function normalizeStringArray(valores: string[] | undefined): string[] | undefined {
+  if (valores === undefined) return undefined
+  return [...new Set(valores.map((v) => v.trim()).filter(Boolean))]
+}
+
+function normalizePositionCategories(valores: string[] | undefined): string[] | undefined {
+  if (valores === undefined) return undefined
+  const limpos = [...new Set(valores.map((v) => v.trim()).filter(Boolean))]
+  const invalido = limpos.find((v) => !isPositionCategory(v))
+  if (invalido) throw new CourseAdminError(`Categoria de cargo desconhecida: ${invalido}.`)
+  return limpos
+}
+
+async function syncCourseCatalogLinks(
+  companyId: string,
+  courseId: string,
+  data: { competencyIds?: string[]; instructorIds?: string[]; audienceSectorIds?: string[] },
+): Promise<void> {
+  const db = scopedPrisma(companyId)
+
+  if (data.competencyIds !== undefined) {
+    const ids = [...new Set(data.competencyIds)]
+    if (ids.length > MAX_COURSE_COMPETENCIES) {
+      throw new CourseAdminError(`Escolha no máximo ${MAX_COURSE_COMPETENCIES} competências.`)
+    }
+    const validas = await db.competency.findMany({ where: { id: { in: ids } }, select: { id: true } })
+    if (validas.length !== ids.length) throw new CourseAdminError('Competência não encontrada.', 404)
+    await db.courseCompetency.deleteMany({ where: { courseId } })
+    if (ids.length > 0) {
+      await db.courseCompetency.createMany({ data: ids.map((competencyId) => ({ courseId, competencyId })) })
+    }
+  }
+
+  if (data.audienceSectorIds !== undefined) {
+    const ids = [...new Set(data.audienceSectorIds)]
+    if (ids.length > MAX_COURSE_AUDIENCE_SECTORS) {
+      throw new CourseAdminError(`Escolha no máximo ${MAX_COURSE_AUDIENCE_SECTORS} setores.`)
+    }
+    const validos = await db.sector.findMany({ where: { id: { in: ids } }, select: { id: true } })
+    if (validos.length !== ids.length) throw new CourseAdminError('Setor não encontrado.', 404)
+    await db.courseAudienceSector.deleteMany({ where: { courseId } })
+    if (ids.length > 0) {
+      await db.courseAudienceSector.createMany({ data: ids.map((sectorId) => ({ courseId, sectorId })) })
+    }
+  }
+
+  if (data.instructorIds !== undefined) {
+    const ids = [...new Set(data.instructorIds)]
+    if (ids.length > MAX_COURSE_INSTRUCTORS) {
+      throw new CourseAdminError(`Escolha no máximo ${MAX_COURSE_INSTRUCTORS} instrutores.`)
+    }
+    const validos = await db.instructor.findMany({ where: { id: { in: ids } }, select: { id: true } })
+    if (validos.length !== ids.length) throw new CourseAdminError('Instrutor não encontrado.', 404)
+    await db.courseInstructor.deleteMany({ where: { courseId } })
+    if (ids.length > 0) {
+      // `sortOrder` guarda a ordem em que vieram: o primeiro é o principal, e é
+      // ele que aparece sozinho no card do catálogo.
+      await db.courseInstructor.createMany({
+        data: ids.map((instructorId, index) => ({ courseId, instructorId, sortOrder: index })),
+      })
+    }
+  }
+}
+
 export async function createCourse(input: { data: CreateCourseRequest; actor: CourseActor }): Promise<AdminCourseDTO> {
   const title = input.data.title.trim()
-  const category = input.data.category.trim()
   if (!title) throw new CourseAdminError('Informe o título do curso.')
-  if (!category) throw new CourseAdminError('Informe a categoria do curso.')
 
   // Curso nasce no setor de quem cria: SUBADMIN nunca escolhe, um `sectorId`
   // pedido por ele para outro setor é ignorado (não recusado). ADMIN e
@@ -254,26 +372,34 @@ export async function createCourse(input: { data: CreateCourseRequest; actor: Co
   const course = await scopedPrisma(input.actor.companyId).course.create({
     data: {
       title,
-      category,
+      categoryId: await resolveCategoryId(input.actor.companyId, input.data.categoryId ?? null),
       slug: await uniqueSlug(input.actor.companyId, title),
       level: input.data.level ?? 'BEGINNER',
       shortDescription: input.data.shortDescription?.trim() || null,
       description: input.data.description?.trim() || null,
       coverUrl: input.data.coverUrl?.trim() || null,
-      competencies: normalizeList(input.data.competencies) ?? [],
       objectives: normalizeList(input.data.objectives) ?? [],
       prerequisites: input.data.prerequisites?.trim() || null,
-      instructorName: input.data.instructorName?.trim() || null,
-      instructorBio: input.data.instructorBio?.trim() || null,
+      bannerUrl: input.data.bannerUrl?.trim() || null,
+      introVideoUrl: input.data.introVideoUrl?.trim() || null,
+      icon: input.data.icon?.trim() || null,
+      primaryColor: input.data.primaryColor?.trim() || null,
+      rewardPoints: input.data.rewardPoints ?? undefined,
+      rewardCoins: input.data.rewardCoins ?? undefined,
+      audiencePositionCategories: normalizePositionCategories(input.data.audiencePositionCategories) ?? [],
+      recommendedFor: normalizeStringArray(input.data.recommendedFor) ?? [],
+      autoEnroll: input.data.autoEnroll ?? false,
       mandatory: input.data.mandatory ?? false,
       certificateEnabled: input.data.certificateEnabled ?? true,
       requiresCertificateApproval: input.data.requiresCertificateApproval ?? false,
       certificateTemplateId,
       sectorId,
       // Curso nasce em rascunho: só aparece no catálogo quando o admin publica.
-      published: false,
+      status: 'DRAFT',
     },
   })
+
+  await syncCourseCatalogLinks(input.actor.companyId, course.id, input.data)
 
   await recordAuditLog({
     actorId: input.actor.id,
@@ -299,20 +425,28 @@ export async function updateCourse(input: {
     if (!title) throw new CourseAdminError('Informe o título do curso.')
     data.title = title
   }
-  if (input.data.category !== undefined) {
-    const category = input.data.category.trim()
-    if (!category) throw new CourseAdminError('Informe a categoria do curso.')
-    data.category = category
+  if (input.data.categoryId !== undefined) {
+    data.categoryId = await resolveCategoryId(input.actor.companyId, input.data.categoryId)
   }
   if (input.data.level !== undefined) data.level = input.data.level
   if (input.data.shortDescription !== undefined) data.shortDescription = input.data.shortDescription?.trim() || null
   if (input.data.description !== undefined) data.description = input.data.description?.trim() || null
   if (input.data.coverUrl !== undefined) data.coverUrl = input.data.coverUrl?.trim() || null
-  if (input.data.competencies !== undefined) data.competencies = normalizeList(input.data.competencies)
   if (input.data.objectives !== undefined) data.objectives = normalizeList(input.data.objectives)
   if (input.data.prerequisites !== undefined) data.prerequisites = input.data.prerequisites?.trim() || null
-  if (input.data.instructorName !== undefined) data.instructorName = input.data.instructorName?.trim() || null
-  if (input.data.instructorBio !== undefined) data.instructorBio = input.data.instructorBio?.trim() || null
+  if (input.data.audiencePositionCategories !== undefined) {
+    data.audiencePositionCategories = normalizePositionCategories(input.data.audiencePositionCategories)
+  }
+  if (input.data.bannerUrl !== undefined) data.bannerUrl = input.data.bannerUrl?.trim() || null
+  if (input.data.introVideoUrl !== undefined) data.introVideoUrl = input.data.introVideoUrl?.trim() || null
+  if (input.data.icon !== undefined) data.icon = input.data.icon?.trim() || null
+  if (input.data.primaryColor !== undefined) data.primaryColor = input.data.primaryColor?.trim() || null
+  if (input.data.rewardPoints !== undefined) data.rewardPoints = input.data.rewardPoints
+  if (input.data.rewardCoins !== undefined) data.rewardCoins = input.data.rewardCoins
+  if (input.data.recommendedFor !== undefined) {
+    data.recommendedFor = normalizeStringArray(input.data.recommendedFor)
+  }
+  if (input.data.autoEnroll !== undefined) data.autoEnroll = input.data.autoEnroll
   if (input.data.mandatory !== undefined) data.mandatory = input.data.mandatory
   if (input.data.certificateEnabled !== undefined) data.certificateEnabled = input.data.certificateEnabled
   if (input.data.requiresCertificateApproval !== undefined) {
@@ -336,17 +470,30 @@ export async function updateCourse(input: {
     data.sectorId = input.data.sectorId
   }
 
-  if (input.data.published !== undefined && input.data.published !== before.published) {
-    if (input.data.published && before.modules.flatMap((m) => m.lessons).length === 0) {
+  if (input.data.status !== undefined && input.data.status !== before.status) {
+    // A guarda continua valendo para PUBLICAR, e só para ela: mandar um curso
+    // vazio para revisão é justamente o que os estados intermediários servem
+    // para permitir.
+    if (input.data.status === 'PUBLISHED' && before.modules.flatMap((m) => m.lessons).length === 0) {
       throw new CourseAdminError('Adicione ao menos uma aula antes de publicar o curso.', 409)
     }
-    data.published = input.data.published
-    // `publishedAt` é a primeira publicação: ordena "Novos cursos" e não deve
-    // pular para o topo a cada republicação.
-    if (input.data.published && !before.publishedAt) data.publishedAt = new Date()
+    data.status = input.data.status
+    // `publishedAt` é a PRIMEIRA publicação: ordena "Novos cursos" e não deve
+    // pular para o topo a cada republicação — nem ser reescrito por um trânsito
+    // entre rascunho e revisão.
+    if (input.data.status === 'PUBLISHED' && !before.publishedAt) data.publishedAt = new Date()
   }
 
   const updated = await scopedPrisma(input.actor.companyId).course.update({ where: { id: input.courseId }, data })
+  await syncCourseCatalogLinks(input.actor.companyId, input.courseId, input.data)
+  // Ligar a matrícula automática e só ver efeito no dia seguinte confundiria
+  // quem acabou de configurar — o tick horário cobre só quem entra depois.
+  // Best-effort: falhar em matricular não desfaz o salvamento do curso.
+  try {
+    await runAutoEnrollmentForCourse(input.courseId)
+  } catch (err) {
+    console.error('[course-admin-service] Falha na matrícula automática após salvar.', err)
+  }
   await recordAuditLog({
     actorId: input.actor.id,
     entityType: 'Course',
@@ -474,10 +621,8 @@ export async function createLesson(input: {
       courseId: courseModule.courseId,
       moduleId: input.moduleId,
       title,
-      type: input.data.type,
       description: input.data.description?.trim() || null,
-      videoUrl: input.data.videoUrl?.trim() || null,
-      contentHtml: input.data.contentHtml?.trim() || null,
+      contentBlocks: input.data.blocks ?? [],
       durationMinutes: input.data.durationMinutes ?? 0,
       sortOrder: await nextSortOrder(siblings),
     },
@@ -509,10 +654,10 @@ export async function updateLesson(input: {
     if (!title) throw new CourseAdminError('Informe o título da aula.')
     data.title = title
   }
-  if (input.data.type !== undefined) data.type = input.data.type
   if (input.data.description !== undefined) data.description = input.data.description?.trim() || null
-  if (input.data.videoUrl !== undefined) data.videoUrl = input.data.videoUrl?.trim() || null
-  if (input.data.contentHtml !== undefined) data.contentHtml = input.data.contentHtml?.trim() || null
+  // A lista inteira é regravada: o editor manda o documento da aula, não um
+  // patch de bloco. `[]` é apagar o conteúdo, e é intenção legítima.
+  if (input.data.blocks !== undefined) data.contentBlocks = input.data.blocks
   if (input.data.durationMinutes !== undefined) data.durationMinutes = input.data.durationMinutes
   if (input.data.sortOrder !== undefined) data.sortOrder = input.data.sortOrder
 

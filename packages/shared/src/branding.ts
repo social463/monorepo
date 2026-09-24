@@ -19,6 +19,61 @@ import { contrastRatio, hexToOklch, isValidHex, oklchToHex, type Oklch } from '.
  * `apps/web/tailwind.config.ts` expõe como classe utilitária. Mexer aqui exige
  * mexer lá; o teste `brand-tokens.test.ts` do web trava os dois juntos.
  */
+/**
+ * Tipografia da marca.
+ *
+ * `headline` veste título e rótulo; `body`, o texto corrido. São duas porque o
+ * produto já separava as duas famílias (Geist e Inter) — uma empresa que use a
+ * mesma fonte nos dois papéis repete o nome, e o `<link>` é carregado uma vez.
+ *
+ * Guarda **só o nome da família**. A pilha de fallback e o carregamento são do
+ * produto: cliente não escolhe `system-ui` nem a URL do Google Fonts.
+ */
+export interface BrandFonts {
+  headline: string
+  body: string
+}
+
+/** A tipografia do produto — o que vale para quem não configurou nada. */
+export const PRODUCT_FONTS: BrandFonts = { headline: 'Geist', body: 'Inter' }
+
+/** Pesos que o produto pede ao carregar uma família. */
+export const BRAND_FONT_WEIGHTS = [300, 400, 500, 600, 700, 800] as const
+
+/**
+ * Nome de família aceitável.
+ *
+ * Restrito de propósito: o nome entra numa URL do Google Fonts **e** numa
+ * declaração `font-family`. Aceitar aspas, ponto e vírgula ou parêntese seria
+ * deixar o cadastro de marca escrever CSS — uma empresa configuraria
+ * `Outfit"; background: url(...)` e o valor sairia do lado de dentro da folha.
+ */
+const FONT_FAMILY_PATTERN = /^[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9 ]{0,39}$/
+
+export function isValidBrandFontFamily(value: string): boolean {
+  return FONT_FAMILY_PATTERN.test(value.trim())
+}
+
+/**
+ * A pilha CSS de uma família: o nome da marca na frente, o fallback do produto
+ * atrás. Entra na variável `--brand-font-*` que o Tailwind lê.
+ */
+export function brandFontStack(family: string, kind: keyof BrandFonts): string {
+  const seguro = isValidBrandFontFamily(family) ? family.trim() : PRODUCT_FONTS[kind]
+  return `'${seguro}', system-ui, sans-serif`
+}
+
+/** URL do Google Fonts para as famílias da marca. `null` = nada a carregar. */
+export function brandFontHref(fonts: BrandFonts): string | null {
+  const familias = [...new Set([fonts.headline, fonts.body].map((f) => f.trim()))].filter(
+    (f) => isValidBrandFontFamily(f) && f !== PRODUCT_FONTS.headline && f !== PRODUCT_FONTS.body,
+  )
+  if (familias.length === 0) return null
+  const pesos = BRAND_FONT_WEIGHTS.join(';')
+  const query = familias.map((f) => `family=${encodeURIComponent(f)}:wght@${pesos}`).join('&')
+  return `https://fonts.googleapis.com/css2?${query}&display=swap`
+}
+
 export const BRAND_COLOR_TOKENS = [
   'surface',
   'surface-dim',
@@ -365,6 +420,8 @@ export interface BrandingPreset {
    */
   hosts: string[]
   logos: BrandLogoSet
+  /** Tipografia da empresa; ausente = a do produto. */
+  fonts?: BrandFonts
   /** Esquema que a pessoa vê antes de escolher qualquer coisa. */
   defaultScheme: BrandScheme
   /**
@@ -470,6 +527,25 @@ export const LEGENDS_PRESET: BrandingPreset = {
  * O `borderColor/000` do DS (`#e1e8ed`, "principal padrão de borda") entra como
  * `outline-variant`, que é o token decorativo.
  */
+/**
+ * A marca da EMR, brandbook de **2026** (Documento 3, seção 10).
+ *
+ * Substituiu a paleta do design system antigo, que era ancorada no verde
+ * `#35bd78` e numa escada de cinzas neutros. O brandbook novo tem cinco
+ * primárias com semântica declarada, e o mapeamento delas para os 35 tokens
+ * Material não é óbvio — os comentários abaixo dizem por quê.
+ *
+ * **`primary` não recebe a cor institucional crua.** Regra do produto (ver
+ * `AGENTS.md`): `primary` é ao mesmo tempo cor de texto (`text-primary` aparece
+ * ~1080 vezes) e fundo de botão, então precisa do tom legível; a cor exata da
+ * marca fica em `surface-tint`, para preenchimento e decoração.
+ *
+ * ATENÇÃO: este preset **não é lido em runtime**. `getBranding` usa o que está
+ * gravado em `AppSetting`; quem aplica a paleta na empresa EMR é a migration
+ * `20260824160000_identidade_visual_emr_2026`. O preset é a referência
+ * versionada — e é o que o teste de contraste do pacote valida antes de
+ * qualquer deploy.
+ */
 export const EMR_PRESET: BrandingPreset = {
   appName: 'EMR Legends',
   tagline: 'Onde as lendas nascem',
@@ -486,117 +562,170 @@ export const EMR_PRESET: BrandingPreset = {
    * caminho `/brand/emr/...` viraria um caso especial no código do produto.
    * Enquanto nada estiver cadastrado, o `BrandLogo` escreve o nome da empresa,
    * que é legível nos dois temas.
+   *
+   * Nota de 2026: a marca nova **não existe em vetor** — o próprio brandbook
+   * manda pedir o original ao estúdio. Os SVGs em produção ainda são o escudo
+   * com cruz da marca antiga.
    */
   logos: EMPTY_LOGOS,
   defaultScheme: 'light',
   allowUserScheme: true,
-  brandColor: '#35bd78',
-  neutralColor: '#f7fafc',
+  // Residente Approved: é o verde que identifica a marca à distância. O
+  // institucional (`#264641`) é escuro demais para o papel de "cor da marca" —
+  // ele entra como cor de TEXTO (`on-surface`), que é o uso que o brandbook lhe
+  // dá em toda aplicação.
+  brandColor: '#6ce190',
+  // Residente Off White — "neutro · clareza · espaço" no brandbook.
+  neutralColor: '#f8f8f8',
+  // Outfit, nos três pesos que o brandbook declara (400/500/700). Os pesos 300,
+  // 600 e 800 que o produto usa são derivados — funcionam, mas não constam do
+  // manual, e é por isso que a família é pedida com a escala inteira.
+  fonts: { headline: 'Outfit', body: 'Outfit' },
   overrides: {
     light: {
-      // Superfícies = escada de `bgColor`. O 000 é White e leva a nota
-      // "Uso padrão do background" no próprio Figma.
+      // Superfícies: branco puro para o card, Off White para a página. A escada
+      // sobe com um verde muito diluído no cinza — é o que faz o card sobre a
+      // página parecer da mesma família, e não um cinza neutro colado.
       surface: '#ffffff',
-      background: '#ffffff',
+      background: '#f8f8f8',
       'surface-container-lowest': '#ffffff',
-      'surface-container-low': '#f7fafc',
-      'surface-container': '#edf0f2',
-      'surface-container-high': '#e1e8ed',
-      'surface-container-highest': '#c2ced6',
+      'surface-container-low': '#f8f8f8',
+      'surface-container': '#f1f5f2',
+      'surface-container-high': '#e8efea',
+      'surface-container-highest': '#dce7df',
       'surface-bright': '#ffffff',
-      'surface-dim': '#edf0f2',
-      'surface-variant': '#f7fafc',
-      // textColor/100 "textos de maior ênfase" e /200 "padrão de parágrafos".
-      'on-surface': '#363e46',
-      'on-background': '#363e46',
-      'on-surface-variant': '#606a71',
-      outline: '#606a71',
-      'outline-variant': '#e1e8ed',
-      'inverse-surface': '#1d2224',
-      'inverse-on-surface': '#f7fafc',
+      'surface-dim': '#edf2ee',
+      'surface-variant': '#f8f8f8',
+      // Residente Green como texto: 10.3:1 sobre branco. O brandbook mede 11.2:1
+      // sobre Off White e classifica como AAA.
+      'on-surface': '#264641',
+      'on-background': '#264641',
+      /*
+       * `ink-soft` do brandbook é `#5a736b`, e ele mede 4.95:1 sobre o Off
+       * White — AA, como o próprio documento afirma. Este é um fio mais escuro,
+       * e a razão é o produto, não a marca: o Legends tem uma ESCADA de
+       * superfícies, e o degrau mais claro (`surface-container-highest`) é mais
+       * escuro que o Off White. Sobre ele, o `ink-soft` cai para 4.03:1.
+       *
+       * O brandbook não trata escada de superfície (é uma das lacunas que ele
+       * mesmo lista), então não há valor oficial para este caso. Escurecer o
+       * mínimo necessário mantém o texto secundário legível em TODO degrau —
+       * 4.60:1 no pior deles — sem sair do matiz.
+       */
+      'on-surface-variant': '#526a62',
+      outline: '#526a62',
+      // `line`, o derivado para bordas e divisores.
+      'outline-variant': '#e1e8e4',
+      'inverse-surface': '#1b322e',
+      'inverse-on-surface': '#f8f8f8',
 
-      'surface-tint': '#35bd78',
-      primary: '#007344',
+      // A cor de marca crua vive AQUI — preenchimento e decoração.
+      'surface-tint': '#6ce190',
+      // `green-deep`: o Approved rende 1.6:1 como texto sobre branco. Este é o
+      // mesmo matiz no tom que passa AA, e é o que o brandbook derivou para
+      // "texto/ícone verde com contraste AA sobre claro".
+      primary: '#16603c',
       'on-primary': '#ffffff',
-      'primary-container': '#d3fce9',
-      'on-primary-container': '#004d2d',
-      'inverse-primary': '#25de88',
+      // `approved-t`, a tinta de Approved para fundo de seção.
+      'primary-container': '#e4f9eb',
+      'on-primary-container': '#0f4a2d',
+      'inverse-primary': '#6ce190',
 
-      secondary: '#087d75',
+      // Família do Residente Lime. Ele NÃO é `primary`: o brandbook o declara
+      // acento ("usá-lo como fundo de seção grande contraria a hierarquia") e
+      // como texto sobre branco ele dá 1.6:1. Aqui ele é grifo e chip, que é o
+      // papel que o brandbook lhe dá — o container é a tinta `lime-t`.
+      secondary: '#4a6b00',
       'on-secondary': '#ffffff',
-      'secondary-container': '#b1e7e1',
-      'on-secondary-container': '#05524c',
+      'secondary-container': '#f0fdcc',
+      'on-secondary-container': '#3a5400',
 
-      tertiary: '#23509b',
+      // Complementar azul (#50BCFF), escurecida para passar AA como texto. As
+      // complementares têm teto de 30% de presença no brandbook, e no produto
+      // elas aparecem exatamente assim: acento pontual.
+      tertiary: '#14618c',
       'on-tertiary': '#ffffff',
-      'tertiary-container': '#a7caff',
-      'on-tertiary-container': '#1a2430',
+      'tertiary-container': '#d6efff',
+      'on-tertiary-container': '#0a4a6b',
 
-      error: '#b23535',
+      // `warn`, que o brandbook derivou do Residente Orange escurecendo-o para
+      // AA. É por aqui que o Orange chega ao produto: o conjunto Material não
+      // tem slot de CTA separado de `primary`, e pôr Orange em `primary`
+      // contrariaria a hierarquia declarada, com o Green predominante.
+      error: '#c4381b',
       'on-error': '#ffffff',
-      'error-container': '#ffe9e9',
-      'on-error-container': '#b23535',
+      'error-container': '#fde6e0',
+      'on-error-container': '#8f2712',
     },
     dark: {
       /*
-       * A escada escura é ancorada no **Neutral/800** (`#1d2224`), e não no
-       * `bgColor/000` do DS (Neutral/700, `#363e46`). Não é descuido.
+       * O brandbook **não trata modo escuro** — é uma das "lacunas conhecidas"
+       * do próprio documento. A escada é derivada do Residente Green, ancorada
+       * no `ink-2` (`#1b322e`), que o brandbook define como "superfície escura
+       * mais profunda que o Green".
        *
-       * O Legends eleva card **clareando** a superfície, então a página precisa
-       * ser o degrau mais escuro. Ancorando em Neutral/700, os cards eram
-       * empurrados para Neutral/600 e /500 — que no DS são cores de borda e de
-       * texto, não de superfície. O resultado media 1.48:1 entre a sidebar e o
-       * fundo (contra 1.04:1 no tema do produto): a sidebar virava uma lasca
-       * preta e os cards, cinza lavado.
-       *
-       * Os dois degraus do meio não existem no DS: a escala tem 4 tons na faixa
-       * escura e a escada precisa de 6. São interpolados em OKLCH entre
-       * Neutral/800 e /700, então caem exatamente sobre a linha que o DS já
-       * desenha. Espaçamento final L 0.19 → 0.41, contra 0.16 → 0.33 do produto.
+       * A âncora é o degrau MAIS ESCURO porque o Legends eleva card clareando a
+       * superfície: a página precisa estar embaixo, senão os cards sobem para
+       * tons que na marca são cor de borda e de texto, não de superfície.
        */
-      'surface-container-lowest': '#121719',
-      surface: '#1d2224',
-      background: '#1d2224',
-      'surface-dim': '#1d2224',
-      'surface-container-low': '#252b2f',
-      'surface-container': '#2d343a',
-      'surface-container-high': '#363e46',
-      'surface-container-highest': '#414b52',
-      'surface-bright': '#414b52',
-      'surface-variant': '#2d343a',
+      'surface-container-lowest': '#121f1c',
+      surface: '#1b322e',
+      background: '#1b322e',
+      'surface-dim': '#1b322e',
+      'surface-container-low': '#213934',
+      // O Residente Green é o degrau de card: no escuro ele funciona como
+      // superfície, que é o papel que tem em toda peça do brandbook.
+      'surface-container': '#264641',
+      /*
+       * O topo da escada é `#315850`, e não um tom mais claro: sobre ele o
+       * `dark-text` do brandbook (`#b9d2c6`) rende 4.96:1. Clareando mais, o
+       * texto secundário cairia abaixo de AA no degrau em que os cards
+       * empilhados mais aparecem.
+       *
+       * Aqui quem cede é a ESCADA, que é do produto, e não o token do
+       * brandbook — o caminho inverso (clarear o `dark-text`) mexeria numa cor
+       * declarada para consertar um problema que a marca não criou.
+       */
+      'surface-container-high': '#2b4d46',
+      'surface-container-highest': '#315850',
+      'surface-bright': '#315850',
+      'surface-variant': '#264641',
       'on-surface': '#ffffff',
       'on-background': '#ffffff',
-      'on-surface-variant': '#c2ced6',
-      // Neutral/400: 6.4:1 sobre a superfície. O /500 daria 2.9:1 e reprovaria
-      // o mínimo de 3:1 de borda, então ele fica no token decorativo.
-      outline: '#9ba5ab',
-      'outline-variant': '#606a71',
-      'inverse-surface': '#f7fafc',
-      'inverse-on-surface': '#1d2224',
+      // `dark-text`, o derivado do brandbook para texto secundário sobre escuro.
+      'on-surface-variant': '#b9d2c6',
+      // 4.53:1 sobre a superfície — o par mais apertado da paleta, contra um
+      // mínimo de 3 para borda. Clarear mais transformaria divisor em texto.
+      outline: '#7e9b92',
+      'outline-variant': '#3a5a53',
+      'inverse-surface': '#f8f8f8',
+      'inverse-on-surface': '#1b322e',
 
-      'surface-tint': '#35bd78',
-      // No escuro o degrau legível é o Brand/300 (6.14:1 sobre #363e46);
-      // o Brand/400 fica em 4.50:1, na linha exata do mínimo.
-      primary: '#25de88',
-      'on-primary': '#1d2224',
-      'primary-container': '#3d5d53',
-      'on-primary-container': '#d3fce9',
-      'inverse-primary': '#007344',
+      'surface-tint': '#6ce190',
+      // No escuro o Approved já é o tom legível: 8.3:1 sobre a superfície. Não
+      // precisa do `green-deep`, que aqui seria escuro demais.
+      primary: '#6ce190',
+      'on-primary': '#1b322e',
+      'primary-container': '#2f5d4a',
+      'on-primary-container': '#c8f5d8',
+      'inverse-primary': '#16603c',
 
-      secondary: '#3ec4b5',
-      'on-secondary': '#1d2224',
-      'secondary-container': '#05524c',
-      'on-secondary-container': '#b1e7e1',
+      // O Lime puro brilha no escuro (13:1) — é aqui que ele pode ser usado sem
+      // escurecimento, ao contrário do tema claro.
+      secondary: '#b4f900',
+      'on-secondary': '#1b322e',
+      'secondary-container': '#3f5400',
+      'on-secondary-container': '#e8fca8',
 
-      tertiary: '#5899ff',
-      'on-tertiary': '#1d2224',
-      'tertiary-container': '#224b87',
-      'on-tertiary-container': '#b9d4ff',
+      tertiary: '#50bcff',
+      'on-tertiary': '#1b322e',
+      'tertiary-container': '#124a6b',
+      'on-tertiary-container': '#c4e7ff',
 
-      error: '#ffb2b2',
-      'on-error': '#1d2224',
-      'error-container': '#653938',
-      'on-error-container': '#ffb2b2',
+      error: '#ff9e85',
+      'on-error': '#1b322e',
+      'error-container': '#6b2415',
+      'on-error-container': '#ffd3c6',
     },
   },
 }
@@ -618,6 +747,8 @@ export interface BrandingDTO {
   /** Domínios da empresa — o `GET /branding` público casa o `Host` com esta lista. */
   hosts: string[]
   logos: BrandLogoSet
+  /** Tipografia resolvida — sempre preenchida, com a do produto como padrão. */
+  fonts: BrandFonts
   /** Esquema que vale antes de a pessoa escolher. */
   defaultScheme: BrandScheme
   /** Se a pessoa pode alternar claro/escuro. */
@@ -767,6 +898,17 @@ export function normalizeHex(value: string): string {
   return `#${full}`
 }
 
+/** A tipografia efetiva: o que a empresa cadastrou, com a do produto por trás. */
+export function resolveBrandFonts(fonts: BrandFonts | null | undefined): BrandFonts {
+  return {
+    headline:
+      fonts?.headline && isValidBrandFontFamily(fonts.headline)
+        ? fonts.headline.trim()
+        : PRODUCT_FONTS.headline,
+    body: fonts?.body && isValidBrandFontFamily(fonts.body) ? fonts.body.trim() : PRODUCT_FONTS.body,
+  }
+}
+
 export function brandingFromPreset(preset: BrandingPreset): BrandingDTO {
   const schemes = resolveBrandSchemes(preset)
   return {
@@ -774,6 +916,9 @@ export function brandingFromPreset(preset: BrandingPreset): BrandingDTO {
     tagline: preset.tagline,
     hosts: preset.hosts,
     logos: preset.logos,
+    // Sempre resolvida: quem consome o DTO não precisa saber que o campo é
+    // opcional no cadastro. Família inválida cai no produto, não quebra a tela.
+    fonts: resolveBrandFonts(preset.fonts),
     defaultScheme: preset.defaultScheme,
     allowUserScheme: preset.allowUserScheme,
     brandColor: preset.brandColor,

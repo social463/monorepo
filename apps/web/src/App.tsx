@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   canAdminister,
   canSeeCorporateMural,
+  isApprentice,
   isFullAdmin,
   isLeaderRole,
   isSectorAdminOnly,
@@ -23,6 +24,7 @@ import { CultureHubPage } from './pages/culture/CultureHubPage'
 import { BenefitDetailPage } from './pages/culture/BenefitDetailPage'
 import { ManifestoPage } from './pages/culture/ManifestoPage'
 import { ManualDetailPage } from './pages/culture/ManualDetailPage'
+import { BonusCalculatorPage } from './pages/culture/BonusCalculatorPage'
 import { EngagementPage } from './pages/EngagementPage'
 import { RankingPage } from './pages/RankingPage'
 import { ProfilePage } from './pages/ProfilePage'
@@ -42,17 +44,18 @@ import { ChallengesSection } from './pages/admin/ChallengesSection'
 import { ChallengeSubmissionsSection } from './pages/admin/ChallengeSubmissionsSection'
 import { CoinsSection } from './pages/admin/CoinsSection'
 import { XpSection } from './pages/admin/XpSection'
-import { EngagementSection } from './pages/admin/EngagementSection'
 import { StoreSection } from './pages/admin/StoreSection'
+import { VacationCampaignSection } from './pages/admin/VacationCampaignSection'
 import { DevelopmentThursdaySection } from './pages/admin/DevelopmentThursdaySection'
 import { DevelopmentSection } from './pages/admin/DevelopmentSection'
 import { CoursesSection } from './pages/admin/CoursesSection'
-import { CertificateTemplatesSection } from './pages/admin/CertificateTemplatesSection'
-import { CertificateRequestsSection } from './pages/admin/CertificateRequestsSection'
+import { TrainingSection } from './pages/admin/TrainingSection'
+import { OkrCyclesSection } from './pages/admin/OkrCyclesSection'
+import { CertificatesSection } from './pages/admin/CertificatesSection'
 import { RetrospectivesSection } from './pages/admin/RetrospectivesSection'
 import { CalendarEventsSection } from './pages/admin/CalendarEventsSection'
+import { CorporatePostTagsSection } from './pages/admin/CorporatePostTagsSection'
 import { ModerationSection } from './pages/admin/ModerationSection'
-import { MoodOverviewSection } from './pages/admin/MoodOverviewSection'
 import { OfficeSection } from './pages/admin/OfficeSection'
 import { MapsSection } from './pages/admin/MapsSection'
 import { AdministratorsSection } from './pages/admin/AdministratorsSection'
@@ -68,6 +71,7 @@ import { ManifestoSection } from './pages/admin/culture/ManifestoSection'
 import { ManualsSection } from './pages/admin/culture/ManualsSection'
 import { BenefitsSection } from './pages/admin/culture/BenefitsSection'
 import { KitVisualSection } from './pages/admin/culture/KitVisualSection'
+import { BonusProgramSection } from './pages/admin/culture/BonusProgramSection'
 import { EventAlbumsSection } from './pages/admin/EventAlbumsSection'
 import { GalleryPage } from './pages/GalleryPage'
 import { AlbumPage } from './pages/AlbumPage'
@@ -93,8 +97,41 @@ import { CompanyDashboardPage } from './pages/CompanyDashboardPage'
 import { AdoptionPage } from './pages/super-admin/AdoptionPage'
 import { SuperAdminLayout } from './pages/super-admin/SuperAdminLayout'
 import { DevelopmentThursdayPage } from './pages/DevelopmentThursdayPage'
+import { ComunidadeInovaPage } from './pages/ComunidadeInovaPage'
+import { InovaProjectFormPage } from './pages/inova/InovaProjectFormPage'
+import { InovaProjectDetailPage } from './pages/inova/InovaProjectDetailPage'
+import { InovaLayout } from './pages/inova/InovaLayout'
+import { EuAprendizLayout } from './pages/eu-aprendiz/EuAprendizLayout'
+import { TrackPage as ApprenticeTrackPage } from './pages/eu-aprendiz/TrackPage'
+import { MeetingPage as ApprenticeMeetingPage } from './pages/eu-aprendiz/MeetingPage'
+import { WallPage as ApprenticeWallPage } from './pages/eu-aprendiz/WallPage'
+import { ContractPage as ApprenticeContractPage } from './pages/eu-aprendiz/ContractPage'
+import { PortfolioPage as ApprenticePortfolioPage } from './pages/eu-aprendiz/PortfolioPage'
+import { AdminPanelPage as ApprenticeAdminPanelPage } from './pages/eu-aprendiz/AdminPanelPage'
+import { InovaHomePage } from './pages/inova/InovaHomePage'
+import { InovaResourcesPage } from './pages/inova/InovaResourcesPage'
+import { InovaHowToPage } from './pages/inova/InovaHowToPage'
+import { InovaAdminPanelPage } from './pages/inova/InovaAdminPanelPage'
+import { InovaResponsabilidadesPage } from './pages/inova/InovaResponsabilidadesPage'
+import { InovaRankingExplicacaoPage } from './pages/inova/InovaRankingExplicacaoPage'
+import { InovaGuiaLayout } from './pages/inova/guia/InovaGuiaLayout'
+import { InovaGuiaHomePage } from './pages/inova/guia/pages/InovaGuiaHomePage'
+import { InovaGuiaBussolaPage } from './pages/inova/guia/pages/InovaGuiaBussolaPage'
+import { InovaGuiaSituacoesPage } from './pages/inova/guia/pages/InovaGuiaSituacoesPage'
+import { InovaGuiaNaPraticaPage } from './pages/inova/guia/pages/InovaGuiaNaPraticaPage'
+import { InovaGuiaCasesPage } from './pages/inova/guia/pages/InovaGuiaCasesPage'
+import { InovaGuiaVideosPage } from './pages/inova/guia/pages/InovaGuiaVideosPage'
+import { InovaGuiaPromptsPage } from './pages/inova/guia/pages/InovaGuiaPromptsPage'
+import { InovaGuiaMaturidadePage } from './pages/inova/guia/pages/InovaGuiaMaturidadePage'
+import { InovaGuiaLiderancaPage } from './pages/inova/guia/pages/InovaGuiaLiderancaPage'
+import { InovaGuiaSegurancaPage } from './pages/inova/guia/pages/InovaGuiaSegurancaPage'
+import { InovaGuiaCompletoPage } from './pages/inova/guia/pages/InovaGuiaCompletoPage'
 import { LearningPage } from './pages/learning/LearningPage'
 import { CoursePlayerPage } from './pages/learning/CoursePlayerPage'
+import { TrainingPage } from './pages/training/TrainingPage'
+import { OkrPage } from './pages/okr/OkrPage'
+import { OkrPersonPage } from './pages/okr/OkrPersonPage'
+import { OkrObjectivePage } from './pages/okr/OkrObjectivePage'
 import { QuizPage } from './pages/learning/QuizPage'
 import { CertificatePage } from './pages/learning/CertificatePage'
 import { PdiPage } from './pages/pdi/PdiPage'
@@ -108,6 +145,11 @@ import { readOfficeGuestSession } from './lib/officeGuestSession'
 
 const OfficePage = lazy(() =>
   import('./pages/OfficePage').then((m) => ({ default: m.OfficePage })),
+)
+// Banco de provas do movimento livre da arena (marco 1). Sem servidor: só o
+// passo, para afinar a sensação antes de existir netcode.
+const ArenaPlayground = lazy(() =>
+  import('./arena/ArenaPlayground').then((m) => ({ default: m.ArenaPlayground })),
 )
 
 const OfficeMapEditorPage = lazy(() =>
@@ -156,16 +198,63 @@ function AdminSectorFeatureOnly({ feature, children }: { feature: FeatureKey; ch
 }
 
 /**
- * Hub da liderança: papel de líder (LEAD, MANAGER, HEAD), ADMIN, ou quem tem o
- * bloco de Gente e Gestão no setor. Espelha o filtro `leadershipOnly` do menu —
- * sem isto a URL abriria direto para qualquer pessoa.
+ * A porta de entrada do Admin (`/admin`).
+ *
+ * A G&G pediu que People Analytics fosse "o que aparece primeiro ao abrirmos a
+ * aba Admin" (Documento 3, seção 3). Mas People Analytics é bloco de
+ * `gente-gestao`: redirecionar todo mundo mandaria o SUBADMIN de Desenvolvimento
+ * de Produto para uma tela que ele não pode ver — e o guard o devolveria para
+ * `/admin`, num laço. Para ele, a porta continua sendo o resumo operacional por
+ * setor, que é a informação que lhe serve.
+ */
+function AdminHome() {
+  const { user } = useAuth()
+  const veAnalytics =
+    !user ||
+    isFullAdmin(user) ||
+    (user.role === 'SUBADMIN' && (user.sectorFeatures ?? []).includes('gente-gestao'))
+  return veAnalytics ? <Navigate to="/admin/pessoas?aba=dashboard" replace /> : <AdminDashboardPage />
+}
+
+/**
+ * Hub da liderança: papel de líder (LEAD, MANAGER, HEAD), ADMIN pleno, ou o
+ * SUBADMIN com o bloco de Gente e Gestão. Espelha o filtro `leadershipOnly` do
+ * menu — sem isto a URL abriria direto para qualquer pessoa. O bloco só conta no
+ * SUBADMIN: a feature é do setor, e todo colaborador lotado em G&G a recebe.
  */
 function LeadershipOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   if (!user) return <>{children}</>
   if (isFullAdmin(user) || isLeaderRole(user.role)) return <>{children}</>
-  if (user.sectorFeatures.includes('gente-gestao' as FeatureKey)) return <>{children}</>
+  if (user.role === 'SUBADMIN' && user.sectorFeatures.includes('gente-gestao' as FeatureKey)) return <>{children}</>
   return <Navigate to="/" replace />
+}
+
+/**
+ * Área Eu Aprendiz: quem tem o cargo de Jovem Aprendiz, mais quem a facilita —
+ * ADMIN pleno ou o bloco de Gente e Gestão. Espelha `assertApprenticeAccess` na
+ * API; sem isto a URL abriria para qualquer pessoa da empresa.
+ */
+function ApprenticeOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  if (!user) return <>{children}</>
+  if (isApprentice(user)) return <>{children}</>
+  if (isFullAdmin(user)) return <>{children}</>
+  if (user.role === 'SUBADMIN' && user.sectorFeatures.includes('gente-gestao' as FeatureKey)) {
+    return <>{children}</>
+  }
+  return <Navigate to="/" replace />
+}
+
+/** O painel da trilha é só do facilitador — o aprendiz volta para a trilha. */
+function ApprenticeFacilitatorOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  if (!user) return <>{children}</>
+  if (isFullAdmin(user)) return <>{children}</>
+  if (user.role === 'SUBADMIN' && user.sectorFeatures.includes('gente-gestao' as FeatureKey)) {
+    return <>{children}</>
+  }
+  return <Navigate to="/eu-aprendiz" replace />
 }
 
 /** Restringe a rota exclusivamente à equipe interna (SUPER_ADMIN). */
@@ -337,6 +426,20 @@ export function App() {
                   />
                   <Route path="/escritorio" element={<OfficeRoute />} />
                   <Route
+                    path="/arena"
+                    element={
+                      <ProtectedRoute>
+                        <DevOnly>
+                        <FeatureGate feature="escritorio">
+                          <Suspense fallback={<OfficeLoadingFallback />}>
+                            <ArenaPlayground />
+                          </Suspense>
+                        </FeatureGate>
+                        </DevOnly>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
                     path="/admin/mapas/:mapId/editar"
                     element={
                       <ProtectedRoute>
@@ -448,6 +551,9 @@ export function App() {
                         para um modal, e assim o link é compartilhável. */}
                     <Route path="/cultura/beneficios/:benefitId" element={<BenefitDetailPage />} />
                     <Route path="/cultura/manuais/:manualId" element={<ManualDetailPage />} />
+                    {/* Calculadora do Todos Pelos 9: de todo colaborador logado. A
+                        conta roda no navegador e o salário digitado não sai dele. */}
+                    <Route path="/cultura/calculadora-todos-pelos-9" element={<BonusCalculatorPage />} />
                     <Route
                       path="/destaques"
                       element={
@@ -488,6 +594,61 @@ export function App() {
                         </CorporateMuralGate>
                       }
                     />
+                    {/* Eu Aprendiz: área própria, no formato da Liderança. O
+                        acesso sai do CARGO (`positionCategory`), não de feature
+                        — ver spec 2026-09-14-eu-aprendiz-design.md. */}
+                    <Route
+                      path="/eu-aprendiz"
+                      element={
+                        <ApprenticeOnly>
+                          <EuAprendizLayout />
+                        </ApprenticeOnly>
+                      }
+                    >
+                      <Route index element={<ApprenticeTrackPage />} />
+                      <Route path="encontro/:id" element={<ApprenticeMeetingPage />} />
+                      <Route path="mural" element={<ApprenticeWallPage />} />
+                      <Route path="contrato" element={<ApprenticeContractPage />} />
+                      <Route path="portfolio" element={<ApprenticePortfolioPage />} />
+                      <Route
+                        path="painel"
+                        element={
+                          <ApprenticeFacilitatorOnly>
+                            <ApprenticeAdminPanelPage />
+                          </ApprenticeFacilitatorOnly>
+                        }
+                      />
+                    </Route>
+                    {/* Sem feature: a comunidade é aberta a toda a empresa, e
+                        quem decide se ela existe é o booleano
+                        `inovaModuleEnabled` cadastrado em Administração ›
+                        Desenvolvimento — a própria página redireciona quando
+                        o módulo está desligado (ou a empresa não é EMR). */}
+                    <Route path="/comunidade-inova" element={<InovaLayout />}>
+                      <Route index element={<InovaHomePage />} />
+                      <Route path="projetos" element={<ComunidadeInovaPage />} />
+                      <Route path="projetos/:id" element={<InovaProjectDetailPage />} />
+                      <Route path="projetos/:id/editar" element={<InovaProjectFormPage />} />
+                      <Route path="novo" element={<InovaProjectFormPage />} />
+                      <Route path="recursos" element={<InovaResourcesPage />} />
+                      <Route path="guia" element={<InovaGuiaLayout />}>
+                        <Route index element={<InovaGuiaHomePage />} />
+                        <Route path="bussola" element={<InovaGuiaBussolaPage />} />
+                        <Route path="situacoes" element={<InovaGuiaSituacoesPage />} />
+                        <Route path="na-pratica" element={<InovaGuiaNaPraticaPage />} />
+                        <Route path="cases" element={<InovaGuiaCasesPage />} />
+                        <Route path="videos" element={<InovaGuiaVideosPage />} />
+                        <Route path="prompts" element={<InovaGuiaPromptsPage />} />
+                        <Route path="maturidade" element={<InovaGuiaMaturidadePage />} />
+                        <Route path="lideranca" element={<InovaGuiaLiderancaPage />} />
+                        <Route path="seguranca" element={<InovaGuiaSegurancaPage />} />
+                        <Route path="completo" element={<InovaGuiaCompletoPage />} />
+                      </Route>
+                      <Route path="como-usar" element={<InovaHowToPage />} />
+                      <Route path="responsabilidades" element={<InovaResponsabilidadesPage />} />
+                      <Route path="ranking" element={<InovaRankingExplicacaoPage />} />
+                      <Route path="painel" element={<InovaAdminPanelPage />} />
+                    </Route>
                     <Route
                       path="/quinta-desenvolvimento"
                       element={
@@ -511,6 +672,22 @@ export function App() {
                           <CoursePlayerPage />
                         </FeatureGate>
                       }
+                    />
+                    {/* Registro de treinamento: sucede "Envie seu Certificado",
+                        que perguntava o anexo e o valor mas não a carga horária,
+                        a instituição nem a conclusão. SEM `FeatureGate`: registrar
+                        o próprio desenvolvimento não depende do catálogo interno. */}
+                    <Route path="/treinamentos" element={<TrainingPage />} />
+                    {/* Metas e OKRs: ver e registrar check-in, liberado por setor
+                        (feature `metas`). Terceirizado fica de fora pela API e pelo menu. */}
+                    <Route path="/metas" element={<FeatureGate feature="metas"><OkrPage /></FeatureGate>} />
+                    <Route path="/metas/pessoa/:id" element={<FeatureGate feature="metas"><OkrPersonPage /></FeatureGate>} />
+                    <Route path="/metas/objetivo/:id" element={<FeatureGate feature="metas"><OkrObjectivePage /></FeatureGate>} />
+                    {/* O link antigo continua valendo — ele está em notificação,
+                        e-mail e na cabeça de quem já usava. */}
+                    <Route
+                      path="/aprendizado/enviar-certificado"
+                      element={<Navigate to="/treinamentos?aba=registrar" replace />}
                     />
                     <Route
                       path="/aprendizado/quiz/:id"
@@ -597,7 +774,12 @@ export function App() {
                         </AdminOnly>
                       }
                     >
-                      <Route index element={<AdminDashboardPage />} />
+                      {/* People Analytics é a primeira tela do Admin (Documento
+                          3, seção 3) — mas só para quem tem o bloco de G&G. Um
+                          SUBADMIN de outro setor cairia numa tela que ele não
+                          pode ver, então para ele `/admin` continua sendo o
+                          resumo operacional por setor, que é o que lhe serve. */}
+                      <Route index element={<AdminHome />} />
                       <Route path="pessoas" element={<AdminSectorFeatureOnly feature="gente-gestao"><PeopleAnalyticsSection /></AdminSectorFeatureOnly>} />
                       <Route path="setores" element={<StrictAdminOnly><SectorsSection /></StrictAdminOnly>} />
                       <Route path="lendas" element={<CollaboratorsSection />} />
@@ -610,27 +792,64 @@ export function App() {
                       <Route path="xp" element={<StrictAdminOnly><XpSection /></StrictAdminOnly>} />
                       {/* Leitura da economia de XP. ADMIN global, como o CRUD
                           de regras: as regras são da empresa, não do setor. */}
-                      <Route path="engajamento" element={<StrictAdminOnly><EngagementSection /></StrictAdminOnly>} />
+                      {/* O painel virou a aba Engajamento de People Analytics
+                          (seção 4.7). A rota fica de pé como redirecionamento:
+                          ela está em favorito e em link, e virar 404 seria trocar
+                          duplicidade por perda — mesmo tratamento de `/admin/clima`. */}
+                      <Route path="engajamento" element={<Navigate to="/admin/pessoas?aba=engajamento" replace />} />
                       <Route path="loja" element={<AdminSectorFeatureOnly feature="gente-gestao"><StoreSection /></AdminSectorFeatureOnly>} />
+                      <Route path="ferias" element={<AdminSectorFeatureOnly feature="gente-gestao"><VacationCampaignSection /></AdminSectorFeatureOnly>} />
                       <Route path="quinta-dev" element={<AdminSectorFeatureOnly feature="desenvolvimento-produto"><DevelopmentThursdaySection /></AdminSectorFeatureOnly>} />
                       <Route path="cursos" element={<AdminSectorFeatureOnly feature="gente-gestao"><CoursesSection /></AdminSectorFeatureOnly>} />
-                      {/* Certificado é parte de Cursos: mesmo bloco de G&G. Modelo leva
-                          StrictAdminOnly por cima porque a API é `requireAdmin`. */}
+                      {/* Certificado é parte de Cursos: mesmo bloco de G&G. Modelos e
+                          fila viraram abas de uma página só (Documento 4, seção 9.8),
+                          e o `StrictAdminOnly` que protegia a rota de modelos virou
+                          gate DA ABA — o subadmin de G&G precisa entrar pela fila. */}
                       <Route
-                        path="certificados/modelos"
-                        element={<AdminSectorFeatureOnly feature="gente-gestao"><StrictAdminOnly><CertificateTemplatesSection /></StrictAdminOnly></AdminSectorFeatureOnly>}
+                        path="certificados"
+                        element={<AdminSectorFeatureOnly feature="gente-gestao"><CertificatesSection /></AdminSectorFeatureOnly>}
                       />
+                      {/* Rotas antigas: link salvo e favorito não podem quebrar por
+                          causa de uma reorganização de menu. */}
                       <Route
-                        path="certificados/fila"
-                        element={<AdminSectorFeatureOnly feature="gente-gestao"><CertificateRequestsSection /></AdminSectorFeatureOnly>}
+                        path="treinamentos"
+                        element={
+                          <AdminSectorFeatureOnly feature="gente-gestao">
+                            <TrainingSection />
+                          </AdminSectorFeatureOnly>
+                        }
                       />
+                      {/* Ciclos de metas (Metas e OKRs): a escrita na API é da
+                          administração de metas — ADMIN pleno ou SUBADMIN de G&G. */}
+                      <Route
+                        path="metas"
+                        element={
+                          <AdminSectorFeatureOnly feature="gente-gestao">
+                            <OkrCyclesSection />
+                          </AdminSectorFeatureOnly>
+                        }
+                      />
+                      <Route path="certificados/modelos" element={<Navigate to="/admin/certificados?aba=modelos" replace />} />
+                      <Route path="certificados/fila" element={<Navigate to="/admin/certificados?aba=fila" replace />} />
                       <Route path="desenvolvimento" element={<StrictAdminOnly><DevelopmentSection /></StrictAdminOnly>} />
                       <Route path="retrospectivas" element={<AdminSectorFeatureOnly feature="desenvolvimento-produto"><RetrospectivesSection /></AdminSectorFeatureOnly>} />
                       <Route path="eventos" element={<AdminSectorFeatureOnly feature="desenvolvimento-produto"><CalendarEventsSection /></AdminSectorFeatureOnly>} />
                       <Route path="moderacao" element={<ModerationSection />} />
+                      <Route
+                        path="tipos-de-comunicacao"
+                        element={
+                          <AdminSectorFeatureOnly feature="gente-gestao">
+                            <CorporatePostTagsSection />
+                          </AdminSectorFeatureOnly>
+                        }
+                      />
                       <Route path="desafios" element={<ChallengesSection />} />
                       <Route path="resultados-desafios" element={<ChallengeSubmissionsSection />} />
-                      <Route path="clima" element={<AdminSectorFeatureOnly feature="gente-gestao"><MoodOverviewSection /></AdminSectorFeatureOnly>} />
+                      {/* O termômetro virou a aba Clima de People Analytics
+                          (Documento 3, seção 6). A rota antiga fica de pé como
+                          redirecionamento: ela está em favorito e em link de
+                          e-mail, e virar 404 seria trocar duplicidade por perda. */}
+                      <Route path="clima" element={<Navigate to="/admin/pessoas?aba=clima" replace />} />
                       <Route path="topicos-1-1" element={<AdminSectorFeatureOnly feature="gente-gestao"><OneOnOneTopicsSection /></AdminSectorFeatureOnly>} />
                       <Route path="paineis" element={<AdminSectorFeatureOnly feature="gente-gestao"><HrDashboardsSection /></AdminSectorFeatureOnly>} />
                       <Route
@@ -662,6 +881,7 @@ export function App() {
                       <Route path="cultura/manuais" element={<AdminSectorFeatureOnly feature="gente-gestao"><ManualsSection /></AdminSectorFeatureOnly>} />
                       <Route path="cultura/beneficios" element={<AdminSectorFeatureOnly feature="gente-gestao"><BenefitsSection /></AdminSectorFeatureOnly>} />
                       <Route path="cultura/kit-visual" element={<AdminSectorFeatureOnly feature="gente-gestao"><KitVisualSection /></AdminSectorFeatureOnly>} />
+                      <Route path="cultura/todos-pelos-9" element={<AdminSectorFeatureOnly feature="gente-gestao"><BonusProgramSection /></AdminSectorFeatureOnly>} />
                       <Route path="galeria" element={<AdminSectorFeatureOnly feature="gente-gestao"><EventAlbumsSection /></AdminSectorFeatureOnly>} />
                       <Route path="resenha" element={<AdminResenhaPage />} />
                       <Route path="escritorio" element={<StrictAdminOnly><OfficeSection /></StrictAdminOnly>} />

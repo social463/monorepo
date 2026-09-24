@@ -35,6 +35,7 @@ import { CalendarMonthGrid } from './CalendarMonthGrid'
 import { CalendarTimeGrid } from './CalendarTimeGrid'
 import { CalendarEventDetails } from './CalendarEventDetails'
 import { CalendarEventModal } from './CalendarEventModal'
+import { CampaignPostsStrip } from './CampaignPostsStrip'
 
 /**
  * "Hoje" precisa ser o dia civil **local**: usar UTC faria "hoje" virar amanhã
@@ -75,7 +76,7 @@ export function CalendarPage() {
   const [editor, setEditor] = useState<{ eventId: string | null } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const { occurrences, types, isLoading, isError } = useCalendarData({ view, cursor })
+  const { occurrences, types, campaignPosts, isLoading, isError } = useCalendarData({ view, cursor })
 
   const podeCadastrar = canManageCalendarEvents(user?.role, user?.sectorFeatures ?? [], user?.adminAccess)
   const podeMarcarInterno = canSeeInternalCalendarEvents(user?.role, user?.sectorFeatures ?? [], user?.adminAccess)
@@ -303,6 +304,11 @@ export function CalendarPage() {
           Erro ao carregar o calendário.
         </div>
       )}
+
+      {/* O calendário editorial de Campanhas vem ANTES da grade: é a agenda do
+          que vai sair, e quem enxerga (G&G) abre o calendário justamente para
+          cruzar as duas coisas. Documento 4, seção 13.2. */}
+      {!isLoading && !isError && <CampaignPostsStrip posts={campaignPosts} />}
 
       {!isLoading && !isError && view === 'month' && (
         <CalendarMonthGrid
